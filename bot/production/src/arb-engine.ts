@@ -276,9 +276,11 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
   const topMatches: { df: string; jup: string; score: number; spread1: number; spread2: number }[] = [];
 
   for (const df of dflowMarkets) {
-    // On dev API, crypto markets show as "finalized" but still have valid prices
-    // Only skip if both prices are zero (truly dead market)
-    if (df.yes_price === 0 && df.no_price === 0) continue;
+    // Use yesAsk for buying YES (what you pay), noBid is irrelevant for arb
+    // For arb: buy YES at yesAsk, buy NO at noAsk (taker prices)
+    const dfYes = df.yesAsk ?? df.yesBid ?? 0;
+    const dfNo = df.noAsk ?? df.noBid ?? 0;
+    if (dfYes === 0 && dfNo === 0) continue;
 
     for (const jm of jupMarkets) {
       if (jm.status !== "open") continue;
@@ -293,9 +295,6 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
       // If prices look like micro-units (> 10 USD), convert
       if (jYes > 10) jYes = jYes / 1_000_000;
       if (jNo > 10) jNo = jNo / 1_000_000;
-
-      const dfYes = df.yes_price;
-      const dfNo = df.no_price;
 
       const spread1 = 1 - (dfYes + jNo);
       const spread2 = 1 - (dfNo + jYes);
@@ -346,12 +345,11 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
     console.log(`  score=${m.score.toFixed(2)} spread1=${(m.spread1*100).toFixed(1)}% spread2=${(m.spread2*100).toFixed(1)}% | DF: "${m.df}" ↔ JUP: "${m.jup}"`);
   }
 
-  // Also log sample prices from each platform
+  // Log sample prices from each platform
   if (dflowMarkets.length > 0) {
-    const sample = dflowMarkets.slice(0, 3);
     console.log(`[DFLOW] Sample markets:`);
-    for (const m of sample) {
-      console.log(`  "${(m.title||m.ticker).slice(0,60)}" YES=${m.yes_price} NO=${m.no_price} status=${m.status}`);
+    for (const m of dflowMarkets.slice(0, 3)) {
+      console.log(`  "${(m.title||m.ticker).slice(0,60)}" yesBid=${m.yesBid} yesAsk=${m.yesAsk} noBid=${m.noBid} noAsk=${m.noAsk} status=${m.status}`);
     }
   }
   if (jupMarkets.length > 0) {
