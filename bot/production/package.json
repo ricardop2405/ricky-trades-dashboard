@@ -1,0 +1,23 @@
+{
+  "name": "ricky-trades-bot",
+  "version": "1.0.0",
+  "description": "Ricky Trades — Solana MEV + Prediction Market Arbitrage Bot",
+  "scripts": {
+    "mev": "ts-node src/mev-engine.ts",
+    "arb": "ts-node src/arb-engine.ts",
+    "both": "concurrently \"npm run mev\" \"npm run arb\"",
+    "start": "npm run both"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0",
+    "@supabase/supabase-js": "^2.49.1",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5",
+    "@types/node": "^20.14.0"
+  }
+}
