@@ -36,7 +36,7 @@ Deno.serve(async (req) => {
 
     // 2. Upsert markets into prediction_markets
     const marketsToUpsert = polyMarkets
-      .filter((m) => m.outcomePrices && m.active && !m.closed && m.condition_id)
+      .filter((m) => m.outcomePrices && m.active && !m.closed && (m.id || m.condition_id))
       .map((m) => {
         let prices: number[] = [];
         try {
@@ -44,7 +44,7 @@ Deno.serve(async (req) => {
         } catch { /* skip */ }
         return {
           platform: "polymarket",
-          external_id: m.condition_id,
+          external_id: m.condition_id || m.id,
           question: m.question,
           yes_price: prices[0] ?? 0,
           no_price: prices[1] ?? 0,
