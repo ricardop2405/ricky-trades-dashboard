@@ -4,9 +4,10 @@ import { CheckCircle2, XCircle, Activity } from "lucide-react";
 
 interface PerformanceLogProps {
   bundles: BundleResult[];
+  onBundleClick?: (bundle: BundleResult) => void;
 }
 
-export const PerformanceLog = ({ bundles }: PerformanceLogProps) => {
+export const PerformanceLog = ({ bundles, onBundleClick }: PerformanceLogProps) => {
   const successCount = bundles.filter((b) => b.status === "success").length;
   const revertedCount = bundles.filter((b) => b.status === "reverted").length;
   const totalProfit = bundles.reduce((sum, b) => sum + b.profit, 0);
@@ -36,7 +37,8 @@ export const PerformanceLog = ({ bundles }: PerformanceLogProps) => {
               key={bundle.id}
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`rounded px-3 py-2 font-mono text-xs ${
+              onClick={() => onBundleClick?.(bundle)}
+              className={`rounded px-3 py-2 font-mono text-xs cursor-pointer hover:ring-1 hover:ring-primary/30 transition-all ${
                 bundle.status === "success"
                   ? "bg-success/5 border border-success/15"
                   : "bg-destructive/5 border border-destructive/15"
