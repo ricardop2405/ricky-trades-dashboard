@@ -287,8 +287,20 @@ const Arbitrage = () => {
                               key={opp.id}
                               className="border-border/20 hover:bg-secondary/30"
                             >
-                              <TableCell className="text-xs font-mono max-w-[300px] truncate">
-                                {mktA?.question ?? opp.market_a_id.slice(0, 8)}
+                          <TableCell className="text-xs font-mono max-w-[300px]">
+                                <div className="truncate">{mktA?.question ?? opp.market_a_id.slice(0, 8)}</div>
+                                {opp.market_a_id !== opp.market_b_id && (
+                                  <div className="flex items-center gap-1 mt-0.5">
+                                    <Badge variant="outline" className="text-[8px] font-mono border-primary/30 text-primary px-1 py-0">
+                                      {mktA?.platform?.toUpperCase() ?? "?"}
+                                    </Badge>
+                                    <ArrowRight className="h-2 w-2 text-muted-foreground" />
+                                    <Badge variant="outline" className="text-[8px] font-mono border-accent/30 text-accent px-1 py-0">
+                                      {markets.get(opp.market_b_id)?.platform?.toUpperCase() ?? "?"}
+                                    </Badge>
+                                    <span className="text-[8px] text-muted-foreground">CROSS-PLATFORM</span>
+                                  </div>
+                                )}
                               </TableCell>
                               <TableCell className="text-xs font-mono">
                                 <span className="text-primary">
@@ -415,9 +427,9 @@ const Arbitrage = () => {
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-muted-foreground" />
+                  <div className="h-2 w-2 rounded-full bg-primary animate-pulse" />
                   <span className="text-xs font-mono text-muted-foreground">
-                    Drift BET — Coming soon
+                    Manifold Markets — {[...markets.values()].filter(m => m.platform === "manifold").length} markets
                   </span>
                 </div>
               </div>
