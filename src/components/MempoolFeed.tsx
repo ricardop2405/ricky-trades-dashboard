@@ -4,9 +4,10 @@ import { ArrowRightLeft, AlertTriangle } from "lucide-react";
 
 interface MempoolFeedProps {
   trades: WhaleTrade[];
+  onTradeClick?: (trade: WhaleTrade) => void;
 }
 
-export const MempoolFeed = ({ trades }: MempoolFeedProps) => {
+export const MempoolFeed = ({ trades, onTradeClick }: MempoolFeedProps) => {
   return (
     <div className="glass rounded-lg overflow-hidden h-full flex flex-col">
       <div className="px-4 py-3 border-b border-border/30 flex items-center justify-between">
@@ -32,7 +33,8 @@ export const MempoolFeed = ({ trades }: MempoolFeedProps) => {
                 animate={{ opacity: 1, x: 0, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
                 transition={{ duration: 0.2 }}
-                className={`rounded px-3 py-2 font-mono text-xs ${
+                onClick={() => onTradeClick?.(trade)}
+                className={`rounded px-3 py-2 font-mono text-xs cursor-pointer hover:ring-1 hover:ring-accent/30 transition-all ${
                   isWhale
                     ? "bg-warning/5 border border-warning/20"
                     : "bg-secondary/30 border border-transparent"

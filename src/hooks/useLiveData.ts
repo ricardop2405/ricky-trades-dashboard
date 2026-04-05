@@ -1,9 +1,8 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import type { WhaleTrade, BundleResult } from "@/lib/mockData";
-import { generateWhaleTrade, generateBundleResult } from "@/lib/mockData";
+import type { WhaleTrade, BundleResult, TokenStat, WalletStat, VolumeBucket } from "@/lib/mockData";
+import { generateWhaleTrade, generateBundleResult, deriveTokenStats, deriveWalletStats, deriveVolumeBuckets } from "@/lib/mockData";
 
-// DB row types from Supabase
 type DbWhaleTrade = {
   id: string;
   wallet: string;
@@ -58,14 +57,14 @@ function dbBundleToBundleResult(row: DbBundleResult): BundleResult {
   };
 }
 
-const MAX_ITEMS = 50;
+const MAX_ITEMS = 100;
 
 export function useLiveData(isRunning: boolean) {
   const [trades, setTrades] = useState<WhaleTrade[]>([]);
   const [bundles, setBundles] = useState<BundleResult[]>([]);
   const [useRealData, setUseRealData] = useState(false);
 
-  // Try to load initial data from Supabase
+  // Load initial data
   useEffect(() => {
     async function loadInitial() {
       const { data: tradeRows } = await supabase
@@ -92,7 +91,7 @@ export function useLiveData(isRunning: boolean) {
     loadInitial();
   }, []);
 
-  // Real-time subscriptions from Supabase
+  // Real-time subscriptions
   useEffect(() => {
     const channel = supabase
       .channel("live-data")
@@ -121,13 +120,11 @@ export function useLiveData(isRunning: boolean) {
     };
   }, []);
 
-  // Simulated data fallback when no real bot is running
+  // Simulated data fallback
   const tick = useCallback(() => {
-    if (useRealData) return; // Skip simulation if real data is flowing
-
+    if (useRealData) return;
     const trade = generateWhaleTrade();
     setTrades((prev) => [trade, ...prev].slice(0, MAX_ITEMS));
-
     if (trade.amountUSD >= 20000) {
       const bundle = generateBundleResult(trade);
       setBundles((prev) => [bundle, ...prev].slice(0, MAX_ITEMS));
@@ -141,5 +138,10 @@ export function useLiveData(isRunning: boolean) {
     return () => clearInterval(interval);
   }, [isRunning, tick, useRealData]);
 
-  return { trades, bundles, useRealData };
+  // Derived stats
+  const tokenStats = useMemo(() => deriveTokenStats(trades), [trades]);
+  const walletStats = useMemo(() => deriveWalletStats(trades), [trades]);
+  const volumeBuckets = useMemo(() => deriveVolumeBuckets(trades), [trades]);
+
+  return { trades, bundles, useRealData, tokenStats, walletStats, volumeBuckets };
 }
