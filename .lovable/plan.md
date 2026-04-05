@@ -1,71 +1,68 @@
 
 
-# Maximize the Dashboard for Live Trade Visibility
+# Cross-Prediction-Market Arbitrage Scanner & Auto-Executor
 
-The bot is running and writing to `whale_trades` and `bundle_results` tables. The dashboard already has real-time subscriptions via Supabase. The goal is to upgrade the dashboard to show as much trade data as possible with better visualization and more information density.
+## The Strategy
 
-## What we'll build
+Prediction markets price YES/NO outcomes. If Polymarket prices "Trump wins" YES at $0.62 and another platform prices NO at $0.35, buying both costs $0.97 — one MUST pay $1.00, netting $0.03 guaranteed profit per share.
 
-1. **Enable realtime on both tables** -- Add a migration to enable `supabase_realtime` publication for `whale_trades` and `bundle_results` so the existing realtime subscriptions actually work.
+The bot scans for these mispricings across platforms and auto-executes.
 
-2. **Lower the display threshold** -- The bot filters at $50k on the VPS side, but the dashboard mempool feed highlights at $20k. We'll keep showing all trades that come in from the bot.
+## Reality Check: Atomicity
 
-3. **Add a Top Tokens panel** -- New component showing which tokens are being traded most frequently and by volume, updated in real-time from the whale_trades data.
+True atomic execution (all-or-nothing) is only possible on the **same chain**. Cross-platform trades across different chains (e.g., Polymarket on Polygon vs Drift on Solana) cannot be atomic — prices can move between your two orders. We can minimize this with near-simultaneous execution.
 
-4. **Add a Whale Wallet Tracker** -- Show repeat wallets, how many times they've traded, and total volume. Helps identify smart money.
+**Same-chain atomic options:**
+- Polymarket internal (YES + NO on same market if mispriced vs $1)
+- Multiple Polymarket markets on same event
 
-5. **Add a Live Trade Volume chart** -- Replace the static mock price chart with a real-time volume chart built from actual `whale_trades` data, showing trade volume over time.
+**Cross-platform (near-simultaneous, not atomic):**
+- Polymarket (Polygon) + Drift BET (Solana)
 
-6. **Add a 24h P&L Summary card** -- Show profit/loss over the last 24 hours from `bundle_results`, with a mini sparkline.
+## What We'll Build
 
-7. **Expand the stats bar** -- Add win streak, largest single profit, total trades monitored, and trades/hour metrics.
+### 1. Edge Function: Prediction Market Scanner
+Polls prediction market APIs every 30s, matches events across platforms, calculates arbitrage spread.
 
-8. **Add trade detail drawer** -- Click any trade in the mempool feed or performance log to see full details including tx signature link to Solscan.
+**APIs to integrate:**
+- **Polymarket** — public CLOB API (no key needed), Polygon chain
+- **Drift BET** — Solana-based, uses Drift protocol API
 
-9. **Responsive layout improvements** -- Make the grid work better on the 654px viewport, stack panels vertically on smaller screens.
+### 2. New Database Tables
+- `prediction_markets` — cached market data from each platform
+- `arb_opportunities` — detected mispricings with spread, confidence, status
+- `arb_executions` — execution results (placed orders, fills, P&L)
 
-## Database changes
+### 3. Dashboard Page
+New `/arbitrage` page showing:
+- Live arb opportunities ranked by spread
+- Execution history with P&L
+- Platform connection status
 
-**Migration**: Enable realtime publication for both tables:
-```sql
-ALTER PUBLICATION supabase_realtime ADD TABLE public.whale_trades;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.bundle_results;
-```
+### 4. Execution Engine (VPS bot addition)
+New `bot/arb-engine.ts` that:
+- Subscribes to arb_opportunities table via Supabase realtime
+- Places near-simultaneous orders on both platforms
+- Logs results to arb_executions
 
-No new tables needed -- all new components derive from existing `whale_trades` and `bundle_results` data.
+## Technical Details
 
-## Files to create/modify
+**Polymarket API** (free, no auth):
+- `GET https://clob.polymarket.com/markets` — list markets
+- `GET https://clob.polymarket.com/prices?token_id=X` — get prices
 
-| File | Action |
-|------|--------|
-| `supabase/migrations/enable_realtime.sql` | New -- enable realtime |
-| `src/components/TopTokens.tsx` | New -- token frequency/volume panel |
-| `src/components/WalletTracker.tsx` | New -- repeat whale wallet tracker |
-| `src/components/VolumeChart.tsx` | New -- real-time volume over time |
-| `src/components/TradeDetailDrawer.tsx` | New -- click-to-inspect trade details with Solscan links |
-| `src/components/StatsBar.tsx` | Modify -- add more metrics |
-| `src/components/MempoolFeed.tsx` | Modify -- add click handler for detail drawer |
-| `src/components/PerformanceLog.tsx` | Modify -- add click handler for detail drawer |
-| `src/components/PriceChart.tsx` | Replace with real volume chart |
-| `src/hooks/useLiveData.ts` | Modify -- compute derived stats (top tokens, wallet tracking, volume buckets) |
-| `src/pages/Index.tsx` | Modify -- new layout with all panels |
-| `src/lib/mockData.ts` | Modify -- add types for new derived data |
+**Drift BET API**:
+- Uses Drift SDK on Solana (your existing Solana wallet works)
 
-## Layout (desktop)
+**Minimum viable arb**: Spread > 2% after fees (Polymarket ~2% fee, Drift ~0.1%)
 
-```text
-┌─────────────────────────────────────────────────────┐
-│ RICKY TRADES COMMAND          Status Indicators     │
-├─────────────────────────────────────────────────────┤
-│ Stats: Profit | Bundles | Rate | Latency | Streak  │
-├────────────┬──────────────────────┬─────────────────┤
-│ MEMPOOL    │ VOLUME CHART         │ TOP TOKENS      │
-│ FEED       │                      │                 │
-│ (click     ├──────────────────────┤ WALLET TRACKER  │
-│  to see    │ PERFORMANCE LOG      │                 │
-│  details)  │                      │ CONTROLS        │
-├────────────┴──────────────────────┴─────────────────┤
-│ Trade Detail Drawer (slides up on click)            │
-└─────────────────────────────────────────────────────┘
-```
+**Your $50 budget**: Prediction market shares cost $0.01-$0.99 each, so you can buy many shares. A 3% arb on $50 split across both sides = ~$0.75 profit per opportunity. Much more viable than MEV with $50.
+
+## Implementation Steps
+
+1. Create database tables for markets, opportunities, executions
+2. Build edge function to scan Polymarket API and find arb spreads
+3. Add dashboard page with live arb opportunities
+4. Build VPS execution engine for auto-trading
+5. Connect to Drift BET for cross-platform scanning
 
