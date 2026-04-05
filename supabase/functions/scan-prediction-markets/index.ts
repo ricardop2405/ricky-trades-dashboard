@@ -45,13 +45,12 @@ Deno.serve(async (req) => {
     const jupApiKey = Deno.env.get("JUP_PREDICT_API_KEY") || "";
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // ── 1. Fetch ALL DFlow markets (paginate, no isInitialized filter) ──
-    // 5/15-min crypto markets reset every cycle as "uninitialized"
+    // ── 1. Fetch active DFlow markets with correct field mapping ──
     let dflowMarkets: any[] = [];
     let dfCursor: string | null = null;
     try {
       for (let page = 0; page < 10; page++) {
-        const params = new URLSearchParams({ limit: "100" });
+        const params = new URLSearchParams({ limit: "100", status: "active" });
         if (dfCursor) params.set("cursor", dfCursor);
 
         const dfRes = await fetch(`${DFLOW_API}/api/v1/markets?${params}`);
@@ -61,7 +60,7 @@ Deno.serve(async (req) => {
         const batch = Array.isArray(dfData) ? dfData : dfData.markets || dfData.data || [];
         dflowMarkets.push(...batch);
 
-        const nextCursor = dfData.cursor || dfData.next_cursor || dfData.pagination?.cursor;
+        const nextCursor = dfData.cursor || dfData.next_cursor;
         if (!nextCursor || batch.length < 100) break;
         dfCursor = nextCursor;
       }
@@ -69,17 +68,18 @@ Deno.serve(async (req) => {
       console.error("DFlow fetch error:", e);
     }
 
+    // DFlow API returns yesBid/yesAsk/noBid/noAsk (not yes_price/no_price)
     const dflowUpserts = dflowMarkets
-      .filter((m: any) => m.ticker && (m.yes_price > 0 || m.no_price > 0))
+      .filter((m: any) => m.ticker && (m.yesBid != null || m.yesAsk != null))
       .map((m: any) => ({
         platform: "dflow",
         external_id: m.ticker,
         question: m.title || m.ticker,
-        yes_price: m.yes_price || 0,
-        no_price: m.no_price || 0,
+        yes_price: m.yesAsk ?? m.yesBid ?? 0,
+        no_price: m.noAsk ?? m.noBid ?? 0,
         volume: m.volume || 0,
-        end_date: m.expiration_time || null,
-        category: m.series_ticker || null,
+        end_date: m.expirationTime ? new Date(m.expirationTime * 1000).toISOString() : null,
+        category: m.seriesTicker || m.eventTicker || null,
         url: null,
         last_synced_at: new Date().toISOString(),
       }));
