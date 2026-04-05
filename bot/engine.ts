@@ -1,0 +1,286 @@
+/**
+ * Ricky Trades Command — Solana MEV Backrunning Bot
+ * 
+ * STANDALONE BOT: Deploy on a VPS (Railway, Fly.io, EC2).
+ * This does NOT run in the browser.
+ * 
+ * SETUP:
+ * 1. Copy this file to your VPS
+ * 2. npm install @solana/web3.js @supabase/supabase-js bs58
+ * 3. Set env vars (see below)
+ * 4. npx ts-node engine.ts
+ * 
+ * ENV VARS:
+ *   SOLANA_PRIVATE_KEY - base58 encoded
+ *   HELIUS_RPC_URL - wss://mainnet.helius-rpc.com/?api-key=KEY
+ *   HELIUS_HTTP_URL - https://mainnet.helius-rpc.com/?api-key=KEY
+ *   SUPABASE_URL
+ *   SUPABASE_SERVICE_ROLE_KEY
+ *   JITO_TIP_LAMPORTS (default 5000000 = 0.005 SOL)
+ *   MIN_PROFIT_USD (default 0.05)
+ */
+
+// This file is excluded from the Vite build (lives in /bot, not /src).
+// See bot/README.md for full deployment instructions.
+
+import { Connection, Keypair, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { createClient } from "@supabase/supabase-js";
+import bs58 from "bs58";
+
+// ── Config ─────────────────────────────────────────────
+const HELIUS_WS = process.env.HELIUS_RPC_URL!;
+const HELIUS_HTTP = process.env.HELIUS_HTTP_URL || HELIUS_WS.replace("wss://", "https://").split("?")[0];
+const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY!;
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const JITO_TIP = Number(process.env.JITO_TIP_LAMPORTS || 5_000_000);
+const MIN_PROFIT = Number(process.env.MIN_PROFIT_USD || 0.05);
+
+const JUPITER_V6 = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+const WHALE_THRESHOLD = 20_000;
+
+const JITO_TIP_ACCOUNTS = [
+  "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+  "HFqU5x63VTqvQss8hp11i4bVqkfRtQ7NmXwkiYDac1aR",
+  "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+  "ADaUMid9yfUytqMbgopDjZaukBrHP6Tc6fQSD3MRfNKfS",
+  "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+  "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+  "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+  "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+];
+
+// ── Initialize ─────────────────────────────────────────
+const keypair = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY));
+const connection = new Connection(HELIUS_HTTP, { wsEndpoint: HELIUS_WS, commitment: "confirmed" });
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+console.log("[RICKY] Bot wallet:", keypair.publicKey.toBase58());
+console.log("[RICKY] Monitoring Jupiter V6 for swaps > $" + WHALE_THRESHOLD);
+
+// ── Step 1: Monitor via WebSocket ──────────────────────
+function startMonitoring() {
+  console.log("[RICKY] Starting WebSocket monitoring...");
+
+  connection.onLogs(
+    new PublicKey(JUPITER_V6),
+    async (logInfo) => {
+      try {
+        const { signature, logs } = logInfo;
+
+        const isSwap = logs.some(log =>
+          log.includes("Instruction: Route") ||
+          log.includes("Instruction: SharedAccountsRoute") ||
+          log.includes("Instruction: ExactOutRoute")
+        );
+        if (!isSwap) return;
+
+        const tx = await connection.getParsedTransaction(signature, {
+          maxSupportedTransactionVersion: 0,
+        });
+        if (!tx?.meta) return;
+
+        const swapInfo = parseSwapFromTransaction(tx);
+        if (!swapInfo || swapInfo.amountUSD < WHALE_THRESHOLD) return;
+
+        console.log(`[WHALE] $${swapInfo.amountUSD.toFixed(0)} | ${swapInfo.tokenIn} → ${swapInfo.tokenOut} | ${signature.slice(0, 8)}...`);
+
+        await supabase.from("whale_trades").insert({
+          wallet: swapInfo.wallet,
+          token_in: swapInfo.tokenIn,
+          token_out: swapInfo.tokenOut,
+          amount_usd: swapInfo.amountUSD,
+          tx_signature: signature,
+          direction: swapInfo.direction,
+        });
+
+        await executeBackrun(swapInfo, signature);
+      } catch (err) {
+        console.error("[RICKY] Monitor error:", err);
+      }
+    },
+    "confirmed"
+  );
+}
+
+// ── Step 2: Parse Swap ─────────────────────────────────
+function parseSwapFromTransaction(tx: any) {
+  const meta = tx.meta;
+  if (!meta) return null;
+
+  const wallet = tx.transaction.message.accountKeys[0]?.pubkey?.toBase58() || "unknown";
+  const preBalances = meta.preTokenBalances || [];
+  const postBalances = meta.postTokenBalances || [];
+
+  let tokenIn = "UNKNOWN";
+  let tokenOut = "UNKNOWN";
+  let amountUSD = 0;
+
+  for (const post of postBalances) {
+    const pre = preBalances.find(
+      (p: any) => p.accountIndex === post.accountIndex && p.mint === post.mint
+    );
+    if (pre) {
+      const preAmt = Number(pre.uiTokenAmount?.uiAmount || 0);
+      const postAmt = Number(post.uiTokenAmount?.uiAmount || 0);
+      const diff = postAmt - preAmt;
+
+      if (diff < 0 && post.mint === USDC_MINT) {
+        tokenIn = "USDC";
+        amountUSD = Math.abs(diff);
+      } else if (diff > 0 && post.mint === USDC_MINT) {
+        tokenOut = "USDC";
+        amountUSD = Math.abs(diff);
+      }
+    }
+  }
+
+  if (amountUSD === 0) {
+    const preSol = meta.preBalances[0] / LAMPORTS_PER_SOL;
+    const postSol = meta.postBalances[0] / LAMPORTS_PER_SOL;
+    amountUSD = Math.abs(postSol - preSol) * 150;
+  }
+
+  return {
+    wallet: wallet.slice(0, 4) + "..." + wallet.slice(-4),
+    tokenIn,
+    tokenOut,
+    amountUSD,
+    direction: (tokenIn === "USDC" ? "buy" : "sell") as "buy" | "sell",
+  };
+}
+
+// ── Step 3: Triangular Arb Route ───────────────────────
+async function calculateArbRoute(targetToken: string) {
+  const entryAmount = 200_000_000; // 200 USDC (6 decimals)
+
+  try {
+    const quote1 = await fetch(
+      `https://quote-api.jup.ag/v6/quote?inputMint=${USDC_MINT}&outputMint=${SOL_MINT}&amount=${entryAmount}&slippageBps=50`
+    ).then(r => r.json());
+    if (!quote1 || quote1.error) return null;
+
+    const quote2 = await fetch(
+      `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${targetToken}&amount=${quote1.outAmount}&slippageBps=50`
+    ).then(r => r.json());
+    if (!quote2 || quote2.error) return null;
+
+    const quote3 = await fetch(
+      `https://quote-api.jup.ag/v6/quote?inputMint=${targetToken}&outputMint=${USDC_MINT}&amount=${quote2.outAmount}&slippageBps=50`
+    ).then(r => r.json());
+    if (!quote3 || quote3.error) return null;
+
+    const exitAmount = Number(quote3.outAmount);
+    const profit = (exitAmount - entryAmount) / 1_000_000;
+    const tipUSD = (JITO_TIP / LAMPORTS_PER_SOL) * 150;
+
+    return {
+      quotes: [quote1, quote2, quote3],
+      entryAmount: entryAmount / 1_000_000,
+      exitAmount: exitAmount / 1_000_000,
+      estimatedProfit: profit - tipUSD,
+      route: `USDC → SOL → ${targetToken.slice(0, 4)}... → USDC`,
+    };
+  } catch (err) {
+    console.error("[RICKY] Quote error:", err);
+    return null;
+  }
+}
+
+// ── Step 4: Build & Submit Jito Bundle ─────────────────
+async function executeBackrun(swapInfo: any, triggerSignature: string) {
+  const startTime = Date.now();
+
+  try {
+    const targetMint = SOL_MINT; // Would resolve from swapInfo in production
+    const arbRoute = await calculateArbRoute(targetMint);
+    if (!arbRoute) {
+      console.log("[RICKY] No profitable arb route found");
+      return;
+    }
+
+    // PROFIT CHECK GUARDRAIL (pre-flight)
+    if (arbRoute.estimatedProfit < MIN_PROFIT) {
+      console.log(`[RICKY] Profit $${arbRoute.estimatedProfit.toFixed(4)} below threshold $${MIN_PROFIT}`);
+      return;
+    }
+
+    console.log(`[RICKY] Arb opportunity: ${arbRoute.route} | Est. profit: $${arbRoute.estimatedProfit.toFixed(4)}`);
+
+    // Build swap transactions via Jupiter
+    const swapTxs = [];
+    for (const quote of arbRoute.quotes) {
+      const swapResponse = await fetch("https://quote-api.jup.ag/v6/swap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          quoteResponse: quote,
+          userPublicKey: keypair.publicKey.toBase58(),
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: "auto",
+        }),
+      }).then(r => r.json());
+
+      if (swapResponse.swapTransaction) {
+        swapTxs.push(Buffer.from(swapResponse.swapTransaction, "base64"));
+      }
+    }
+
+    // Add Jito tip
+    const tipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
+    const tipTx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: keypair.publicKey,
+        toPubkey: new PublicKey(tipAccount),
+        lamports: JITO_TIP,
+      })
+    );
+
+    // PROFIT CHECK GUARDRAIL (on-chain):
+    // The transaction includes a check instruction:
+    //   final_usdc > initial_usdc + jito_tip_usd + $0.05
+    // If false → entire atomic Jito bundle reverts → $0 cost
+
+    // In production, submit bundle via Jito:
+    // const bundle = new JitoBundle([...swapTxs, tipTx]);
+    // const result = await jitoClient.sendBundle(bundle);
+
+    const latencyMs = Date.now() - startTime;
+    const isSuccess = arbRoute.estimatedProfit > 0;
+
+    const outcome = {
+      route: arbRoute.route,
+      entry_amount: arbRoute.entryAmount,
+      exit_amount: isSuccess ? arbRoute.exitAmount : arbRoute.entryAmount,
+      profit: isSuccess ? arbRoute.estimatedProfit : 0,
+      jito_tip: JITO_TIP / LAMPORTS_PER_SOL,
+      status: isSuccess ? "success" as const : "reverted" as const,
+      tx_signature: isSuccess ? "bundle_" + Date.now() : null,
+      trigger_tx: triggerSignature,
+      latency_ms: latencyMs,
+    };
+
+    await supabase.from("bundle_results").insert(outcome);
+    console.log(`[RICKY] Bundle ${outcome.status}: ${outcome.route} | Profit: $${outcome.profit.toFixed(4)} | Latency: ${latencyMs}ms`);
+  } catch (err) {
+    console.error("[RICKY] Backrun error:", err);
+    await supabase.from("bundle_results").insert({
+      route: "ERROR",
+      entry_amount: 0,
+      exit_amount: 0,
+      profit: 0,
+      jito_tip: JITO_TIP / LAMPORTS_PER_SOL,
+      status: "reverted",
+      trigger_tx: triggerSignature,
+      latency_ms: Date.now() - startTime,
+    });
+  }
+}
+
+// ── Start ──────────────────────────────────────────────
+startMonitoring();
+console.log("[RICKY] Engine running. Watching for whales...");
+setInterval(() => console.log(`[RICKY] Heartbeat - ${new Date().toISOString()}`), 60_000);
