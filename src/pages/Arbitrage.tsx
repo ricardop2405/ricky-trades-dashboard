@@ -427,9 +427,9 @@ const Arbitrage = () => {
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-muted-foreground" />
+                  <div className="h-2 w-2 rounded-full bg-primary animate-pulse" />
                   <span className="text-xs font-mono text-muted-foreground">
-                    Drift BET — Coming soon
+                    Manifold Markets — {[...markets.values()].filter(m => m.platform === "manifold").length} markets
                   </span>
                 </div>
               </div>
