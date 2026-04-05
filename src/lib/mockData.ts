@@ -38,6 +38,76 @@ export interface PriceCandle {
   volume: number;
 }
 
+export interface TokenStat {
+  token: string;
+  tradeCount: number;
+  totalVolume: number;
+  buyCount: number;
+  sellCount: number;
+}
+
+export interface WalletStat {
+  wallet: string;
+  tradeCount: number;
+  totalVolume: number;
+  lastSeen: Date;
+  avgSize: number;
+}
+
+export interface VolumeBucket {
+  time: string;
+  volume: number;
+  tradeCount: number;
+}
+
+export function deriveTokenStats(trades: WhaleTrade[]): TokenStat[] {
+  const map = new Map<string, TokenStat>();
+  for (const t of trades) {
+    const token = t.direction === "buy" ? t.tokenOut : t.tokenIn;
+    const existing = map.get(token) || { token, tradeCount: 0, totalVolume: 0, buyCount: 0, sellCount: 0 };
+    existing.tradeCount++;
+    existing.totalVolume += t.amountUSD;
+    if (t.direction === "buy") existing.buyCount++;
+    else existing.sellCount++;
+    map.set(token, existing);
+  }
+  return Array.from(map.values()).sort((a, b) => b.totalVolume - a.totalVolume);
+}
+
+export function deriveWalletStats(trades: WhaleTrade[]): WalletStat[] {
+  const map = new Map<string, WalletStat>();
+  for (const t of trades) {
+    const existing = map.get(t.wallet) || { wallet: t.wallet, tradeCount: 0, totalVolume: 0, lastSeen: t.timestamp, avgSize: 0 };
+    existing.tradeCount++;
+    existing.totalVolume += t.amountUSD;
+    if (t.timestamp > existing.lastSeen) existing.lastSeen = t.timestamp;
+    map.set(t.wallet, existing);
+  }
+  return Array.from(map.values())
+    .map(w => ({ ...w, avgSize: w.totalVolume / w.tradeCount }))
+    .sort((a, b) => b.totalVolume - a.totalVolume);
+}
+
+export function deriveVolumeBuckets(trades: WhaleTrade[], bucketMinutes = 5): VolumeBucket[] {
+  if (trades.length === 0) return [];
+  const now = Date.now();
+  const bucketMs = bucketMinutes * 60 * 1000;
+  const bucketCount = 24; // show last N buckets
+  const buckets: VolumeBucket[] = [];
+
+  for (let i = bucketCount - 1; i >= 0; i--) {
+    const start = now - (i + 1) * bucketMs;
+    const end = now - i * bucketMs;
+    const inBucket = trades.filter(t => t.timestamp.getTime() >= start && t.timestamp.getTime() < end);
+    buckets.push({
+      time: new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      volume: inBucket.reduce((s, t) => s + t.amountUSD, 0),
+      tradeCount: inBucket.length,
+    });
+  }
+  return buckets;
+}
+
 let tradeIdCounter = 0;
 let bundleIdCounter = 0;
 
