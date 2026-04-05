@@ -318,8 +318,8 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
     const sample = jupMarkets.slice(0, 3);
     console.log(`[JUP] Sample markets:`);
     for (const m of sample) {
-      const yp = m.pricing?.buyYesPriceUsd || m.pricing?.yesPrice || 0;
-      const np = m.pricing?.buyNoPriceUsd || m.pricing?.noPrice || 0;
+      const yp = m.pricing?.buyYesPriceUsd ?? 0;
+      const np = m.pricing?.buyNoPriceUsd ?? 0;
       console.log(`  "${(m.metadata?.title||m.marketId).slice(0,60)}" YES_raw=${yp} NO_raw=${np} status=${m.status}`);
     }
   }
