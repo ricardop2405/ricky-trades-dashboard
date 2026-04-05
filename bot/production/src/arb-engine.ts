@@ -232,7 +232,10 @@ function matchScore(a: string, b: string): number {
 // ── Find Arb Opportunities ──────────────────────────────
 function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
-  const MATCH_THRESHOLD = 0.45;
+  const MATCH_THRESHOLD = 0.25; // Lowered — crypto titles are short (e.g. "BTC above 60000")
+
+  // Track top matches for debug logging
+  const topMatches: { df: string; jup: string; score: number; spread1: number; spread2: number }[] = [];
 
   for (const df of dflowMarkets) {
     if (df.status !== "open" && df.status !== "active") continue;
@@ -243,15 +246,28 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
       const dfTitle = df.title || df.ticker;
       const jTitle = jm.metadata?.title || jm.marketId;
       const score = matchScore(dfTitle, jTitle);
-      if (score < MATCH_THRESHOLD) continue;
+
+      // Jupiter prices — check if they're already in dollars or micro-units
+      let jYes = jm.pricing?.buyYesPriceUsd || jm.pricing?.yesPrice || 0;
+      let jNo = jm.pricing?.buyNoPriceUsd || jm.pricing?.noPrice || 0;
+      // If prices look like micro-units (> 100), convert
+      if (jYes > 10) jYes = jYes / 1_000_000;
+      if (jNo > 10) jNo = jNo / 1_000_000;
 
       const dfYes = df.yes_price;
       const dfNo = df.no_price;
-      const jYes = (jm.pricing?.buyYesPriceUsd || 0) / 1_000_000;
-      const jNo = (jm.pricing?.buyNoPriceUsd || 0) / 1_000_000;
+
+      const spread1 = 1 - (dfYes + jNo);
+      const spread2 = 1 - (dfNo + jYes);
+
+      // Track top matches regardless of threshold
+      if (score > 0.1) {
+        topMatches.push({ df: dfTitle.slice(0, 50), jup: jTitle.slice(0, 50), score, spread1, spread2 });
+      }
+
+      if (score < MATCH_THRESHOLD) continue;
 
       // Strategy 1: Buy YES on DFlow + NO on Jupiter
-      const spread1 = 1 - (dfYes + jNo);
       if (spread1 > CONFIG.MIN_SPREAD) {
         opps.push({
           dflow_ticker: df.ticker,
@@ -267,7 +283,6 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
       }
 
       // Strategy 2: Buy NO on DFlow + YES on Jupiter
-      const spread2 = 1 - (dfNo + jYes);
       if (spread2 > CONFIG.MIN_SPREAD) {
         opps.push({
           dflow_ticker: df.ticker,
@@ -284,7 +299,31 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
     }
   }
 
-  // Sort by best spread descending
+  // Log top 10 closest matches for debugging
+  topMatches.sort((a, b) => b.score - a.score);
+  console.log(`[MATCH] Top market matches (${topMatches.length} pairs with score > 0.1):`);
+  for (const m of topMatches.slice(0, 10)) {
+    console.log(`  score=${m.score.toFixed(2)} spread1=${(m.spread1*100).toFixed(1)}% spread2=${(m.spread2*100).toFixed(1)}% | DF: "${m.df}" ↔ JUP: "${m.jup}"`);
+  }
+
+  // Also log sample prices from each platform
+  if (dflowMarkets.length > 0) {
+    const sample = dflowMarkets.slice(0, 3);
+    console.log(`[DFLOW] Sample markets:`);
+    for (const m of sample) {
+      console.log(`  "${(m.title||m.ticker).slice(0,60)}" YES=${m.yes_price} NO=${m.no_price} status=${m.status}`);
+    }
+  }
+  if (jupMarkets.length > 0) {
+    const sample = jupMarkets.slice(0, 3);
+    console.log(`[JUP] Sample markets:`);
+    for (const m of sample) {
+      const yp = m.pricing?.buyYesPriceUsd || m.pricing?.yesPrice || 0;
+      const np = m.pricing?.buyNoPriceUsd || m.pricing?.noPrice || 0;
+      console.log(`  "${(m.metadata?.title||m.marketId).slice(0,60)}" YES_raw=${yp} NO_raw=${np} status=${m.status}`);
+    }
+  }
+
   return opps.sort((a, b) => b.best_spread - a.best_spread);
 }
 

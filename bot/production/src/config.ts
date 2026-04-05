@@ -31,7 +31,7 @@ export const CONFIG = {
 
   // Arb — DFlow + Jupiter Predict
   ARB_AMOUNT: parseFloat(process.env.ARB_AMOUNT_USD || "25"),
-  MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.03"),
+  MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.01"),
   SCAN_INTERVAL: parseInt(process.env.SCAN_INTERVAL_MS || "30000"),
 
   // DFlow API (dev endpoints — no key needed)
