@@ -14,6 +14,116 @@ export type Database = {
   }
   public: {
     Tables: {
+      arb_executions: {
+        Row: {
+          amount_usd: number
+          error_message: string | null
+          executed_at: string
+          fees: number
+          id: string
+          opportunity_id: string
+          realized_pnl: number
+          side_a_fill_price: number | null
+          side_a_tx: string | null
+          side_b_fill_price: number | null
+          side_b_tx: string | null
+          status: string
+        }
+        Insert: {
+          amount_usd?: number
+          error_message?: string | null
+          executed_at?: string
+          fees?: number
+          id?: string
+          opportunity_id: string
+          realized_pnl?: number
+          side_a_fill_price?: number | null
+          side_a_tx?: string | null
+          side_b_fill_price?: number | null
+          side_b_tx?: string | null
+          status?: string
+        }
+        Update: {
+          amount_usd?: number
+          error_message?: string | null
+          executed_at?: string
+          fees?: number
+          id?: string
+          opportunity_id?: string
+          realized_pnl?: number
+          side_a_fill_price?: number | null
+          side_a_tx?: string | null
+          side_b_fill_price?: number | null
+          side_b_tx?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "arb_executions_opportunity_id_fkey"
+            columns: ["opportunity_id"]
+            isOneToOne: false
+            referencedRelation: "arb_opportunities"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      arb_opportunities: {
+        Row: {
+          detected_at: string
+          expired_at: string | null
+          id: string
+          market_a_id: string
+          market_b_id: string
+          price_a: number
+          price_b: number
+          side_a: string
+          side_b: string
+          spread: number
+          status: string
+        }
+        Insert: {
+          detected_at?: string
+          expired_at?: string | null
+          id?: string
+          market_a_id: string
+          market_b_id: string
+          price_a: number
+          price_b: number
+          side_a: string
+          side_b: string
+          spread: number
+          status?: string
+        }
+        Update: {
+          detected_at?: string
+          expired_at?: string | null
+          id?: string
+          market_a_id?: string
+          market_b_id?: string
+          price_a?: number
+          price_b?: number
+          side_a?: string
+          side_b?: string
+          spread?: number
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "arb_opportunities_market_a_id_fkey"
+            columns: ["market_a_id"]
+            isOneToOne: false
+            referencedRelation: "prediction_markets"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "arb_opportunities_market_b_id_fkey"
+            columns: ["market_b_id"]
+            isOneToOne: false
+            referencedRelation: "prediction_markets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       bundle_results: {
         Row: {
           created_at: string
@@ -53,6 +163,51 @@ export type Database = {
           status?: string
           trigger_tx?: string
           tx_signature?: string | null
+        }
+        Relationships: []
+      }
+      prediction_markets: {
+        Row: {
+          category: string | null
+          created_at: string
+          end_date: string | null
+          external_id: string
+          id: string
+          last_synced_at: string
+          no_price: number
+          platform: string
+          question: string
+          url: string | null
+          volume: number
+          yes_price: number
+        }
+        Insert: {
+          category?: string | null
+          created_at?: string
+          end_date?: string | null
+          external_id: string
+          id?: string
+          last_synced_at?: string
+          no_price?: number
+          platform: string
+          question: string
+          url?: string | null
+          volume?: number
+          yes_price?: number
+        }
+        Update: {
+          category?: string | null
+          created_at?: string
+          end_date?: string | null
+          external_id?: string
+          id?: string
+          last_synced_at?: string
+          no_price?: number
+          platform?: string
+          question?: string
+          url?: string | null
+          volume?: number
+          yes_price?: number
         }
         Relationships: []
       }
