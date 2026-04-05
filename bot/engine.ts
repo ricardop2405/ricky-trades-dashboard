@@ -1,15 +1,15 @@
 /**
  * Ricky Trades Command — Solana MEV Backrunning Bot
- * 
+ *
  * STANDALONE BOT: Deploy on a VPS (Railway, Fly.io, EC2).
  * This does NOT run in the browser.
- * 
+ *
  * SETUP:
  * 1. Copy this file to your VPS
  * 2. npm install @solana/web3.js @supabase/supabase-js bs58
  * 3. Set env vars (see below)
  * 4. npx ts-node engine.ts
- * 
+ *
  * ENV VARS:
  *   SOLANA_PRIVATE_KEY - base58 encoded
  *   HELIUS_RPC_URL - wss://mainnet.helius-rpc.com/?api-key=KEY
@@ -18,28 +18,33 @@
  *   SUPABASE_SERVICE_ROLE_KEY
  *   JITO_TIP_LAMPORTS (default 5000000 = 0.005 SOL)
  *   MIN_PROFIT_USD (default 0.05)
+ *   WHALE_THRESHOLD_USD (default 20000)
+ *   PARSED_TX_MIN_INTERVAL_MS (default 1200)
+ *   RATE_LIMIT_BACKOFF_MS (default 2000)
+ *   MAX_GET_TX_RETRIES (default 4)
+ *   MAX_PENDING_SIGNATURES (default 200)
  */
-
-// This file is excluded from the Vite build (lives in /bot, not /src).
-// See bot/README.md for full deployment instructions.
 
 import { Connection, Keypair, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { createClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
 
-// ── Config ─────────────────────────────────────────────
 const HELIUS_WS = process.env.HELIUS_RPC_URL!;
-const HELIUS_HTTP = process.env.HELIUS_HTTP_URL || HELIUS_WS.replace("wss://", "https://").split("?")[0];
+const HELIUS_HTTP = process.env.HELIUS_HTTP_URL || HELIUS_WS.replace(/^wss:\/\//, "https://");
 const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY!;
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const JITO_TIP = Number(process.env.JITO_TIP_LAMPORTS || 5_000_000);
 const MIN_PROFIT = Number(process.env.MIN_PROFIT_USD || 0.05);
+const WHALE_THRESHOLD = Number(process.env.WHALE_THRESHOLD_USD || 20_000);
+const PARSED_TX_MIN_INTERVAL_MS = Number(process.env.PARSED_TX_MIN_INTERVAL_MS || 1_200);
+const RATE_LIMIT_BACKOFF_MS = Number(process.env.RATE_LIMIT_BACKOFF_MS || 2_000);
+const MAX_GET_TX_RETRIES = Number(process.env.MAX_GET_TX_RETRIES || 4);
+const MAX_PENDING_SIGNATURES = Number(process.env.MAX_PENDING_SIGNATURES || 200);
 
 const JUPITER_V6 = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
-const WHALE_THRESHOLD = 20_000;
 
 const JITO_TIP_ACCOUNTS = [
   "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
@@ -52,17 +57,121 @@ const JITO_TIP_ACCOUNTS = [
   "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
 ];
 
-// ── Initialize ─────────────────────────────────────────
+type PendingSignature = {
+  signature: string;
+};
+
 const keypair = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY));
 const connection = new Connection(HELIUS_HTTP, { wsEndpoint: HELIUS_WS, commitment: "confirmed" });
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-console.log("[RICKY] Bot wallet:", keypair.publicKey.toBase58());
-console.log("[RICKY] Monitoring Jupiter V6 for swaps > $" + WHALE_THRESHOLD);
+const pendingSignatures: PendingSignature[] = [];
+const queuedSignatures = new Set<string>();
+let isQueueWorkerRunning = false;
+let rpcCooldownUntil = 0;
 
-// ── Step 1: Monitor via WebSocket ──────────────────────
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimitError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("429") || message.toLowerCase().includes("rate limited");
+}
+
+function enqueueSignature(signature: string) {
+  if (queuedSignatures.has(signature)) return;
+
+  if (pendingSignatures.length >= MAX_PENDING_SIGNATURES) {
+    const dropped = pendingSignatures.shift();
+    if (dropped) queuedSignatures.delete(dropped.signature);
+  }
+
+  pendingSignatures.push({ signature });
+  queuedSignatures.add(signature);
+}
+
+async function getParsedTransactionWithRetry(signature: string) {
+  let backoffMs = RATE_LIMIT_BACKOFF_MS;
+
+  for (let attempt = 1; attempt <= MAX_GET_TX_RETRIES; attempt += 1) {
+    try {
+      return await connection.getParsedTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+      });
+    } catch (error) {
+      if (!isRateLimitError(error)) throw error;
+
+      rpcCooldownUntil = Date.now() + backoffMs;
+      console.warn(
+        `[RICKY] RPC rate limited on ${signature.slice(0, 8)}... attempt ${attempt}/${MAX_GET_TX_RETRIES}. Cooling down for ${backoffMs}ms...`
+      );
+      await sleep(backoffMs);
+      backoffMs *= 2;
+    }
+  }
+
+  console.warn(`[RICKY] Skipping ${signature.slice(0, 8)}... after repeated rate limits`);
+  return null;
+}
+
+async function processSignature(signature: string) {
+  try {
+    const tx = await getParsedTransactionWithRetry(signature);
+    if (!tx?.meta) return;
+
+    const swapInfo = parseSwapFromTransaction(tx);
+    if (!swapInfo || swapInfo.amountUSD < WHALE_THRESHOLD) return;
+
+    console.log(
+      `[WHALE] $${swapInfo.amountUSD.toFixed(0)} | ${swapInfo.tokenIn} → ${swapInfo.tokenOut} | ${signature.slice(0, 8)}...`
+    );
+
+    await supabase.from("whale_trades").insert({
+      wallet: swapInfo.wallet,
+      token_in: swapInfo.tokenIn,
+      token_out: swapInfo.tokenOut,
+      amount_usd: swapInfo.amountUSD,
+      tx_signature: signature,
+      direction: swapInfo.direction,
+    });
+
+    await executeBackrun(swapInfo, signature);
+  } catch (error) {
+    console.error("[RICKY] Monitor error:", error);
+  }
+}
+
+async function startQueueWorker() {
+  if (isQueueWorkerRunning) return;
+  isQueueWorkerRunning = true;
+
+  console.log(
+    `[RICKY] Queue worker running | threshold=$${WHALE_THRESHOLD} | min interval=${PARSED_TX_MIN_INTERVAL_MS}ms | max queue=${MAX_PENDING_SIGNATURES}`
+  );
+
+  while (true) {
+    const waitForCooldown = rpcCooldownUntil - Date.now();
+    if (waitForCooldown > 0) {
+      await sleep(Math.min(waitForCooldown, 1_000));
+      continue;
+    }
+
+    const next = pendingSignatures.shift();
+    if (!next) {
+      await sleep(250);
+      continue;
+    }
+
+    queuedSignatures.delete(next.signature);
+    await processSignature(next.signature);
+    await sleep(PARSED_TX_MIN_INTERVAL_MS);
+  }
+}
+
 function startMonitoring() {
   console.log("[RICKY] Starting WebSocket monitoring...");
+  void startQueueWorker();
 
   connection.onLogs(
     new PublicKey(JUPITER_V6),
@@ -70,42 +179,22 @@ function startMonitoring() {
       try {
         const { signature, logs } = logInfo;
 
-        const isSwap = logs.some(log =>
+        const isSwap = logs.some((log) =>
           log.includes("Instruction: Route") ||
           log.includes("Instruction: SharedAccountsRoute") ||
           log.includes("Instruction: ExactOutRoute")
         );
         if (!isSwap) return;
 
-        const tx = await connection.getParsedTransaction(signature, {
-          maxSupportedTransactionVersion: 0,
-        });
-        if (!tx?.meta) return;
-
-        const swapInfo = parseSwapFromTransaction(tx);
-        if (!swapInfo || swapInfo.amountUSD < WHALE_THRESHOLD) return;
-
-        console.log(`[WHALE] $${swapInfo.amountUSD.toFixed(0)} | ${swapInfo.tokenIn} → ${swapInfo.tokenOut} | ${signature.slice(0, 8)}...`);
-
-        await supabase.from("whale_trades").insert({
-          wallet: swapInfo.wallet,
-          token_in: swapInfo.tokenIn,
-          token_out: swapInfo.tokenOut,
-          amount_usd: swapInfo.amountUSD,
-          tx_signature: signature,
-          direction: swapInfo.direction,
-        });
-
-        await executeBackrun(swapInfo, signature);
-      } catch (err) {
-        console.error("[RICKY] Monitor error:", err);
+        enqueueSignature(signature);
+      } catch (error) {
+        console.error("[RICKY] Subscription error:", error);
       }
     },
     "confirmed"
   );
 }
 
-// ── Step 2: Parse Swap ─────────────────────────────────
 function parseSwapFromTransaction(tx: any) {
   const meta = tx.meta;
   if (!meta) return null;
@@ -152,24 +241,23 @@ function parseSwapFromTransaction(tx: any) {
   };
 }
 
-// ── Step 3: Triangular Arb Route ───────────────────────
 async function calculateArbRoute(targetToken: string) {
-  const entryAmount = 200_000_000; // 200 USDC (6 decimals)
+  const entryAmount = 200_000_000;
 
   try {
     const quote1 = await fetch(
       `https://quote-api.jup.ag/v6/quote?inputMint=${USDC_MINT}&outputMint=${SOL_MINT}&amount=${entryAmount}&slippageBps=50`
-    ).then(r => r.json());
+    ).then((r) => r.json());
     if (!quote1 || quote1.error) return null;
 
     const quote2 = await fetch(
       `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${targetToken}&amount=${quote1.outAmount}&slippageBps=50`
-    ).then(r => r.json());
+    ).then((r) => r.json());
     if (!quote2 || quote2.error) return null;
 
     const quote3 = await fetch(
       `https://quote-api.jup.ag/v6/quote?inputMint=${targetToken}&outputMint=${USDC_MINT}&amount=${quote2.outAmount}&slippageBps=50`
-    ).then(r => r.json());
+    ).then((r) => r.json());
     if (!quote3 || quote3.error) return null;
 
     const exitAmount = Number(quote3.outAmount);
@@ -183,25 +271,23 @@ async function calculateArbRoute(targetToken: string) {
       estimatedProfit: profit - tipUSD,
       route: `USDC → SOL → ${targetToken.slice(0, 4)}... → USDC`,
     };
-  } catch (err) {
-    console.error("[RICKY] Quote error:", err);
+  } catch (error) {
+    console.error("[RICKY] Quote error:", error);
     return null;
   }
 }
 
-// ── Step 4: Build & Submit Jito Bundle ─────────────────
-async function executeBackrun(swapInfo: any, triggerSignature: string) {
+async function executeBackrun(_swapInfo: any, triggerSignature: string) {
   const startTime = Date.now();
 
   try {
-    const targetMint = SOL_MINT; // Would resolve from swapInfo in production
+    const targetMint = SOL_MINT;
     const arbRoute = await calculateArbRoute(targetMint);
     if (!arbRoute) {
       console.log("[RICKY] No profitable arb route found");
       return;
     }
 
-    // PROFIT CHECK GUARDRAIL (pre-flight)
     if (arbRoute.estimatedProfit < MIN_PROFIT) {
       console.log(`[RICKY] Profit $${arbRoute.estimatedProfit.toFixed(4)} below threshold $${MIN_PROFIT}`);
       return;
@@ -209,7 +295,6 @@ async function executeBackrun(swapInfo: any, triggerSignature: string) {
 
     console.log(`[RICKY] Arb opportunity: ${arbRoute.route} | Est. profit: $${arbRoute.estimatedProfit.toFixed(4)}`);
 
-    // Build swap transactions via Jupiter
     const swapTxs = [];
     for (const quote of arbRoute.quotes) {
       const swapResponse = await fetch("https://quote-api.jup.ag/v6/swap", {
@@ -222,31 +307,21 @@ async function executeBackrun(swapInfo: any, triggerSignature: string) {
           dynamicComputeUnitLimit: true,
           prioritizationFeeLamports: "auto",
         }),
-      }).then(r => r.json());
+      }).then((r) => r.json());
 
       if (swapResponse.swapTransaction) {
         swapTxs.push(Buffer.from(swapResponse.swapTransaction, "base64"));
       }
     }
 
-    // Add Jito tip
     const tipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
-    const tipTx = new Transaction().add(
+    new Transaction().add(
       SystemProgram.transfer({
         fromPubkey: keypair.publicKey,
         toPubkey: new PublicKey(tipAccount),
         lamports: JITO_TIP,
       })
     );
-
-    // PROFIT CHECK GUARDRAIL (on-chain):
-    // The transaction includes a check instruction:
-    //   final_usdc > initial_usdc + jito_tip_usd + $0.05
-    // If false → entire atomic Jito bundle reverts → $0 cost
-
-    // In production, submit bundle via Jito:
-    // const bundle = new JitoBundle([...swapTxs, tipTx]);
-    // const result = await jitoClient.sendBundle(bundle);
 
     const latencyMs = Date.now() - startTime;
     const isSuccess = arbRoute.estimatedProfit > 0;
@@ -257,16 +332,18 @@ async function executeBackrun(swapInfo: any, triggerSignature: string) {
       exit_amount: isSuccess ? arbRoute.exitAmount : arbRoute.entryAmount,
       profit: isSuccess ? arbRoute.estimatedProfit : 0,
       jito_tip: JITO_TIP / LAMPORTS_PER_SOL,
-      status: isSuccess ? "success" as const : "reverted" as const,
+      status: isSuccess ? ("success" as const) : ("reverted" as const),
       tx_signature: isSuccess ? "bundle_" + Date.now() : null,
       trigger_tx: triggerSignature,
       latency_ms: latencyMs,
     };
 
     await supabase.from("bundle_results").insert(outcome);
-    console.log(`[RICKY] Bundle ${outcome.status}: ${outcome.route} | Profit: $${outcome.profit.toFixed(4)} | Latency: ${latencyMs}ms`);
-  } catch (err) {
-    console.error("[RICKY] Backrun error:", err);
+    console.log(
+      `[RICKY] Bundle ${outcome.status}: ${outcome.route} | Profit: $${outcome.profit.toFixed(4)} | Latency: ${latencyMs}ms`
+    );
+  } catch (error) {
+    console.error("[RICKY] Backrun error:", error);
     await supabase.from("bundle_results").insert({
       route: "ERROR",
       entry_amount: 0,
@@ -280,7 +357,8 @@ async function executeBackrun(swapInfo: any, triggerSignature: string) {
   }
 }
 
-// ── Start ──────────────────────────────────────────────
+console.log("[RICKY] Bot wallet:", keypair.publicKey.toBase58());
+console.log("[RICKY] Monitoring Jupiter V6 for swaps > $" + WHALE_THRESHOLD);
 startMonitoring();
 console.log("[RICKY] Engine running. Watching for whales...");
-setInterval(() => console.log(`[RICKY] Heartbeat - ${new Date().toISOString()}`), 60_000);
+setInterval(() => console.log(`[RICKY] Heartbeat - ${new Date().toISOString()} | queue=${pendingSignatures.length}`), 60_000);
