@@ -29,8 +29,18 @@ export const CONFIG = {
   MAX_GET_TX_RETRIES: Number(process.env.MAX_GET_TX_RETRIES || 4),
   MAX_PENDING_SIGNATURES: Number(process.env.MAX_PENDING_SIGNATURES || 500),
 
-  // Arb
+  // Arb — DFlow + Jupiter Predict
   ARB_AMOUNT: parseFloat(process.env.ARB_AMOUNT_USD || "25"),
   MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.03"),
   SCAN_INTERVAL: parseInt(process.env.SCAN_INTERVAL_MS || "30000"),
+
+  // DFlow API (dev endpoints — no key needed)
+  DFLOW_METADATA_API: process.env.DFLOW_METADATA_API || "https://dev-prediction-markets-api.dflow.net",
+  DFLOW_TRADE_API: process.env.DFLOW_TRADE_API || "https://dev-quote-api.dflow.net",
+  DFLOW_API_KEY: process.env.DFLOW_API_KEY || "",
+
+  // Jupiter Predict API
+  JUP_PREDICT_API: process.env.JUP_PREDICT_API || "https://api.jup.ag/prediction/v1",
+  JUP_PREDICT_API_KEY: process.env.JUP_PREDICT_API_KEY || "",
+  JUP_USD_MINT: "JuprjznTrTSp2UFa3ZBUFgwdAmtZCq4MQCwysN55USD",
 } as const;
