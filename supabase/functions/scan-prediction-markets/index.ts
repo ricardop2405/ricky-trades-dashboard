@@ -45,13 +45,25 @@ Deno.serve(async (req) => {
     const jupApiKey = Deno.env.get("JUP_PREDICT_API_KEY") || "";
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // ── 1. Fetch DFlow markets (Kalshi tokenized on Solana) ──
+    // ── 1. Fetch ALL DFlow markets (paginate, no isInitialized filter) ──
+    // 5/15-min crypto markets reset every cycle as "uninitialized"
     let dflowMarkets: any[] = [];
+    let dfCursor: string | null = null;
     try {
-      const dfRes = await fetch(`${DFLOW_API}/api/v1/markets?limit=100`);
-      if (dfRes.ok) {
+      for (let page = 0; page < 10; page++) {
+        const params = new URLSearchParams({ limit: "100" });
+        if (dfCursor) params.set("cursor", dfCursor);
+
+        const dfRes = await fetch(`${DFLOW_API}/api/v1/markets?${params}`);
+        if (!dfRes.ok) break;
+
         const dfData = await dfRes.json();
-        dflowMarkets = Array.isArray(dfData) ? dfData : dfData.markets || dfData.data || [];
+        const batch = Array.isArray(dfData) ? dfData : dfData.markets || dfData.data || [];
+        dflowMarkets.push(...batch);
+
+        const nextCursor = dfData.cursor || dfData.next_cursor || dfData.pagination?.cursor;
+        if (!nextCursor || batch.length < 100) break;
+        dfCursor = nextCursor;
       }
     } catch (e) {
       console.error("DFlow fetch error:", e);
