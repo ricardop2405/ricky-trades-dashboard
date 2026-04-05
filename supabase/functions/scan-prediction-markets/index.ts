@@ -38,14 +38,16 @@ Deno.serve(async (req) => {
     const marketsToUpsert = polyMarkets
       .filter((m) => m.tokens && m.tokens.length >= 2 && m.active && !m.closed)
       .map((m) => {
-        const yesToken = m.tokens.find((t) => t.outcome === "Yes");
-        const noToken = m.tokens.find((t) => t.outcome === "No");
+        // Polymarket tokens may be "Yes"/"No" or custom outcomes like team names
+        // Use first two tokens as yes/no equivalent
+        const t0 = m.tokens[0];
+        const t1 = m.tokens[1];
         return {
           platform: "polymarket",
           external_id: m.condition_id,
           question: m.question,
-          yes_price: yesToken?.price ?? 0,
-          no_price: noToken?.price ?? 0,
+          yes_price: t0?.price ?? 0,
+          no_price: t1?.price ?? 0,
           volume: parseFloat(m.volume_num_fmt?.replace(/[,$]/g, "") || "0") || 0,
           end_date: m.end_date_iso || null,
           category: m.category || null,
