@@ -81,19 +81,63 @@ function dflowHeaders(): Record<string, string> {
 }
 
 async function fetchDFlowMarkets(): Promise<DFlowMarket[]> {
+  const allMarkets: DFlowMarket[] = [];
+  let cursor: string | null = null;
+
   try {
-    const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/markets?limit=100`, {
-      headers: dflowHeaders(),
-    });
-    if (!res.ok) {
-      console.error(`[DFLOW] API ${res.status}: ${await res.text()}`);
-      return [];
+    // Paginate through ALL markets — do NOT use isInitialized=true
+    // because 5/15-min crypto markets reset every cycle and start uninitialized
+    for (let page = 0; page < 10; page++) {
+      const params = new URLSearchParams({ limit: "100" });
+      if (cursor) params.set("cursor", cursor);
+
+      const res = await fetch(
+        `${CONFIG.DFLOW_METADATA_API}/api/v1/markets?${params}`,
+        { headers: dflowHeaders() }
+      );
+      if (!res.ok) {
+        console.error(`[DFLOW] API ${res.status}: ${await res.text()}`);
+        break;
+      }
+
+      const data = await res.json();
+      const markets: DFlowMarket[] = Array.isArray(data)
+        ? data
+        : data.markets || data.data || [];
+
+      allMarkets.push(...markets);
+
+      // Check for pagination cursor
+      const nextCursor = data.cursor || data.next_cursor || data.pagination?.cursor;
+      if (!nextCursor || markets.length < 100) break;
+      cursor = nextCursor;
     }
-    const data = await res.json();
-    return Array.isArray(data) ? data : data.markets || data.data || [];
+
+    // Log crypto market breakdown
+    const cryptoTickers = ["KXBTC", "KXETH", "KXSOL", "ETHD", "BTCD", "SOLD"];
+    const cryptoMarkets = allMarkets.filter((m) =>
+      cryptoTickers.some((t) => (m.series_ticker || m.ticker || "").toUpperCase().includes(t))
+    );
+    const uninitMarkets = allMarkets.filter((m) => !m.yes_price && !m.no_price);
+
+    console.log(
+      `[DFLOW] Fetched ${allMarkets.length} total markets | ` +
+      `${cryptoMarkets.length} crypto | ${uninitMarkets.length} uninitialized`
+    );
+
+    if (cryptoMarkets.length > 0) {
+      console.log(`[DFLOW] Crypto markets:`);
+      for (const m of cryptoMarkets.slice(0, 10)) {
+        console.log(
+          `  ${m.ticker} "${m.title}" YES=${m.yes_price} NO=${m.no_price} status=${m.status}`
+        );
+      }
+    }
+
+    return allMarkets;
   } catch (err) {
     console.error("[DFLOW] Fetch error:", err);
-    return [];
+    return allMarkets;
   }
 }
 
