@@ -82,7 +82,7 @@ function dflowHeaders(): Record<string, string> {
 
 async function fetchDFlowMarkets(): Promise<DFlowMarket[]> {
   try {
-    const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/markets?limit=500`, {
+    const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/markets?limit=100`, {
       headers: dflowHeaders(),
     });
     if (!res.ok) {
