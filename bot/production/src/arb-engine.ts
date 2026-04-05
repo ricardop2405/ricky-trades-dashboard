@@ -99,7 +99,7 @@ async function fetchDFlowMarkets(): Promise<DFlowMarket[]> {
 
 async function getDFlowBuyTx(ticker: string, side: "yes" | "no", amountUsd: number): Promise<string | null> {
   try {
-    const res = await fetch(`${CONFIG.DFLOW_TRADE_API}/buy`, {
+    const res = await fetch(`${CONFIG.DFLOW_TRADE_API}/api/v1/buy`, {
       method: "POST",
       headers: dflowHeaders(),
       body: JSON.stringify({
