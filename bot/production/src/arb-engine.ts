@@ -38,11 +38,15 @@ console.log("══════════════════════�
 interface DFlowMarket {
   ticker: string;
   title: string;
-  yes_price: number;
-  no_price: number;
+  eventTicker?: string;
+  seriesTicker?: string;
+  // API returns yesBid/yesAsk/noBid/noAsk (NOT yes_price/no_price)
+  yesBid: number | null;
+  yesAsk: number | null;
+  noBid: number | null;
+  noAsk: number | null;
   status: string;
-  series_ticker?: string;
-  expiration_time?: string;
+  expirationTime?: number;
 }
 
 interface JupMarket {
