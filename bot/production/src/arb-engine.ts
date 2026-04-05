@@ -247,10 +247,10 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
       const jTitle = jm.metadata?.title || jm.marketId;
       const score = matchScore(dfTitle, jTitle);
 
-      // Jupiter prices — check if they're already in dollars or micro-units
-      let jYes = jm.pricing?.buyYesPriceUsd || jm.pricing?.yesPrice || 0;
-      let jNo = jm.pricing?.buyNoPriceUsd || jm.pricing?.noPrice || 0;
-      // If prices look like micro-units (> 100), convert
+      // Jupiter prices — buy-side USD quotes
+      let jYes = jm.pricing?.buyYesPriceUsd ?? 0;
+      let jNo = jm.pricing?.buyNoPriceUsd ?? 0;
+      // If prices look like micro-units (> 10 USD), convert
       if (jYes > 10) jYes = jYes / 1_000_000;
       if (jNo > 10) jNo = jNo / 1_000_000;
 
@@ -318,8 +318,8 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
     const sample = jupMarkets.slice(0, 3);
     console.log(`[JUP] Sample markets:`);
     for (const m of sample) {
-      const yp = m.pricing?.buyYesPriceUsd || m.pricing?.yesPrice || 0;
-      const np = m.pricing?.buyNoPriceUsd || m.pricing?.noPrice || 0;
+      const yp = m.pricing?.buyYesPriceUsd ?? 0;
+      const np = m.pricing?.buyNoPriceUsd ?? 0;
       console.log(`  "${(m.metadata?.title||m.marketId).slice(0,60)}" YES_raw=${yp} NO_raw=${np} status=${m.status}`);
     }
   }
