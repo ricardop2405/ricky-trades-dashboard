@@ -31,11 +31,8 @@ Deno.serve(async (req) => {
 
     // 1. Fetch active markets from Polymarket
     const polyRes = await fetch(`${POLYMARKET_API}/markets?closed=false&limit=100`);
-    if (!polyRes.ok) {
-      const text = await polyRes.text();
-      throw new Error(`Polymarket API failed [${polyRes.status}]: ${text}`);
-    }
-    const polyMarkets: PolymarketMarket[] = await polyRes.json();
+    const polyJson = await polyRes.json();
+    const polyMarkets: PolymarketMarket[] = Array.isArray(polyJson) ? polyJson : (polyJson.data ?? []);
 
     // 2. Upsert markets into prediction_markets
     const marketsToUpsert = polyMarkets
