@@ -282,7 +282,9 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
   const topMatches: { df: string; jup: string; score: number; spread1: number; spread2: number }[] = [];
 
   for (const df of dflowMarkets) {
-    if (df.status !== "open" && df.status !== "active") continue;
+    // On dev API, crypto markets show as "finalized" but still have valid prices
+    // Only skip if both prices are zero (truly dead market)
+    if (df.yes_price === 0 && df.no_price === 0) continue;
 
     for (const jm of jupMarkets) {
       if (jm.status !== "open") continue;
