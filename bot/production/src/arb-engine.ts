@@ -125,34 +125,50 @@ async function getDFlowBuyTx(ticker: string, side: "yes" | "no", amountUsd: numb
 // ── Jupiter Predict API ─────────────────────────────────
 function jupHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (CONFIG.JUP_PREDICT_API_KEY) h["x-api-key"] = CONFIG.JUP_PREDICT_API_KEY;
+  if (CONFIG.JUP_PREDICT_API_KEY) {
+    h["x-api-key"] = CONFIG.JUP_PREDICT_API_KEY;
+    h["Authorization"] = `Bearer ${CONFIG.JUP_PREDICT_API_KEY}`;
+  }
   return h;
 }
 
 async function fetchJupMarkets(): Promise<JupMarket[]> {
   try {
-    const res = await fetch(
-      `${CONFIG.JUP_PREDICT_API}/events?` +
-        new URLSearchParams({ includeMarkets: "true", limit: "200" }),
-      { headers: jupHeaders() }
-    );
+    const url = `${CONFIG.JUP_PREDICT_API}/events?` +
+      new URLSearchParams({ includeMarkets: "true", limit: "50" });
+    console.log(`[JUP] Fetching: ${url.split("?")[0]}?...`);
+    console.log(`[JUP] API key set: ${!!CONFIG.JUP_PREDICT_API_KEY} (${CONFIG.JUP_PREDICT_API_KEY ? CONFIG.JUP_PREDICT_API_KEY.slice(0, 8) + "..." : "MISSING"})`);
+
+    const res = await fetch(url, { headers: jupHeaders() });
+    const rawText = await res.text();
+
     if (!res.ok) {
-      console.error(`[JUP] API ${res.status}: ${await res.text()}`);
+      console.error(`[JUP] API ${res.status}: ${rawText.slice(0, 500)}`);
       return [];
     }
-    const data = await res.json();
-    const events = Array.isArray(data) ? data : data.events || [];
-    // Flatten events → markets
+
+    let data: any;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      console.error(`[JUP] Invalid JSON response: ${rawText.slice(0, 200)}`);
+      return [];
+    }
+
+    console.log(`[JUP] Response type: ${typeof data}, isArray: ${Array.isArray(data)}, keys: ${typeof data === "object" && data ? Object.keys(data).join(",") : "n/a"}`);
+
+    const events = Array.isArray(data) ? data : data.events || data.data || [];
+    console.log(`[JUP] Events found: ${events.length}`);
+
     const markets: JupMarket[] = [];
     for (const event of events) {
-      if (event.markets) {
-        for (const m of event.markets) {
-          markets.push({
-            ...m,
-            eventId: event.eventId,
-            metadata: { title: event.title || m.metadata?.title, marketId: m.marketId },
-          });
-        }
+      const eventMarkets = event.markets || event.outcomes || [];
+      for (const m of eventMarkets) {
+        markets.push({
+          ...m,
+          eventId: event.eventId || event.id,
+          metadata: { title: event.title || m.metadata?.title || m.title, marketId: m.marketId || m.id },
+        });
       }
     }
     return markets;
