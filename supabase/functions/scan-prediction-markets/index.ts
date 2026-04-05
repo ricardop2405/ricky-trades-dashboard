@@ -107,8 +107,9 @@ Deno.serve(async (req) => {
     // ── 2. Fetch Manifold Markets ────────────────────────────
     let manifoldMarkets: ManifoldMarket[] = [];
     try {
-      const mfRes = await fetch(`${MANIFOLD_API}/markets?limit=500&sort=liquidity`);
-      manifoldMarkets = await mfRes.json();
+      const mfRes = await fetch(`${MANIFOLD_API}/markets?limit=500`);
+      const mfData = await mfRes.json();
+      manifoldMarkets = Array.isArray(mfData) ? mfData : [];
     } catch (e) {
       console.error("Manifold fetch error:", e);
     }
