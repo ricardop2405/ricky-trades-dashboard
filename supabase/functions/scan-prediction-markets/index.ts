@@ -5,18 +5,19 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const POLYMARKET_API = "https://clob.polymarket.com";
+const GAMMA_API = "https://gamma-api.polymarket.com";
 
-interface PolymarketMarket {
+interface GammaMarket {
+  id: string;
   condition_id: string;
   question: string;
-  tokens: { token_id: string; outcome: string; price: number }[];
-  volume_num_fmt: string;
-  end_date_iso: string;
+  outcomePrices: string; // JSON string like '["0.535", "0.465"]'
+  volume: string;
+  endDate: string;
   active: boolean;
   closed: boolean;
   category?: string;
-  market_slug?: string;
+  slug?: string;
 }
 
 Deno.serve(async (req) => {
@@ -29,34 +30,32 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // 1. Fetch active markets from Polymarket
-    const polyRes = await fetch(`${POLYMARKET_API}/markets?closed=false&limit=100`);
-    const polyJson = await polyRes.json();
-    const polyMarkets: PolymarketMarket[] = Array.isArray(polyJson) ? polyJson : (polyJson.data ?? []);
+    // 1. Fetch active markets from Polymarket Gamma API
+    const polyRes = await fetch(`${GAMMA_API}/markets?closed=false&active=true&limit=200`);
+    const polyMarkets: GammaMarket[] = await polyRes.json();
 
     // 2. Upsert markets into prediction_markets
     const marketsToUpsert = polyMarkets
-      .filter((m) => m.tokens && m.tokens.length >= 2 && m.active && !m.closed)
+      .filter((m) => m.outcomePrices && m.active && !m.closed)
       .map((m) => {
-        // Polymarket tokens may be "Yes"/"No" or custom outcomes like team names
-        // Use first two tokens as yes/no equivalent
-        const t0 = m.tokens[0];
-        const t1 = m.tokens[1];
+        let prices: number[] = [];
+        try {
+          prices = JSON.parse(m.outcomePrices).map(Number);
+        } catch { /* skip */ }
         return {
           platform: "polymarket",
           external_id: m.condition_id,
           question: m.question,
-          yes_price: t0?.price ?? 0,
-          no_price: t1?.price ?? 0,
-          volume: parseFloat(m.volume_num_fmt?.replace(/[,$]/g, "") || "0") || 0,
-          end_date: m.end_date_iso || null,
+          yes_price: prices[0] ?? 0,
+          no_price: prices[1] ?? 0,
+          volume: parseFloat(m.volume || "0") || 0,
+          end_date: m.endDate || null,
           category: m.category || null,
-          url: m.market_slug
-            ? `https://polymarket.com/event/${m.market_slug}`
-            : null,
+          url: m.slug ? `https://polymarket.com/event/${m.slug}` : null,
           last_synced_at: new Date().toISOString(),
         };
-      });
+      })
+      .filter((m) => m.yes_price > 0 || m.no_price > 0);
 
     if (marketsToUpsert.length > 0) {
       const { error: upsertErr } = await supabase
@@ -65,14 +64,12 @@ Deno.serve(async (req) => {
       if (upsertErr) throw new Error(`Upsert error: ${upsertErr.message}`);
     }
 
-    // 3. Detect arbitrage opportunities within Polymarket
-    // Look for markets where YES + NO prices < 0.98 (2% spread after fees)
-    // This is intra-platform arb: buy both YES and NO when their sum < $1
+    // 3. Detect arbitrage opportunities
     const { data: allMarkets, error: fetchErr } = await supabase
       .from("prediction_markets")
       .select("*")
       .eq("platform", "polymarket")
-      .gt("volume", 1000); // Only liquid markets
+      .gt("volume", 100);
 
     if (fetchErr) throw new Error(`Fetch error: ${fetchErr.message}`);
 
@@ -92,10 +89,9 @@ Deno.serve(async (req) => {
       const sum = Number(market.yes_price) + Number(market.no_price);
       const spread = 1 - sum;
       if (spread > 0.02) {
-        // >2% spread = profitable after fees
         opportunities.push({
           market_a_id: market.id,
-          market_b_id: market.id, // same market, both sides
+          market_b_id: market.id,
           side_a: "yes",
           side_b: "no",
           price_a: Number(market.yes_price),
@@ -106,23 +102,13 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Cross-market arb: same question on different markets with price divergence
-    // Group by similar questions and compare
-    const questionMap = new Map<string, typeof allMarkets>();
-    for (const market of allMarkets || []) {
-      const key = market.question.toLowerCase().trim();
-      if (!questionMap.has(key)) questionMap.set(key, []);
-      questionMap.get(key)!.push(market);
-    }
-
-    // Expire old open opportunities
+    // Expire old opportunities
     await supabase
       .from("arb_opportunities")
       .update({ status: "expired", expired_at: new Date().toISOString() })
       .eq("status", "open")
       .lt("detected_at", new Date(Date.now() - 5 * 60 * 1000).toISOString());
 
-    // Insert new opportunities
     if (opportunities.length > 0) {
       const { error: insertErr } = await supabase
         .from("arb_opportunities")
