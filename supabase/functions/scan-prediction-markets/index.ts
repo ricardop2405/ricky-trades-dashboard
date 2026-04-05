@@ -48,10 +48,10 @@ Deno.serve(async (req) => {
     // ── 1. Fetch DFlow markets (Kalshi tokenized on Solana) ──
     let dflowMarkets: any[] = [];
     try {
-      const dfRes = await fetch(`${DFLOW_API}/markets?status=open&limit=500`);
+      const dfRes = await fetch(`${DFLOW_API}/api/v1/markets?limit=500`);
       if (dfRes.ok) {
         const dfData = await dfRes.json();
-        dflowMarkets = Array.isArray(dfData) ? dfData : dfData.markets || [];
+        dflowMarkets = Array.isArray(dfData) ? dfData : dfData.markets || dfData.data || [];
       }
     } catch (e) {
       console.error("DFlow fetch error:", e);
