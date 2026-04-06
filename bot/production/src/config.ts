@@ -44,7 +44,7 @@ export const CONFIG = {
   DFLOW_API_KEY: process.env.DFLOW_API_KEY || "",
 
   // Jupiter Predict API
-  JUP_PREDICT_API: process.env.JUP_PREDICT_API || "https://api.jup.ag/prediction/v1",
+  JUP_PREDICT_API: process.env.JUP_PREDICT_API || "https://prediction-market-api.jup.ag/api/v1",
   JUP_PREDICT_API_KEY: process.env.JUP_PREDICT_API_KEY || "",
   JUP_USD_MINT: "JuprjznTrTSp2UFa3ZBUFgwdAmtZCq4MQCwysN55USD",
 } as const;
