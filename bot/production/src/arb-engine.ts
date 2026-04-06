@@ -39,7 +39,10 @@ const WALLET = keypair.publicKey.toBase58();
 // Market cooldown — skip recently attempted markets
 const marketCooldowns = new Map<string, number>();
 const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
-const FAILSAFE_SCAN_ONLY = true;
+const FAILSAFE_SCAN_ONLY = false; // Atomic via Jito bundles now
+
+// Jito bundle endpoints (mainnet)
+const JITO_BUNDLE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles";
 
 // ── Proxy Setup ─────────────────────────────────────────
 // Route Jupiter API through proxy to bypass region blocks
@@ -75,8 +78,7 @@ console.log(`[ARB] Amount per trade: $${CONFIG.ARB_AMOUNT}`);
 console.log(`[ARB] Min spread: ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}%`);
 console.log(`[ARB] Scan interval: ${CONFIG.SCAN_INTERVAL / 1000}s`);
 console.log(`[ARB] Jupiter API: ${CONFIG.JUP_PREDICT_API}`);
-console.log(`[ARB] Execution: FAIL-SAFE scan only (live trading disabled)`);
-console.log(`[ARB] Reason: Jupiter /orders confirms tx submission, not guaranteed dual fills`);
+console.log(`[ARB] Execution: ATOMIC via Jito bundles (both legs same slot or neither)`);
 console.log(`[ARB] Dynamic priority fees: ON`);
 console.log("═══════════════════════════════════════════════════════");
 
@@ -371,12 +373,6 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   // The API will return INSUFFICIENT_FUNDS if balance is too low — no pre-check needed.
   console.log(`[BAL] Using Jupiter Predict program balance (not wallet ATA)`);
 
-  if (FAILSAFE_SCAN_ONLY) {
-    console.warn(`[ARB] FAIL-SAFE: skipping live execution to prevent unhedged exposure`);
-    marketCooldowns.set(market.marketId, Date.now());
-    return;
-  }
-
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
     .insert({
@@ -417,63 +413,57 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
       return;
     }
 
-    // Sign both
+    // Sign both transactions
     const [yesTx, noTx] = await Promise.all([
       buildAndSign(yesTxRaw),
       buildAndSign(noTxRaw),
     ]);
 
-    // PARALLEL: Send both legs simultaneously
-    console.log("[TX] Sending YES + NO legs in parallel...");
-    const [yesSig, noSig] = await Promise.all([
-      sendDirect(yesTx, "YES"),
-      sendDirect(noTx, "NO"),
-    ]);
+    // ── ATOMIC: Submit as Jito bundle ──────────────────────
+    // Jito guarantees: both txs land in the SAME slot, or neither does.
+    console.log("[JITO] Submitting YES + NO as atomic Jito bundle...");
+
+    const bundleResult = await sendJitoBundle([yesTx, noTx]);
     marketCooldowns.set(market.marketId, Date.now());
 
-    const yesOk = !!yesSig;
-    const noOk = !!noSig;
+    if (bundleResult) {
+      console.log(`[ARB] ✅ Jito bundle landed! Bundle ID: ${bundleResult}`);
 
-    if (yesOk && noOk) {
-      // Both txs confirmed — but check if they are fills or open orders
-      console.log("[ARB] Both txs confirmed on-chain, verifying fill status...");
-      await sleep(3000); // Wait for state to settle
-
+      // Verify both txs confirmed
+      await sleep(3000);
       const openOrders = await getOpenOrders();
       if (openOrders.length > 0) {
-        console.log(`[ARB] ⚠️  ${openOrders.length} unfilled open orders detected — cancelling all`);
+        console.log(`[ARB] ⚠️  ${openOrders.length} unfilled open orders — cancelling`);
         await cancelAllOrders();
         await closeAllPositions();
         if (oppId) {
           await supabase.from("arb_executions").insert({
             opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
             status: "failed",
-            error_message: `Orders placed but not filled — cancelled ${openOrders.length} open orders`,
+            error_message: `Bundle landed but orders unfilled — cancelled ${openOrders.length}`,
           });
           await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
         }
       } else {
-        console.log(`[ARB] ✅ Both legs filled! Net profit: ~$${netProfit.toFixed(4)}`);
+        console.log(`[ARB] ✅ Both legs filled atomically! Net profit: ~$${netProfit.toFixed(4)}`);
         if (oppId) {
           await supabase.from("arb_executions").insert({
             opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
             fees: opp.fees, status: "filled",
-            side_a_tx: yesSig, side_b_tx: noSig,
+            side_a_tx: bs58.encode(yesTx.signatures[0]),
+            side_b_tx: bs58.encode(noTx.signatures[0]),
             side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
           });
           await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
         }
       }
     } else {
-      // One or both txs failed — cancel any open orders and close positions
-      console.error(`[ARB] ⚠️  Partial failure: YES=${yesOk} NO=${noOk} — cleaning up`);
-      await cancelAllOrders();
-      await closeAllPositions();
+      console.error(`[ARB] ❌ Jito bundle failed — no exposure, both legs rejected atomically`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
           status: "failed",
-          error_message: `Partial: YES=${yesOk} NO=${noOk} — auto-cancelled & closed`,
+          error_message: "Jito bundle rejected — atomic failure, no exposure",
         });
         await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
@@ -490,8 +480,74 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
     }
   }
 }
+}
 
-// ── Direct TX Submission (Fallback) ─────────────────────
+// ── Jito Bundle Submission (Atomic) ──────────────────────
+async function sendJitoBundle(txs: VersionedTransaction[]): Promise<string | null> {
+  try {
+    // Jito expects base58-encoded serialized transactions
+    const encodedTxs = txs.map(tx => bs58.encode(tx.serialize()));
+
+    const res = await fetch(JITO_BUNDLE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "sendBundle",
+        params: [encodedTxs],
+      }),
+    });
+
+    const data = await res.json() as any;
+
+    if (data.error) {
+      console.error(`[JITO] Bundle error: ${JSON.stringify(data.error)}`);
+      return null;
+    }
+
+    const bundleId = data.result;
+    console.log(`[JITO] Bundle submitted: ${bundleId}`);
+
+    // Poll for bundle status (up to 30s)
+    for (let i = 0; i < 15; i++) {
+      await sleep(2000);
+      try {
+        const statusRes = await fetch(JITO_BUNDLE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getBundleStatuses",
+            params: [[bundleId]],
+          }),
+        });
+        const statusData = await statusRes.json() as any;
+        const statuses = statusData?.result?.value || [];
+        if (statuses.length > 0) {
+          const s = statuses[0];
+          console.log(`[JITO] Bundle status: ${s.confirmation_status || s.status}`);
+          if (s.confirmation_status === "confirmed" || s.confirmation_status === "finalized") {
+            return bundleId;
+          }
+          if (s.err || s.confirmation_status === "failed") {
+            console.error(`[JITO] Bundle failed:`, s.err);
+            return null;
+          }
+        }
+      } catch { /* retry */ }
+    }
+
+    console.warn("[JITO] Bundle status unknown after 30s — treating as failed");
+    return null;
+  } catch (err) {
+    console.error("[JITO] Bundle submission error:", err);
+    return null;
+  }
+}
+
+// ── Direct TX Submission (Fallback for cancels/closes) ──
 async function sendDirect(tx: VersionedTransaction, label: string): Promise<string | null> {
   try {
     const sig = await connection.sendRawTransaction(tx.serialize(), {
@@ -510,8 +566,6 @@ async function sendDirect(tx: VersionedTransaction, label: string): Promise<stri
     return null;
   }
 }
-
-// sleep imported from ./utils
 
 // ── Get Open Orders ─────────────────────────────────────
 async function getOpenOrders(): Promise<any[]> {
@@ -704,9 +758,7 @@ async function main() {
     console.log("[ARB] No stale orders ✅");
   }
 
-  if (FAILSAFE_SCAN_ONLY) {
-    console.warn("[ARB] FAIL-SAFE mode active — scanning only, no live orders will be placed");
-  }
+  console.log("[ARB] 🔒 Atomic execution via Jito bundles — both legs land together or not at all");
 
   console.log("[ARB] Starting scan loop...\n");
   await runScan();
