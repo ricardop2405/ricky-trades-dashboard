@@ -590,7 +590,6 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
     }
   }
 }
-}
 
 // ── Jito Bundle Submission (Atomic) ──────────────────────
 async function sendJitoBundle(txs: VersionedTransaction[]): Promise<string | null> {
