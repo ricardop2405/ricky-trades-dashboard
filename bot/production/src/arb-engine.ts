@@ -39,6 +39,7 @@ const WALLET = keypair.publicKey.toBase58();
 // Market cooldown — skip recently attempted markets
 const marketCooldowns = new Map<string, number>();
 const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+const FAILSAFE_SCAN_ONLY = true;
 
 // ── Proxy Setup ─────────────────────────────────────────
 // Route Jupiter API through proxy to bypass region blocks
