@@ -26,6 +26,36 @@ import { base } from "viem/chains";
 import { CONFIG } from "./config";
 import { sleep } from "./utils";
 
+// ── Retry wrapper for network resilience ────────────────
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  maxRetries = 3,
+  baseDelayMs = 1000,
+): Promise<Response> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeout);
+      return res;
+    } catch (err: any) {
+      lastError = err;
+      const code = err?.cause?.code || err?.code || "";
+      if (code === "ETIMEDOUT" || code === "ENOTFOUND" || code === "ECONNRESET" || err.name === "AbortError") {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        console.log(`[LIM] ⚠️ Fetch retry ${attempt + 1}/${maxRetries} (${code}) — waiting ${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+      throw err; // non-retryable error
+    }
+  }
+  throw lastError || new Error("fetchWithRetry exhausted");
+}
+
 // ── Setup ───────────────────────────────────────────────
 const account = privateKeyToAccount(CONFIG.BASE_PRIVATE_KEY as Hex);
 const publicClient = createPublicClient({ chain: base, transport: http(CONFIG.BASE_RPC_URL) });
@@ -155,11 +185,15 @@ function getExecutionContracts(result: any): number {
   return filled > 0 ? filled / 1e6 : 0;
 }
 
-function getExecutionCostUSD(result: any): number {
+function getExecutionCostUSD(result: any, fallbackContracts: number, fallbackPrice: number): number {
   const raw = result?.execution?.totalsRaw ?? result?.execution?.totals ?? {};
-  // makerAmountNet = actual USDC spent (including fees)
-  const spent = Number(raw.makerAmountNet ?? raw.makerAmountGross ?? 0);
-  return spent > 0 ? spent / 1e6 : 0;
+  // Try multiple fields the API might return
+  const spent = Number(raw.makerAmountNet ?? raw.makerAmountGross ?? raw.totalCost ?? 0);
+  if (spent > 0) return spent / 1e6;
+  // Fallback: contracts × price (what we asked for)
+  const filled = getExecutionContracts(result);
+  const contracts = filled > 0 ? filled : fallbackContracts;
+  return contracts * fallbackPrice;
 }
 
 // ── Sign & Submit an EIP-712 Order ──────────────────────
@@ -178,7 +212,7 @@ async function placeSignedOrder(
   // Use cached fee rate or fetch it once
   if (cachedFeeRateBps === null) {
     try {
-      const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, { headers });
+      const feeRes = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, { headers });
       if (feeRes.ok) {
         const feeData = await feeRes.json();
         cachedFeeRateBps = Number(feeData?.rank?.feeRateBps ?? feeData?.feeRateBps ?? 0);
@@ -279,7 +313,7 @@ async function placeSignedOrder(
   const sideLabel = side === 0 ? "BUY" : "SELL";
   console.log(`[LIM] Submitting ${sideLabel} ${orderType} order: tokenId=${tokenId.slice(0, 12)}... maker=${Number(makerAmount)} taker=${Number(takerAmount)} ownerId=${CONFIG.LIMITLESS_OWNER_ID}`);
 
-  const res = await fetch(`${CONFIG.LIMITLESS_API}/orders`, {
+  const res = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/orders`, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
@@ -301,7 +335,7 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
   if (CONFIG.LIMITLESS_API_KEY) headers["x-api-key"] = CONFIG.LIMITLESS_API_KEY;
 
   try {
-    const res = await fetch(`${CONFIG.LIMITLESS_API}/markets/active?limit=25`, { headers });
+    const res = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/active?limit=25`, { headers });
     if (!res.ok) {
       console.error(`[LIM] Markets fetch failed: ${res.status}`);
       return [];
@@ -323,8 +357,8 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
           if (!slug || !yesTokenId || !noTokenId || !venueExchange) return null;
 
           const [yesBookRes, noBookRes] = await Promise.all([
-            fetch(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${yesTokenId}`, { headers }),
-            fetch(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${noTokenId}`, { headers }),
+            fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${yesTokenId}`, { headers }),
+            fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${noTokenId}`, { headers }),
           ]);
 
           if (!yesBookRes.ok || !noBookRes.ok) return null;
@@ -490,7 +524,7 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       throw new Error("YES buy was not matched — aborting");
     }
     const yesFilled = getExecutionContracts(yesResult);
-    const yesCostUSD = getExecutionCostUSD(yesResult);
+    const yesCostUSD = getExecutionCostUSD(yesResult, contracts, yesPrice);
     if (yesFilled <= 0) {
       throw new Error("YES buy returned 0 filled contracts");
     }
@@ -507,7 +541,7 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       throw new Error("NO buy not matched — unwound YES position");
     }
     const noFilled = getExecutionContracts(noResult);
-    const noCostUSD = getExecutionCostUSD(noResult);
+    const noCostUSD = getExecutionCostUSD(noResult, yesFilled, noPrice);
     if (noFilled <= 0) {
       console.log(`[LIM] ⚠️ NO fill=0 — selling YES back`);
       const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
@@ -729,7 +763,7 @@ async function main(): Promise<void> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (CONFIG.LIMITLESS_API_KEY) headers["X-API-Key"] = CONFIG.LIMITLESS_API_KEY;
   try {
-    const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, { headers });
+    const feeRes = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, { headers });
     if (feeRes.ok) {
       const feeData = await feeRes.json();
       cachedFeeRateBps = Number(feeData?.rank?.feeRateBps ?? feeData?.feeRateBps ?? 0);
