@@ -104,30 +104,6 @@ function toIsoFromUnix(value?: number | null): string | null {
   return new Date(Number(value) * 1000).toISOString();
 }
 
-function isShortWindowMarket(input: {
-  title?: string | null;
-  closeTime?: number | null;
-  openTime?: number | null;
-  endDate?: string | null;
-}): boolean {
-  const nowMs = Date.now();
-  const title = (input.title || "").toLowerCase();
-
-  if (input.closeTime && input.openTime) {
-    const durationMs = (Number(input.closeTime) - Number(input.openTime)) * 1000;
-    const remainingMs = Number(input.closeTime) * 1000 - nowMs;
-    return durationMs > 0 && durationMs <= 16 * 60 * 1000 && remainingMs > 0 && remainingMs <= 16 * 60 * 1000;
-  }
-
-  if (input.endDate) {
-    const endMs = new Date(input.endDate).getTime();
-    const remainingMs = endMs - nowMs;
-    if (!Number.isNaN(endMs) && remainingMs > 0 && remainingMs <= 16 * 60 * 1000) return true;
-  }
-
-  return /\b(5m|5 min|5 minute|15m|15 min|15 minute)\b/.test(title);
-}
-
 interface ArbOpportunity {
   market: JupMarket;
   yesCost: number;
@@ -139,155 +115,119 @@ interface ArbOpportunity {
   netProfit: number;
 }
 
-// ── Dynamic Priority Fees (Helius) ──────────────────────
-async function getOptimalPriorityFee(): Promise<number> {
-  try {
-    const res = await fetch(CONFIG.HELIUS_HTTP, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "priority-fee",
-        method: "getPriorityFeeEstimate",
-        params: [{ options: { priorityLevel: "High" } }],
-      }),
-    });
-    const data = await res.json();
-    const fee = data?.result?.priorityFeeEstimate || 50_000;
-    return Math.min(fee, 500_000);
-  } catch {
-    return 50_000;
-  }
-}
-
-const BASE_CU_LIMIT = 200_000;
-
-// ── Jupiter Predict API (proxied) ───────────────────────
-function jupHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (CONFIG.JUP_PREDICT_API_KEY) {
-    h["x-api-key"] = CONFIG.JUP_PREDICT_API_KEY;
-    h["Authorization"] = `Bearer ${CONFIG.JUP_PREDICT_API_KEY}`;
-  }
-  return h;
-}
+// ── Jupiter Timed Crypto Markets ────────────────────────
+// Correct API: https://prediction-market-api.jup.ag/api/v1/events/crypto/timed
+// Requires: subcategory (coin) + tags (timeframe)
+const JUP_TIMED_API = "https://prediction-market-api.jup.ag/api/v1/events/crypto/timed";
+const TIMED_COINS = ["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"];
+const TIMED_INTERVALS = ["5m", "15m"];
 
 async function fetchJupiterMarkets(): Promise<JupMarket[]> {
-  try {
-    // Try the dedicated timed crypto endpoint first, then fall back to generic
-    const timedUrl = `${CONFIG.JUP_PREDICT_API}/events/crypto/timed?includeMarkets=true`;
-    const genericUrl = `${CONFIG.JUP_PREDICT_API}/events?` +
-      new URLSearchParams({ includeMarkets: "true", limit: "500", category: "crypto" });
+  const allMarkets: JupMarket[] = [];
 
-    let rawText = "";
-    let res = await jupFetch(timedUrl, { headers: jupHeaders() });
-    if (res.ok) {
-      rawText = await res.text();
-      console.log("[JUP] Using /events/crypto/timed endpoint ✅");
-    } else {
-      console.log(`[JUP] /events/crypto/timed returned ${res.status}, falling back to /events?category=crypto`);
-      res = await jupFetch(genericUrl, { headers: jupHeaders() });
-      rawText = await res.text();
-    }
-    if (!res.ok) {
-      if (rawText.includes("unsupported_region")) {
-        console.error("[JUP] ❌ REGION BLOCKED — set PROXY_URL in .env");
-        return [];
-      }
-      console.error(`[JUP] API ${res.status}: ${rawText.slice(0, 500)}`);
-      return [];
-    }
+  // Fetch all coin × interval combinations in parallel
+  const fetches: Promise<void>[] = [];
 
-    let data: any;
-    try { data = JSON.parse(rawText); } catch {
-      console.error(`[JUP] Invalid JSON: ${rawText.slice(0, 200)}`);
-      return [];
-    }
+  for (const coin of TIMED_COINS) {
+    for (const interval of TIMED_INTERVALS) {
+      fetches.push((async () => {
+        try {
+          const url = `${JUP_TIMED_API}?subcategory=${coin}&tags=${interval}`;
+          const res = await jupFetch(url, { headers: jupHeaders() });
+          if (!res.ok) {
+            const body = await res.text();
+            if (body.includes("unsupported_region")) {
+              console.error(`[JUP] ❌ REGION BLOCKED for ${coin}/${interval} — need PROXY_URL`);
+            }
+            return;
+          }
 
-    const events = Array.isArray(data) ? data : data.events || data.data || [];
-    const markets: JupMarket[] = [];
-    const debugCandidates: JupMarket[] = [];
+          const data = await res.json() as any;
+          const events = Array.isArray(data) ? data : data.data || data.events || [];
+          const now = Date.now() / 1000;
 
-    const CRYPTO_KEYWORDS = [
-      "btc", "bitcoin", "eth", "ethereum", "sol", "solana", "doge", "xrp", "ada", "avax",
-      "bnb", "link", "dot", "matic", "jup", "bonk", "wif", "jto", "pyth", "render", "sui", "apt",
-    ];
+          for (const event of events) {
+            const markets = event.markets || [];
+            // Each event has Up + Down markets — we want to pair them
+            let upMarket: any = null;
+            let downMarket: any = null;
 
-    for (const event of events) {
-      const category = String(event.category || "").toLowerCase();
-      const eventTitle = String(event.title || "");
-      const eventMarkets = event.markets || event.outcomes || [];
+            for (const m of markets) {
+              if (m.status !== "open") continue;
+              const closeTime = Number(m.closeTime || m.metadata?.closeTime || 0);
+              if (closeTime && closeTime < now) continue; // expired
 
-      const isCryptoEvent = category.includes("crypto") ||
-        CRYPTO_KEYWORDS.some((kw) => eventTitle.toLowerCase().includes(kw));
-      if (!isCryptoEvent) continue;
+              const title = (m.metadata?.title || m.title || "").toLowerCase();
+              if (title.includes("up")) upMarket = m;
+              else if (title.includes("down")) downMarket = m;
+            }
 
-      for (const m of eventMarkets) {
-        const pricing = m.pricing || {};
-        let yesPrice = Number(
-          pricing.buyYesPriceUsd ?? pricing.buyYesPrice ?? pricing.yes_price ??
-          m.yesPrice ?? m.yes_price ?? 0
-        );
-        let noPrice = Number(
-          pricing.buyNoPriceUsd ?? pricing.buyNoPrice ?? pricing.no_price ??
-          m.noPrice ?? m.no_price ?? 0
-        );
+            if (!upMarket || !downMarket) continue;
 
-        if (yesPrice > 10) yesPrice /= 1_000_000;
-        if (noPrice > 10) noPrice /= 1_000_000;
-        if (yesPrice <= 0 || noPrice <= 0) continue;
+            // Get prices — in micro-USD (divide by 1M)
+            const upYes = Number(upMarket.pricing?.buyYesPriceUsd || 0) / 1_000_000;
+            const downYes = Number(downMarket.pricing?.buyYesPriceUsd || 0) / 1_000_000;
 
-        const title = String(m.metadata?.title || m.title || eventTitle || m.marketId);
-        const closeTime = Number(m.closeTime ?? m.resolveAt ?? event.closeTime ?? event.resolveAt ?? 0) || null;
-        const openTime = Number(m.openTime ?? event.openTime ?? event.beginAt ?? 0) || null;
-        const endDate = toIsoFromUnix(closeTime) || event.endDate || m.endDate || null;
-        const spread = 1 - (yesPrice + noPrice);
+            if (upYes <= 0 || downYes <= 0) continue;
 
-        const market: JupMarket = {
-          marketId: m.marketId || m.id,
-          eventId: event.eventId || event.id,
-          title,
-          status: m.status || "open",
-          yesPrice,
-          noPrice,
-          spread,
-          category: category || "crypto",
-          endDate,
-          volume: Number(m.volume ?? event.volume ?? event.volumeUsd ?? 0),
-          platform: "jupiter_predict",
-          closeTime,
-          openTime,
-        };
+            // The arb: buy YES on Up + YES on Down. One MUST resolve YES.
+            // Total cost = upYes + downYes. Payout = $1. Spread = 1 - totalCost.
+            const totalCost = upYes + downYes;
+            const spread = 1 - totalCost;
+            const closeTime = Number(upMarket.closeTime || upMarket.metadata?.closeTime || 0);
+            const remaining = closeTime ? Math.round((closeTime - now) / 60) : 0;
+            const eventTitle = event.metadata?.title || event.title || `${coin.toUpperCase()} ${interval}`;
 
-        debugCandidates.push(market);
-        if (market.status === "open" && isShortWindowMarket(market)) {
-          markets.push(market);
+            // Create a synthetic market combining both sides
+            const market: JupMarket = {
+              // Use Up market ID as primary (we'll need both for execution)
+              marketId: upMarket.marketId,
+              eventId: event.eventId || "",
+              title: `${eventTitle} [Up=$${upYes.toFixed(2)} Down=$${downYes.toFixed(2)}]`,
+              status: "open",
+              yesPrice: upYes,    // Up YES price
+              noPrice: downYes,   // Down YES price (our "other side")
+              spread,
+              category: "crypto",
+              endDate: toIsoFromUnix(closeTime),
+              volume: Number(upMarket.pricing?.volume || 0) + Number(downMarket.pricing?.volume || 0),
+              platform: "jupiter_predict",
+              closeTime: closeTime || null,
+              openTime: Number(upMarket.openTime || 0) || null,
+            };
+
+            // Store the Down market ID for execution (we need both)
+            (market as any).downMarketId = downMarket.marketId;
+
+            allMarkets.push(market);
+          }
+        } catch (err) {
+          console.error(`[JUP] Fetch error for ${coin}/${interval}:`, err);
         }
-      }
+      })());
     }
-
-    const result = markets.sort((a, b) => b.spread - a.spread);
-    console.log(`[JUP] Crypto events: ${events.length} | Timed crypto markets: ${result.length}`);
-    console.log(`[JUP] Positive spread: ${result.filter(m => m.spread > 0).length}`);
-
-    if (result.length === 0 && debugCandidates.length > 0) {
-      console.log(`[JUP] ℹ️ No short-window markets found. Top crypto candidates:`);
-      for (const m of debugCandidates.slice(0, 8)) {
-        const remainingMin = m.closeTime ? Math.round((m.closeTime * 1000 - Date.now()) / 60000) : null;
-        console.log(`    "${m.title.slice(0, 50)}" closeTime=${m.closeTime ?? "none"} remaining=${remainingMin ?? "?"}m spread=${(m.spread * 100).toFixed(2)}%`);
-      }
-    }
-
-    for (const m of result.slice(0, 10)) {
-      const sign = m.spread > 0 ? "✅" : "❌";
-      console.log(`  ${sign} "${m.title.slice(0, 55)}" YES=$${m.yesPrice.toFixed(4)} NO=$${m.noPrice.toFixed(4)} sum=${(m.yesPrice + m.noPrice).toFixed(4)} spread=${(m.spread * 100).toFixed(2)}%`);
-    }
-
-    return result;
-  } catch (err) {
-    console.error("[JUP] Fetch error:", err);
-    return [];
   }
+
+  await Promise.all(fetches);
+
+  // Sort by spread (best opportunities first)
+  allMarkets.sort((a, b) => b.spread - a.spread);
+
+  // Log summary
+  const openFuture = allMarkets.filter(m => m.spread > 0);
+  console.log(`[JUP] Timed crypto markets: ${allMarkets.length} | Positive spread: ${openFuture.length}`);
+
+  if (allMarkets.length > 0) {
+    for (const m of allMarkets.slice(0, 10)) {
+      const sign = m.spread > 0 ? "✅" : "❌";
+      const rem = m.closeTime ? `${Math.round((m.closeTime - Date.now() / 1000) / 60)}m` : "?";
+      console.log(`  ${sign} ${m.title.slice(0, 65)} sum=${(m.yesPrice + m.noPrice).toFixed(4)} spread=${(m.spread * 100).toFixed(2)}% rem=${rem}`);
+    }
+  } else {
+    console.log("[JUP] ℹ️ No timed crypto markets found across all coins/intervals");
+  }
+
+  return allMarkets;
 }
 
 // ── DFlow 5-Minute Crypto Markets ───────────────────────
