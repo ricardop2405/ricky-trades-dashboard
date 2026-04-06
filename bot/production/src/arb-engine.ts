@@ -94,6 +94,7 @@ interface JupMarket {
   category: string;
   endDate: string | null;
   volume: number;
+  platform: "jupiter_predict" | "dflow";
 }
 
 interface ArbOpportunity {
@@ -199,6 +200,7 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
           category,
           endDate: event.endDate || m.endDate || null,
           volume: Number(m.volume ?? event.volume ?? 0),
+          platform: "jupiter_predict",
         });
       }
     }
@@ -252,7 +254,98 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
   }
 }
 
-// ── Create Order (contract-based buy with price limit) ──
+// ── DFlow 5-Minute Crypto Markets ───────────────────────
+const DFLOW_API = CONFIG.DFLOW_METADATA_API || "https://prediction-markets-api.dflow.net";
+
+async function fetchDFlowCryptoMarkets(): Promise<JupMarket[]> {
+  try {
+    const markets: JupMarket[] = [];
+
+    // 1. Discover 5-min / 15-min crypto event tickers
+    const cryptoEvents = new Set<string>();
+    let evtCursor: string | null = null;
+    for (let p = 0; p < 10; p++) {
+      const params = new URLSearchParams({ limit: "100" });
+      if (evtCursor) params.set("cursor", evtCursor);
+      const r = await fetch(`${DFLOW_API}/api/v1/events?${params}`);
+      if (!r.ok) break;
+      const d = await r.json();
+      for (const e of (d.events || [])) {
+        const st = (e.seriesTicker || "").toUpperCase();
+        if (st.includes("5M") || st.includes("15M") || st.includes("MIN")) {
+          cryptoEvents.add(e.ticker);
+        }
+      }
+      evtCursor = d.cursor;
+      if (!evtCursor || (d.events || []).length < 100) break;
+    }
+
+    if (cryptoEvents.size === 0) {
+      console.log("[DFLOW] No 5-min crypto events found");
+      return [];
+    }
+
+    // 2. Fetch markets for those events
+    let mkCursor: string | null = null;
+    for (let p = 0; p < 50; p++) {
+      const params = new URLSearchParams({ limit: "100", status: "active" });
+      if (mkCursor) params.set("cursor", mkCursor);
+      const r = await fetch(`${DFLOW_API}/api/v1/markets?${params}`);
+      if (!r.ok) break;
+      const d = await r.json();
+      const batch = d.markets || d.data || (Array.isArray(d) ? d : []);
+      if (!batch.length) break;
+
+      for (const m of batch) {
+        if (!cryptoEvents.has(m.eventTicker)) continue;
+        const yesPrice = m.yesAsk ?? m.yesBid ?? 0;
+        const noPrice = m.noAsk ?? m.noBid ?? 0;
+        if (yesPrice <= 0 || noPrice <= 0) continue;
+
+        const spread = 1 - (yesPrice + noPrice);
+        markets.push({
+          marketId: m.ticker || m.id,
+          eventId: m.eventTicker || "",
+          title: m.title || m.ticker,
+          status: "open",
+          yesPrice,
+          noPrice,
+          spread,
+          category: "crypto",
+          endDate: m.expirationTime ? new Date(m.expirationTime * 1000).toISOString() : null,
+          volume: m.volume || 0,
+          platform: "dflow",
+        });
+      }
+
+      mkCursor = d.cursor;
+      if (!mkCursor) break;
+    }
+
+    // Filter to markets expiring within 15 min
+    const now = Date.now();
+    const MAX_DUR = 15 * 60 * 1000;
+    const result = markets.filter(m => {
+      if (!m.endDate) return true;
+      const endMs = new Date(m.endDate).getTime();
+      if (isNaN(endMs)) return true;
+      const remaining = endMs - now;
+      return remaining > 0 && remaining <= MAX_DUR;
+    }).sort((a, b) => b.spread - a.spread);
+
+    console.log(`[DFLOW] ${cryptoEvents.size} crypto events | ${markets.length} markets | ${result.filter(m => m.spread > 0).length} positive spread`);
+    for (const m of result.filter(m => m.spread > 0).slice(0, 5)) {
+      console.log(`  ✅ DFLOW "${m.title.slice(0, 50)}" YES=$${m.yesPrice.toFixed(4)} NO=$${m.noPrice.toFixed(4)} spread=${(m.spread * 100).toFixed(2)}%`);
+    }
+
+    return result;
+  } catch (err) {
+    console.error("[DFLOW] Fetch error:", err);
+    return [];
+  }
+}
+
+
 async function getExactOutQuote(
   marketId: string,
   isYes: boolean,
@@ -370,7 +463,14 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   console.log(`[ARB] Buying: YES=$${yesCost.toFixed(2)} + NO=$${noCost.toFixed(2)} = $${totalCost.toFixed(2)}`);
 
   // Note: Jupiter Predict holds funds inside their program, not in the wallet's ATA.
-  // The API will return INSUFFICIENT_FUNDS if balance is too low — no pre-check needed.
+  // DFlow markets: scan-only (no on-chain execution yet — different platform)
+  if (market.platform === "dflow") {
+    console.log(`[ARB] 📊 DFlow opportunity logged (execution not yet supported — needs DFlow SDK)`);
+    marketCooldowns.set(market.marketId, Date.now());
+    return;
+  }
+
+  // Jupiter: atomic execution via Jito bundles
   console.log(`[BAL] Using Jupiter Predict program balance (not wallet ATA)`);
 
   const { data: oppRow } = await supabase
@@ -680,11 +780,18 @@ async function runScan() {
   try {
     console.log(`\n[SCAN] ${new Date().toISOString()} ─────────────────────────`);
 
-    const markets = await fetchJupiterMarkets();
+    // Fetch Jupiter + DFlow in parallel
+    const [jupMarkets, dflowMarkets] = await Promise.all([
+      fetchJupiterMarkets(),
+      fetchDFlowCryptoMarkets(),
+    ]);
+    const markets = [...jupMarkets, ...dflowMarkets];
+
     if (markets.length === 0) {
-      console.log("[SCAN] No markets found — retrying next interval");
+      console.log("[SCAN] No markets found on either platform — retrying next interval");
       return;
     }
+    console.log(`[SCAN] Total: ${markets.length} markets (Jupiter=${jupMarkets.length}, DFlow=${dflowMarkets.length})`);
 
     const arbs = findArbs(markets);
 
