@@ -45,25 +45,55 @@ Deno.serve(async (req) => {
     const jupApiKey = Deno.env.get("JUP_PREDICT_API_KEY") || "";
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // ── 1. Fetch active DFlow markets with correct field mapping ──
+    // ── 1. Fetch DFlow markets: active general + 15-min crypto via events ──
     let dflowMarkets: any[] = [];
-    let dfCursor: string | null = null;
     try {
-      for (let page = 0; page < 10; page++) {
+      // 1a. Active general markets
+      let cursor: string | null = null;
+      for (let p = 0; p < 5; p++) {
         const params = new URLSearchParams({ limit: "100", status: "active" });
-        if (dfCursor) params.set("cursor", dfCursor);
-
-        const dfRes = await fetch(`${DFLOW_API}/api/v1/markets?${params}`);
-        if (!dfRes.ok) break;
-
-        const dfData = await dfRes.json();
-        const batch = Array.isArray(dfData) ? dfData : dfData.markets || dfData.data || [];
+        if (cursor) params.set("cursor", cursor);
+        const r = await fetch(`${DFLOW_API}/api/v1/markets?${params}`);
+        if (!r.ok) break;
+        const d = await r.json();
+        const batch = d.markets || d.data || (Array.isArray(d) ? d : []);
         dflowMarkets.push(...batch);
-
-        const nextCursor = dfData.cursor || dfData.next_cursor;
-        if (!nextCursor || batch.length < 100) break;
-        dfCursor = nextCursor;
+        cursor = d.cursor || d.next_cursor;
+        if (!cursor || batch.length < 100) break;
       }
+
+      // 1b. Discover 15-min crypto event tickers
+      const CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"];
+      const cryptoEvents = new Set<string>();
+      let evtCursor: string | null = null;
+      for (let p = 0; p < 5; p++) {
+        const params = new URLSearchParams({ limit: "200" });
+        if (evtCursor) params.set("cursor", evtCursor);
+        const r = await fetch(`${DFLOW_API}/api/v1/events?${params}`);
+        if (!r.ok) break;
+        const d = await r.json();
+        for (const e of (d.events || [])) {
+          if (CRYPTO_SERIES.includes(e.seriesTicker)) cryptoEvents.add(e.ticker);
+        }
+        evtCursor = d.cursor;
+        if (!evtCursor || (d.events || []).length < 200) break;
+      }
+
+      // 1c. Fetch 15-min markets (they live at high cursor offsets)
+      if (cryptoEvents.size > 0) {
+        let mkCursor = "28000";
+        for (let p = 0; p < 30; p++) {
+          const r = await fetch(`${DFLOW_API}/api/v1/markets?limit=100&cursor=${mkCursor}`);
+          if (!r.ok) break;
+          const d = await r.json();
+          const batch = d.markets || d.data || (Array.isArray(d) ? d : []);
+          if (!batch.length) break;
+          for (const m of batch) { if (cryptoEvents.has(m.eventTicker)) dflowMarkets.push(m); }
+          mkCursor = d.cursor;
+          if (!mkCursor) break;
+        }
+      }
+      console.log(`DFlow: ${dflowMarkets.length} markets (${[...new Set(dflowMarkets.filter((m: any) => (m.eventTicker||'').includes('15M')).map((m: any) => m.eventTicker))].length} fifteen-min)`);
     } catch (e) {
       console.error("DFlow fetch error:", e);
     }
