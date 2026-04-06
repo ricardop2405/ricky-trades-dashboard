@@ -26,6 +26,36 @@ import { base } from "viem/chains";
 import { CONFIG } from "./config";
 import { sleep } from "./utils";
 
+// ── Retry wrapper for network resilience ────────────────
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  maxRetries = 3,
+  baseDelayMs = 1000,
+): Promise<Response> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeout);
+      return res;
+    } catch (err: any) {
+      lastError = err;
+      const code = err?.cause?.code || err?.code || "";
+      if (code === "ETIMEDOUT" || code === "ENOTFOUND" || code === "ECONNRESET" || err.name === "AbortError") {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        console.log(`[LIM] ⚠️ Fetch retry ${attempt + 1}/${maxRetries} (${code}) — waiting ${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+      throw err; // non-retryable error
+    }
+  }
+  throw lastError || new Error("fetchWithRetry exhausted");
+}
+
 // ── Setup ───────────────────────────────────────────────
 const account = privateKeyToAccount(CONFIG.BASE_PRIVATE_KEY as Hex);
 const publicClient = createPublicClient({ chain: base, transport: http(CONFIG.BASE_RPC_URL) });
