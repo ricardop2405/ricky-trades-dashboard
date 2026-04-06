@@ -233,6 +233,14 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
     console.log(`[JUP] Total events: ${events.length} | Total markets: ${markets.length}`);
     console.log(`[JUP] Short-term (≤15min): ${result.length} | Crypto/5min preferred`);
 
+    // Log category breakdown for debugging
+    const catCounts: Record<string, number> = {};
+    for (const m of markets) {
+      const cat = m.category || "unknown";
+      catCounts[cat] = (catCounts[cat] || 0) + 1;
+    }
+    console.log(`[JUP] Categories: ${Object.entries(catCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+
     const sorted = [...result].sort((a, b) => b.spread - a.spread);
     for (const m of sorted.slice(0, 10)) {
       const sign = m.spread > 0 ? "✅" : "❌";
