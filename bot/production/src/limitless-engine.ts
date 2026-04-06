@@ -440,6 +440,13 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
       const estimatedGas = 0.15; // be conservative on gas
       const netProfit = grossProfit - estimatedGas;
 
+      // HARD RULE: combined price per contract MUST be < $1 (investment < payout)
+      const combinedPricePerContract = totalCost / contracts;
+      if (combinedPricePerContract >= 0.97) {
+        // Skip: too close to $1, no guaranteed profit after fees/gas
+        continue;
+      }
+
       if (spread > CONFIG.LIMITLESS_MIN_SPREAD && netProfit > 0) {
         opps.push({
           market,
