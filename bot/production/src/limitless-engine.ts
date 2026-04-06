@@ -204,7 +204,7 @@ async function placeSignedOrder(
   };
 
   const sideLabel = side === 0 ? "BUY" : "SELL";
-  console.log(`[LIM] Submitting ${sideLabel} ${orderType} order: tokenId=${tokenId.slice(0, 12)}... maker=${makerAmount.toString()} taker=${takerAmount.toString()}`);
+  console.log(`[LIM] Submitting ${sideLabel} ${orderType} order: tokenId=${tokenId.slice(0, 12)}... maker=${Number(makerAmount)} taker=${Number(takerAmount)} ownerId=${CONFIG.LIMITLESS_OWNER_ID}`);
 
   const res = await fetch(`${CONFIG.LIMITLESS_API}/orders`, {
     method: "POST",
