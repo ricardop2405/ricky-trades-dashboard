@@ -101,7 +101,7 @@ Deno.serve(async (req) => {
           if (!mkCursor) break;
         }
       }
-      console.log(`DFlow: ${dflowMarkets.length} markets (${[...new Set(dflowMarkets.filter((m: any) => (m.eventTicker||'').includes('15M')).map((m: any) => m.eventTicker))].length} fifteen-min)`);
+      console.log(`DFlow: ${dflowMarkets.length} markets (${[...new Set(dflowMarkets.filter((m: any) => /15M|5M|MIN/i.test(m.eventTicker||'')).map((m: any) => m.eventTicker))].length} short-window crypto)`);
     } catch (e) {
       console.error("DFlow fetch error:", e);
     }
