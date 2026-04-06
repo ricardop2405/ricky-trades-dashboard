@@ -119,8 +119,8 @@ async function placeSignedOrder(
   size: number,
   orderType: "FOK" | "GTC" = "FOK",
 ): Promise<any> {
+  if (!CONFIG.LIMITLESS_OWNER_ID) throw new Error("Missing LIMITLESS_OWNER_ID in .env");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (CONFIG.LIMITLESS_API_KEY) headers["x-api-key"] = CONFIG.LIMITLESS_API_KEY;
 
   const salt = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
   orderNonce++;
@@ -183,14 +183,14 @@ async function placeSignedOrder(
   // Build the API payload
   const payload = {
     order: {
-      salt: salt.toString(),
+      salt: Number(salt),
       maker: account.address,
       signer: account.address,
       taker: "0x0000000000000000000000000000000000000000",
       tokenId,
-      makerAmount: makerAmount.toString(),
-      takerAmount: takerAmount.toString(),
-      expiration: "0",
+      makerAmount: Number(makerAmount),
+      takerAmount: Number(takerAmount),
+      expiration: 0,
       nonce: orderNonce,
       feeRateBps: 0,
       side,
@@ -198,12 +198,13 @@ async function placeSignedOrder(
       signature,
       ...(orderType === "GTC" ? { price } : {}),
     },
+    ownerId: CONFIG.LIMITLESS_OWNER_ID,
     orderType,
     marketSlug: market.slug,
   };
 
   const sideLabel = side === 0 ? "BUY" : "SELL";
-  console.log(`[LIM] Submitting ${sideLabel} ${orderType} order: tokenId=${tokenId.slice(0, 12)}... maker=${makerAmount.toString()} taker=${takerAmount.toString()}`);
+  console.log(`[LIM] Submitting ${sideLabel} ${orderType} order: tokenId=${tokenId.slice(0, 12)}... maker=${Number(makerAmount)} taker=${Number(takerAmount)} ownerId=${CONFIG.LIMITLESS_OWNER_ID}`);
 
   const res = await fetch(`${CONFIG.LIMITLESS_API}/orders`, {
     method: "POST",
