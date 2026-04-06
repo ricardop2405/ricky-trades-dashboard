@@ -494,6 +494,57 @@ async function sendDirect(tx: VersionedTransaction, label: string): Promise<stri
 }
 
 // ── Main Scan Loop ──────────────────────────────────────
+
+// ── Close All Positions (emergency unwind) ──────────────
+async function closeAllPositions(): Promise<boolean> {
+  try {
+    console.log("[CLOSE] Requesting close-all-positions transaction...");
+    const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/positions`, {
+      method: "DELETE",
+      headers: {
+        ...jupHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ownerPubkey: WALLET }),
+    });
+
+    const rawText = await res.text();
+    if (!res.ok) {
+      console.error(`[CLOSE] API error ${res.status}: ${rawText.slice(0, 300)}`);
+      return false;
+    }
+
+    let data: any;
+    try { data = JSON.parse(rawText); } catch { return false; }
+
+    if (data.transaction) {
+      const tx = await buildAndSign(data.transaction);
+      const sig = await sendDirect(tx, "CLOSE-ALL");
+      if (sig) {
+        console.log(`[CLOSE] ✅ All positions closed: ${sig.slice(0, 16)}...`);
+        return true;
+      }
+    }
+
+    // If multiple transactions returned
+    if (data.transactions && Array.isArray(data.transactions)) {
+      for (const txData of data.transactions) {
+        const tx = await buildAndSign(txData);
+        await sendDirect(tx, "CLOSE");
+      }
+      console.log("[CLOSE] ✅ Closed all positions");
+      return true;
+    }
+
+    console.error("[CLOSE] No transaction returned");
+    return false;
+  } catch (err) {
+    console.error("[CLOSE] ❌ Error closing positions:", err);
+    return false;
+  }
+}
+
+// ── Main Scan Loop continued ────────────────────────────
 async function runScan() {
   try {
     console.log(`\n[SCAN] ${new Date().toISOString()} ─────────────────────────`);
