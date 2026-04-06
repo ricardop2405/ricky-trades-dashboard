@@ -246,10 +246,21 @@ async function fetchJupMarkets(): Promise<JupMarket[]> {
     for (const event of events) {
       const eventMarkets = event.markets || event.outcomes || [];
       for (const m of eventMarkets) {
+        // Extract pricing from various possible response shapes
+        const pricing = m.pricing || {};
+        // Jupiter may return prices as raw integers (micro-units) or decimals
+        // Try multiple field names the API might use
+        const buyYes = pricing.buyYesPriceUsd ?? pricing.buyYesPrice ?? pricing.yes_price ?? m.yesPrice ?? m.yes_price ?? 0;
+        const buyNo = pricing.buyNoPriceUsd ?? pricing.buyNoPrice ?? pricing.no_price ?? m.noPrice ?? m.no_price ?? 0;
+        
         markets.push({
           ...m,
           eventId: event.eventId || event.id,
           metadata: { title: event.title || m.metadata?.title || m.title, marketId: m.marketId || m.id },
+          pricing: {
+            buyYesPriceUsd: Number(buyYes) || 0,
+            buyNoPriceUsd: Number(buyNo) || 0,
+          },
         });
       }
     }
