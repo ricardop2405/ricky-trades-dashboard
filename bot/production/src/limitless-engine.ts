@@ -192,7 +192,7 @@ async function placeSignedOrder(
       makerAmount: Number(makerAmount),
       takerAmount: Number(takerAmount),
       expiration: "0",
-      nonce: orderNonce,
+      nonce: 0,
       feeRateBps: 0,
       side,
       signatureType: 0,
