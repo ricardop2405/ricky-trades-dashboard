@@ -687,6 +687,16 @@ async function main() {
     console.warn("[ARB] ⚠️  No JUP_PREDICT_API_KEY — may be rate-limited");
   }
 
+  // Startup cleanup: cancel any stale open orders from previous runs
+  console.log("[ARB] Checking for stale open orders...");
+  const staleOrders = await getOpenOrders();
+  if (staleOrders.length > 0) {
+    console.log(`[ARB] Found ${staleOrders.length} stale open orders — cancelling`);
+    await cancelAllOrders();
+  } else {
+    console.log("[ARB] No stale orders ✅");
+  }
+
   console.log("[ARB] Starting scan loop...\n");
   await runScan();
   setInterval(runScan, CONFIG.SCAN_INTERVAL);
