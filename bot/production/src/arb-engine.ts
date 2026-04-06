@@ -1,16 +1,18 @@
 /**
- * RICKY TRADES — DFlow ↔ Jupiter Predict Atomic Arb Engine
+ * RICKY TRADES — Drift BET ↔ Jupiter Predict Arb Engine
  *
- * Scans both DFlow (Kalshi tokenized) and Jupiter Predict for the
- * same prediction markets. When YES_a + NO_b < 1 (or vice versa),
- * buys both sides across platforms for guaranteed profit on resolution.
+ * Scans both Drift BET and Jupiter Predict for the same prediction
+ * markets. When YES_a + NO_b < 1 (or vice versa), buys both sides
+ * across platforms for guaranteed profit on resolution.
  *
- * Both APIs return unsigned Solana transactions — we sign & submit.
+ * - Drift BET: Public Data API (no key needed) + on-chain execution
+ * - Jupiter Predict: Public API + on-chain execution
+ * - Both are Solana-native = atomic settlement
  *
  * Usage: npm run arb
  */
 
-import { Connection, Keypair, VersionedTransaction, TransactionMessage, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { Connection, Keypair, VersionedTransaction, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { createClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
 import { CONFIG } from "./config";
@@ -23,30 +25,32 @@ const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
 
 const WALLET = keypair.publicKey.toBase58();
 
+// Drift BET public API — no key needed
+const DRIFT_DATA_API = "https://data.api.drift.trade";
+
 console.log("═══════════════════════════════════════════════════");
-console.log("  RICKY TRADES — DFlow ↔ Jupiter Predict Arb");
+console.log("  RICKY TRADES — Drift BET ↔ Jupiter Predict Arb");
 console.log("═══════════════════════════════════════════════════");
 console.log(`[ARB] Wallet: ${WALLET}`);
 console.log(`[ARB] Amount per trade: $${CONFIG.ARB_AMOUNT}`);
 console.log(`[ARB] Min spread: ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}%`);
 console.log(`[ARB] Scan interval: ${CONFIG.SCAN_INTERVAL / 1000}s`);
-console.log(`[ARB] DFlow API: ${CONFIG.DFLOW_METADATA_API}`);
+console.log(`[ARB] Drift API: ${DRIFT_DATA_API}`);
 console.log(`[ARB] Jupiter API: ${CONFIG.JUP_PREDICT_API}`);
 console.log("═══════════════════════════════════════════════════");
 
 // ── Types ───────────────────────────────────────────────
-interface DFlowMarket {
-  ticker: string;
-  title: string;
-  eventTicker?: string;
-  seriesTicker?: string;
-  // API returns yesBid/yesAsk/noBid/noAsk (NOT yes_price/no_price)
-  yesBid: number | null;
-  yesAsk: number | null;
-  noBid: number | null;
-  noAsk: number | null;
+interface DriftBetMarket {
+  marketIndex: number;
+  symbol: string;
+  contractType: string;
   status: string;
-  expirationTime?: number;
+  // Prediction markets have prices 0-1
+  markPrice: number;
+  oraclePrice: number;
+  bestBid: number;
+  bestAsk: number;
+  volume24h?: number;
 }
 
 interface JupMarket {
@@ -60,156 +64,85 @@ interface JupMarket {
   pricing?: {
     buyYesPriceUsd?: number;
     buyNoPriceUsd?: number;
-    sellYesPriceUsd?: number;
-    sellNoPriceUsd?: number;
   };
 }
 
 interface ArbOpportunity {
-  dflow_ticker: string;
+  drift_market_index: number;
+  drift_symbol: string;
   jup_market_id: string;
   title: string;
-  dflow_yes: number;
-  dflow_no: number;
+  drift_yes: number;
+  drift_no: number;
   jup_yes: number;
   jup_no: number;
   best_spread: number;
-  strategy: "dflow_yes_jup_no" | "dflow_no_jup_yes";
+  strategy: "drift_yes_jup_no" | "drift_no_jup_yes";
 }
 
-// ── DFlow API ───────────────────────────────────────────
-function dflowHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (CONFIG.DFLOW_API_KEY) h["x-api-key"] = CONFIG.DFLOW_API_KEY;
-  return h;
-}
-
-async function fetchDFlowMarkets(): Promise<DFlowMarket[]> {
-  const allMarkets: DFlowMarket[] = [];
-
+// ── Drift BET API ───────────────────────────────────────
+async function fetchDriftBetMarkets(): Promise<DriftBetMarket[]> {
   try {
-    // Strategy: fetch active markets from general endpoint PLUS
-    // discover 15-minute crypto markets via events → market tickers
-    
-    // 1. Fetch general active markets (politics, sports, long-term crypto)
-    let cursor: string | null = null;
-    for (let page = 0; page < 5; page++) {
-      const params = new URLSearchParams({ limit: "100", status: "active" });
-      if (cursor) params.set("cursor", cursor);
-      const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/markets?${params}`, { headers: dflowHeaders() });
-      if (!res.ok) break;
-      const data = await res.json();
-      const markets = Array.isArray(data) ? data : data.markets || data.data || [];
-      allMarkets.push(...markets);
-      const next = data.cursor || data.next_cursor;
-      if (!next || markets.length < 100) break;
-      cursor = next;
+    // Fetch all perp markets from Drift Data API
+    const res = await fetch(`${DRIFT_DATA_API}/markets/perp`);
+    if (!res.ok) {
+      console.error(`[DRIFT] API ${res.status}: ${await res.text()}`);
+      return [];
     }
 
-    // 2. Dynamically discover ALL 15-min crypto series via Metadata API
-    //    Don't hardcode series tickers — they are auto-created and transient
-    const cryptoEventTickers: string[] = [];
-    const discoveredSeries = new Set<string>();
-    
-    let evtCursor: string | null = null;
-    for (let page = 0; page < 10; page++) {
-      // IMPORTANT: Do NOT pass isInitialized=true — 15-min markets reset
-      // constantly and may not have trades yet in current window
-      const params = new URLSearchParams({ limit: "100" });
-      if (evtCursor) params.set("cursor", evtCursor);
-      const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/events?${params}`, { headers: dflowHeaders() });
-      if (!res.ok) {
-        console.error(`[DFLOW] Events fetch failed: ${res.status}`);
-        break;
-      }
-      const data = await res.json();
-      const events = data.events || [];
-      for (const e of events) {
-        // Match any series that looks like a 15-min or 5-min crypto series
-        const st = (e.seriesTicker || "").toUpperCase();
-        if (st.includes("15M") || st.includes("5M") || st.includes("MIN")) {
-          cryptoEventTickers.push(e.ticker);
-          discoveredSeries.add(st);
-        }
-      }
-      const next = data.cursor;
-      if (!next || events.length < 100) break;
-      evtCursor = next;
-      await sleep(150); // Rate limit protection
-    }
+    const data = await res.json();
+    const allMarkets = Array.isArray(data) ? data : data.markets || data.data || [];
 
-    console.log(`[DFLOW] Discovered ${discoveredSeries.size} crypto series: ${[...discoveredSeries].join(", ")}`);
-    console.log(`[DFLOW] Found ${cryptoEventTickers.length} short-window crypto events`);
-
-    // 3. Fetch markets for each crypto event ticker by scanning deeper
-    // Markets are at high cursor values; batch fetch them
-    if (cryptoEventTickers.length > 0) {
-      const eventSet = new Set(cryptoEventTickers);
-      // Scan market pages looking for these event tickers
-      let mkCursor = "28000"; // 15M markets start around cursor 28000+
-      for (let page = 0; page < 30; page++) {
-        const params = new URLSearchParams({ limit: "100", cursor: mkCursor });
-        const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/markets?${params}`, { headers: dflowHeaders() });
-        if (!res.ok) break;
-        const data = await res.json();
-        const markets = Array.isArray(data) ? data : data.markets || data.data || [];
-        if (markets.length === 0) break;
-
-        for (const m of markets) {
-          if (eventSet.has(m.eventTicker)) {
-            allMarkets.push(m);
-          }
-        }
-
-        const next = data.cursor;
-        if (!next) break;
-        mkCursor = next.toString();
-        await sleep(200); // Rate limit protection
-      }
-    }
-
-    // Log what we found
-    const withPrices = allMarkets.filter((m: any) => m.yesBid != null || m.yesAsk != null);
-    const crypto15m = allMarkets.filter((m: any) => (m.eventTicker || "").includes("15M"));
-    console.log(
-      `[DFLOW] Total: ${allMarkets.length} markets | ${withPrices.length} with prices | ${crypto15m.length} fifteen-min crypto`
+    // Filter to prediction markets only (contractType = "prediction")
+    const betMarkets = allMarkets.filter((m: any) =>
+      m.contractType === "prediction" || m.contractType === "Prediction" ||
+      (m.symbol && m.symbol.includes("BET"))
     );
 
-    for (const m of crypto15m.slice(0, 5)) {
+    console.log(`[DRIFT] Total perp markets: ${allMarkets.length} | Prediction (BET): ${betMarkets.length}`);
+
+    // Parse into our format
+    const parsed: DriftBetMarket[] = betMarkets.map((m: any) => ({
+      marketIndex: m.marketIndex ?? m.market_index ?? 0,
+      symbol: m.symbol || m.name || `MARKET-${m.marketIndex}`,
+      contractType: m.contractType || m.contract_type || "prediction",
+      status: m.status || "active",
+      markPrice: Number(m.markPrice ?? m.mark_price ?? 0),
+      oraclePrice: Number(m.oraclePrice ?? m.oracle_price ?? 0),
+      bestBid: Number(m.bestBid ?? m.best_bid ?? 0),
+      bestAsk: Number(m.bestAsk ?? m.best_ask ?? 0),
+      volume24h: Number(m.volume24h ?? m.volume_24h ?? 0),
+    }));
+
+    // Log samples
+    for (const m of parsed.slice(0, 5)) {
       console.log(
-        `  ${m.ticker} "${(m.title || "").slice(0, 50)}" ` +
-        `yesBid=${m.yesBid} yesAsk=${m.yesAsk} status=${m.status}`
+        `  [DRIFT] ${m.symbol} idx=${m.marketIndex} ` +
+        `bid=${m.bestBid.toFixed(4)} ask=${m.bestAsk.toFixed(4)} ` +
+        `mark=${m.markPrice.toFixed(4)} status=${m.status}`
       );
     }
 
-    return allMarkets;
+    return parsed;
   } catch (err) {
-    console.error("[DFLOW] Fetch error:", err);
-    return allMarkets;
+    console.error("[DRIFT] Fetch error:", err);
+    return [];
   }
 }
 
-async function getDFlowBuyTx(ticker: string, side: "yes" | "no", amountUsd: number): Promise<string | null> {
+// Also try the orderbook endpoint for more accurate prices
+async function getDriftOrderbook(marketIndex: number): Promise<{ bestBid: number; bestAsk: number } | null> {
   try {
-    const res = await fetch(`${CONFIG.DFLOW_TRADE_API}/api/v1/buy`, {
-      method: "POST",
-      headers: dflowHeaders(),
-      body: JSON.stringify({
-        ticker,
-        side,
-        amount: Math.floor(amountUsd * 1_000_000), // USDC micro-units
-        owner: WALLET,
-        slippage_bps: 100,
-      }),
-    });
-    if (!res.ok) {
-      console.error(`[DFLOW] Buy TX error ${res.status}: ${await res.text()}`);
-      return null;
-    }
+    const res = await fetch(`${DRIFT_DATA_API}/l2?marketIndex=${marketIndex}&marketType=perp&depth=1`);
+    if (!res.ok) return null;
     const data = await res.json();
-    return data.transaction || null;
-  } catch (err) {
-    console.error("[DFLOW] Buy TX error:", err);
+    const bids = data.bids || [];
+    const asks = data.asks || [];
+    return {
+      bestBid: bids.length > 0 ? Number(bids[0].price) : 0,
+      bestAsk: asks.length > 0 ? Number(asks[0].price) : 0,
+    };
+  } catch {
     return null;
   }
 }
@@ -227,9 +160,7 @@ function jupHeaders(): Record<string, string> {
 async function fetchJupMarkets(): Promise<JupMarket[]> {
   try {
     const url = `${CONFIG.JUP_PREDICT_API}/events?` +
-      new URLSearchParams({ includeMarkets: "true", limit: "50" });
-    console.log(`[JUP] Fetching: ${url.split("?")[0]}?...`);
-    console.log(`[JUP] API key set: ${!!CONFIG.JUP_PREDICT_API_KEY} (${CONFIG.JUP_PREDICT_API_KEY ? CONFIG.JUP_PREDICT_API_KEY.slice(0, 8) + "..." : "MISSING"})`);
+      new URLSearchParams({ includeMarkets: "true", limit: "200" });
 
     const res = await fetch(url, { headers: jupHeaders() });
     const rawText = await res.text();
@@ -240,40 +171,49 @@ async function fetchJupMarkets(): Promise<JupMarket[]> {
     }
 
     let data: any;
-    try {
-      data = JSON.parse(rawText);
-    } catch {
-      console.error(`[JUP] Invalid JSON response: ${rawText.slice(0, 200)}`);
+    try { data = JSON.parse(rawText); } catch {
+      console.error(`[JUP] Invalid JSON: ${rawText.slice(0, 200)}`);
       return [];
     }
 
-    console.log(`[JUP] Response type: ${typeof data}, isArray: ${Array.isArray(data)}, keys: ${typeof data === "object" && data ? Object.keys(data).join(",") : "n/a"}`);
-
     const events = Array.isArray(data) ? data : data.events || data.data || [];
-    console.log(`[JUP] Events found: ${events.length}`);
+    console.log(`[JUP] Events: ${events.length}`);
 
     const markets: JupMarket[] = [];
     for (const event of events) {
       const eventMarkets = event.markets || event.outcomes || [];
       for (const m of eventMarkets) {
-        // Extract pricing from various possible response shapes
         const pricing = m.pricing || {};
-        // Jupiter may return prices as raw integers (micro-units) or decimals
-        // Try multiple field names the API might use
         const buyYes = pricing.buyYesPriceUsd ?? pricing.buyYesPrice ?? pricing.yes_price ?? m.yesPrice ?? m.yes_price ?? 0;
         const buyNo = pricing.buyNoPriceUsd ?? pricing.buyNoPrice ?? pricing.no_price ?? m.noPrice ?? m.no_price ?? 0;
-        
+
+        let yesNum = Number(buyYes) || 0;
+        let noNum = Number(buyNo) || 0;
+        // Convert micro-units if needed
+        if (yesNum > 10) yesNum = yesNum / 1_000_000;
+        if (noNum > 10) noNum = noNum / 1_000_000;
+
         markets.push({
-          ...m,
+          marketId: m.marketId || m.id,
           eventId: event.eventId || event.id,
+          status: m.status || "open",
           metadata: { title: event.title || m.metadata?.title || m.title, marketId: m.marketId || m.id },
           pricing: {
-            buyYesPriceUsd: Number(buyYes) || 0,
-            buyNoPriceUsd: Number(buyNo) || 0,
+            buyYesPriceUsd: yesNum,
+            buyNoPriceUsd: noNum,
           },
         });
       }
     }
+
+    // Log samples
+    for (const m of markets.slice(0, 3)) {
+      console.log(
+        `  [JUP] "${(m.metadata?.title || m.marketId).slice(0, 50)}" ` +
+        `YES=$${m.pricing?.buyYesPriceUsd?.toFixed(4)} NO=$${m.pricing?.buyNoPriceUsd?.toFixed(4)} status=${m.status}`
+      );
+    }
+
     return markets;
   } catch (err) {
     console.error("[JUP] Fetch error:", err);
@@ -283,16 +223,14 @@ async function fetchJupMarkets(): Promise<JupMarket[]> {
 
 async function getJupBuyTx(marketId: string, isYes: boolean, amountUsd: number): Promise<string | null> {
   try {
-    // Jupiter Prediction API: POST /orders
-    // Docs: https://dev.jup.ag/api-reference/prediction/create-order
-    const body: Record<string, any> = {
+    const body = {
       ownerPubkey: WALLET,
       marketId,
       isYes,
       isBuy: true,
       depositMint: CONFIG.JUP_USD_MINT,
-      amount: Math.floor(amountUsd * 1_000_000), // JupUSD micro-units
-      limitPrice: isYes ? 0.99 : 0.99, // max price willing to pay per contract
+      amount: Math.floor(amountUsd * 1_000_000),
+      limitPrice: 0.99,
     };
 
     console.log(`[JUP] Creating order: marketId=${marketId} isYes=${isYes} amount=$${amountUsd.toFixed(2)}`);
@@ -311,11 +249,64 @@ async function getJupBuyTx(marketId: string, isYes: boolean, amountUsd: number):
 
     let data: any;
     try { data = JSON.parse(rawText); } catch { return null; }
-
-    // API returns { transaction: "base64...", txMeta?: {...} }
     return data.transaction || null;
   } catch (err) {
     console.error("[JUP] Order TX error:", err);
+    return null;
+  }
+}
+
+// ── Drift BET Execution ─────────────────────────────────
+// Drift Gateway is the recommended execution path for bots
+// If running locally: http://localhost:8080 (self-hosted gateway)
+// Falls back to Data API order placement
+const DRIFT_GATEWAY = process.env.DRIFT_GATEWAY_URL || "http://localhost:8080";
+
+async function getDriftBuyTx(marketIndex: number, isYes: boolean, amountUsd: number): Promise<string | null> {
+  try {
+    // Drift prediction markets: buy YES = go long, buy NO = go short
+    // Prices are 0-1 representing probability
+    const direction = isYes ? "long" : "short";
+    // Convert USD to contracts (price * contracts = cost)
+    const contracts = amountUsd; // ~$1 per contract at resolution
+
+    console.log(`[DRIFT] Placing ${direction} order: marketIndex=${marketIndex} contracts=${contracts} ($${amountUsd.toFixed(2)})`);
+
+    // Try Drift Gateway first (self-hosted, recommended for bots)
+    try {
+      const res = await fetch(`${DRIFT_GATEWAY}/v2/orders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          marketIndex,
+          marketType: "perp",
+          amount: contracts,
+          direction,
+          orderType: "market",
+          reduceOnly: false,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        console.log(`[DRIFT] Gateway order placed: ${JSON.stringify(data).slice(0, 200)}`);
+        return data.tx || data.transaction || data.txSignature || "gateway-order";
+      }
+
+      // Gateway not available, fall back to manual
+      console.log(`[DRIFT] Gateway unavailable (${res.status}), will log opportunity only`);
+    } catch {
+      console.log("[DRIFT] Gateway not running, logging opportunity for manual execution");
+    }
+
+    // If no gateway, log the trade details for manual execution
+    console.log(`[DRIFT] MANUAL TRADE NEEDED:`);
+    console.log(`  Market: ${marketIndex} | Direction: ${direction} | Amount: $${amountUsd.toFixed(2)}`);
+    console.log(`  Execute via: https://app.drift.trade/bet`);
+
+    return null;
+  } catch (err) {
+    console.error("[DRIFT] Order error:", err);
     return null;
   }
 }
@@ -329,6 +320,7 @@ function extractKeywords(text: string): string[] {
     "but", "not", "what", "which", "who", "how", "when", "where", "why",
     "before", "after", "during", "than", "more", "any", "each", "every",
     "yes", "no", "if", "then", "so", "up", "out", "about", "over",
+    "bet", "predict", "prediction", "market",
   ]);
   return text
     .toLowerCase()
@@ -346,100 +338,79 @@ function matchScore(a: string, b: string): number {
 }
 
 // ── Find Arb Opportunities ──────────────────────────────
-function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[]): ArbOpportunity[] {
+function findOpportunities(driftMarkets: DriftBetMarket[], jupMarkets: JupMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
-  const MATCH_THRESHOLD = 0.25; // Lowered — crypto titles are short (e.g. "BTC above 60000")
+  const MATCH_THRESHOLD = 0.25;
+  const topMatches: { drift: string; jup: string; score: number; spread1: number; spread2: number }[] = [];
 
-  // Track top matches for debug logging
-  const topMatches: { df: string; jup: string; score: number; spread1: number; spread2: number }[] = [];
+  for (const dm of driftMarkets) {
+    // Drift BET: bestBid = YES price, 1 - bestAsk = NO price (since it's a binary)
+    const driftYes = dm.bestAsk || dm.markPrice || 0;  // Cost to buy YES
+    const driftNo = 1 - (dm.bestBid || dm.markPrice || 1);  // Cost to buy NO
 
-  for (const df of dflowMarkets) {
-    // Use yesAsk for buying YES (what you pay), noAsk for buying NO
-    const dfYes = Number(df.yesAsk ?? df.yesBid ?? 0) || 0;
-    const dfNo = Number(df.noAsk ?? df.noBid ?? 0) || 0;
-    if (dfYes === 0 && dfNo === 0) continue;
+    if (driftYes === 0 && driftNo === 0) continue;
 
     for (const jm of jupMarkets) {
       if (jm.status !== "open") continue;
 
-      const dfTitle = df.title || df.ticker;
-      const jTitle = jm.metadata?.title || jm.marketId;
-      const score = matchScore(dfTitle, jTitle);
+      const driftTitle = dm.symbol;
+      const jupTitle = jm.metadata?.title || jm.marketId;
+      const score = matchScore(driftTitle, jupTitle);
 
-      // Jupiter prices — buy-side USD quotes
-      let jYes = Number(jm.pricing?.buyYesPriceUsd ?? 0) || 0;
-      let jNo = Number(jm.pricing?.buyNoPriceUsd ?? 0) || 0;
-      // If prices look like micro-units (> 10 USD), convert
-      if (jYes > 10) jYes = jYes / 1_000_000;
-      if (jNo > 10) jNo = jNo / 1_000_000;
+      const jYes = jm.pricing?.buyYesPriceUsd || 0;
+      const jNo = jm.pricing?.buyNoPriceUsd || 0;
+      if (jYes === 0 && jNo === 0) continue;
 
-      // Skip if either side has no valid price
-      if ((jYes === 0 && jNo === 0)) continue;
+      // Cross-platform arb: sum of opposite sides should be < 1
+      const spread1 = 1 - (driftYes + jNo);   // Buy YES on Drift + NO on Jupiter
+      const spread2 = 1 - (driftNo + jYes);   // Buy NO on Drift + YES on Jupiter
 
-      const spread1 = 1 - (dfYes + jNo);
-      const spread2 = 1 - (dfNo + jYes);
-
-      // Track top matches regardless of threshold
       if (score > 0.1) {
-        topMatches.push({ df: dfTitle.slice(0, 50), jup: jTitle.slice(0, 50), score, spread1, spread2 });
+        topMatches.push({ drift: driftTitle, jup: jupTitle.slice(0, 50), score, spread1, spread2 });
       }
 
       if (score < MATCH_THRESHOLD) continue;
 
-      // Strategy 1: Buy YES on DFlow + NO on Jupiter
       if (spread1 > CONFIG.MIN_SPREAD) {
         opps.push({
-          dflow_ticker: df.ticker,
+          drift_market_index: dm.marketIndex,
+          drift_symbol: dm.symbol,
           jup_market_id: jm.marketId,
-          title: dfTitle,
-          dflow_yes: dfYes,
-          dflow_no: dfNo,
+          title: jupTitle,
+          drift_yes: driftYes,
+          drift_no: driftNo,
           jup_yes: jYes,
           jup_no: jNo,
           best_spread: spread1,
-          strategy: "dflow_yes_jup_no",
+          strategy: "drift_yes_jup_no",
         });
       }
 
-      // Strategy 2: Buy NO on DFlow + YES on Jupiter
       if (spread2 > CONFIG.MIN_SPREAD) {
         opps.push({
-          dflow_ticker: df.ticker,
+          drift_market_index: dm.marketIndex,
+          drift_symbol: dm.symbol,
           jup_market_id: jm.marketId,
-          title: dfTitle,
-          dflow_yes: dfYes,
-          dflow_no: dfNo,
+          title: jupTitle,
+          drift_yes: driftYes,
+          drift_no: driftNo,
           jup_yes: jYes,
           jup_no: jNo,
           best_spread: spread2,
-          strategy: "dflow_no_jup_yes",
+          strategy: "drift_no_jup_yes",
         });
       }
     }
   }
 
-  // Log top 10 closest matches for debugging
+  // Debug logging
   topMatches.sort((a, b) => b.score - a.score);
   console.log(`[MATCH] Top market matches (${topMatches.length} pairs with score > 0.1):`);
   for (const m of topMatches.slice(0, 10)) {
-    console.log(`  score=${m.score.toFixed(2)} spread1=${(m.spread1*100).toFixed(1)}% spread2=${(m.spread2*100).toFixed(1)}% | DF: "${m.df}" ↔ JUP: "${m.jup}"`);
-  }
-
-  // Log sample prices from each platform
-  if (dflowMarkets.length > 0) {
-    console.log(`[DFLOW] Sample markets:`);
-    for (const m of dflowMarkets.slice(0, 3)) {
-      console.log(`  "${(m.title||m.ticker).slice(0,60)}" yesBid=${m.yesBid} yesAsk=${m.yesAsk} noBid=${m.noBid} noAsk=${m.noAsk} status=${m.status}`);
-    }
-  }
-  if (jupMarkets.length > 0) {
-    const sample = jupMarkets.slice(0, 3);
-    console.log(`[JUP] Sample markets:`);
-    for (const m of sample) {
-      const yp = m.pricing?.buyYesPriceUsd ?? 0;
-      const np = m.pricing?.buyNoPriceUsd ?? 0;
-      console.log(`  "${(m.metadata?.title||m.marketId).slice(0,60)}" YES_raw=${yp} NO_raw=${np} status=${m.status}`);
-    }
+    console.log(
+      `  score=${m.score.toFixed(2)} spread1=${(m.spread1 * 100).toFixed(1)}% spread2=${(m.spread2 * 100).toFixed(1)}% ` +
+      `| DRIFT: "${m.drift}" ↔ JUP: "${m.jup}"`
+    );
   }
 
   return opps.sort((a, b) => b.best_spread - a.best_spread);
@@ -460,7 +431,6 @@ async function signAndSubmit(base64Tx: string, label: string): Promise<string | 
 
     console.log(`[TX] ${label} submitted: ${sig.slice(0, 16)}...`);
 
-    // Wait for confirmation
     const confirmation = await connection.confirmTransaction(sig, "confirmed");
     if (confirmation.value.err) {
       console.error(`[TX] ${label} FAILED on-chain:`, confirmation.value.err);
@@ -483,19 +453,19 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   console.log(`[ARB] Market: ${opp.title}`);
   console.log(`[ARB] Strategy: ${opp.strategy}`);
   console.log(`[ARB] Spread: ${(opp.best_spread * 100).toFixed(2)}%`);
-  console.log(`[ARB] DFlow: YES=$${opp.dflow_yes.toFixed(4)} NO=$${opp.dflow_no.toFixed(4)}`);
+  console.log(`[ARB] Drift: YES=$${opp.drift_yes.toFixed(4)} NO=$${opp.drift_no.toFixed(4)}`);
   console.log(`[ARB] Jupiter: YES=$${opp.jup_yes.toFixed(4)} NO=$${opp.jup_no.toFixed(4)}`);
 
   // Insert opportunity to DB
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
     .insert({
-      market_a_id: opp.dflow_ticker,
+      market_a_id: `drift-${opp.drift_market_index}`,
       market_b_id: opp.jup_market_id,
-      side_a: opp.strategy === "dflow_yes_jup_no" ? "yes" : "no",
-      side_b: opp.strategy === "dflow_yes_jup_no" ? "no" : "yes",
-      price_a: opp.strategy === "dflow_yes_jup_no" ? opp.dflow_yes : opp.dflow_no,
-      price_b: opp.strategy === "dflow_yes_jup_no" ? opp.jup_no : opp.jup_yes,
+      side_a: opp.strategy === "drift_yes_jup_no" ? "yes" : "no",
+      side_b: opp.strategy === "drift_yes_jup_no" ? "no" : "yes",
+      price_a: opp.strategy === "drift_yes_jup_no" ? opp.drift_yes : opp.drift_no,
+      price_b: opp.strategy === "drift_yes_jup_no" ? opp.jup_no : opp.jup_yes,
       spread: opp.best_spread,
       status: "executing",
     })
@@ -505,71 +475,86 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   const oppId = oppRow?.id;
 
   try {
-    // Step 1: Get DFlow transaction
-    const dflowSide = opp.strategy === "dflow_yes_jup_no" ? "yes" : "no";
-    const dflowCost = dflowSide === "yes" ? opp.dflow_yes * halfAmount : opp.dflow_no * halfAmount;
-    console.log(`[ARB] Getting DFlow ${dflowSide.toUpperCase()} tx ($${dflowCost.toFixed(2)})...`);
-    const dflowTx = await getDFlowBuyTx(opp.dflow_ticker, dflowSide, dflowCost);
+    // Step 1: Get Drift BET order
+    const driftIsYes = opp.strategy === "drift_yes_jup_no";
+    const driftCost = driftIsYes ? opp.drift_yes * halfAmount : opp.drift_no * halfAmount;
+    const driftTx = await getDriftBuyTx(opp.drift_market_index, driftIsYes, driftCost);
 
-    // Step 2: Get Jupiter transaction
-    const jupIsYes = opp.strategy === "dflow_no_jup_yes";
+    // Step 2: Get Jupiter order
+    const jupIsYes = opp.strategy === "drift_no_jup_yes";
     const jupCost = jupIsYes ? opp.jup_yes * halfAmount : opp.jup_no * halfAmount;
-    console.log(`[ARB] Getting Jupiter ${jupIsYes ? "YES" : "NO"} tx ($${jupCost.toFixed(2)})...`);
     const jupTx = await getJupBuyTx(opp.jup_market_id, jupIsYes, jupCost);
 
-    if (!dflowTx || !jupTx) {
-      console.error("[ARB] ❌ Failed to get one or both transactions");
+    // If Drift Gateway returned a tx, sign & submit both
+    if (driftTx && driftTx !== "gateway-order" && jupTx) {
+      console.log("[ARB] Signing and submitting both legs...");
+      const [driftSig, jupSig] = await Promise.all([
+        signAndSubmit(driftTx, `Drift-${driftIsYes ? "YES" : "NO"}`),
+        signAndSubmit(jupTx, `Jup-${jupIsYes ? "YES" : "NO"}`),
+      ]);
+
+      const totalCost = driftCost + jupCost;
+      const payout = halfAmount;
+      const profit = payout - totalCost;
+      const fees = totalCost * 0.01; // ~1% fees
+      const netPnl = profit - fees;
+      const success = driftSig && jupSig;
+
+      console.log(`[ARB] ${success ? "✅" : "❌"} | Cost: $${totalCost.toFixed(2)} | Net P&L: $${netPnl.toFixed(2)}`);
+
       if (oppId) {
-        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: totalCost,
+          realized_pnl: success ? netPnl : 0,
+          fees: success ? fees : 0,
+          status: success ? "filled" : "partial",
+          side_a_tx: driftSig,
+          side_b_tx: jupSig,
+          side_a_fill_price: driftIsYes ? opp.drift_yes : opp.drift_no,
+          side_b_fill_price: jupIsYes ? opp.jup_yes : opp.jup_no,
+          error_message: success ? null : `Partial: drift=${!!driftSig} jup=${!!jupSig}`,
+        });
+        await supabase.from("arb_opportunities").update({ status: success ? "executed" : "failed" }).eq("id", oppId);
+      }
+    } else if (driftTx === "gateway-order" && jupTx) {
+      // Gateway handled Drift side, submit Jupiter
+      const jupSig = await signAndSubmit(jupTx, `Jup-${jupIsYes ? "YES" : "NO"}`);
+      const totalCost = driftCost + jupCost;
+      const netPnl = halfAmount - totalCost - (totalCost * 0.01);
+
+      console.log(`[ARB] Gateway+TX mode | Jupiter: ${jupSig ? "✅" : "❌"} | Net P&L: $${netPnl.toFixed(2)}`);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: totalCost,
+          realized_pnl: jupSig ? netPnl : 0,
+          fees: totalCost * 0.01,
+          status: jupSig ? "filled" : "partial",
+          side_a_tx: "gateway",
+          side_b_tx: jupSig,
+          side_a_fill_price: driftIsYes ? opp.drift_yes : opp.drift_no,
+          side_b_fill_price: jupIsYes ? opp.jup_yes : opp.jup_no,
+        });
+        await supabase.from("arb_opportunities").update({ status: jupSig ? "executed" : "failed" }).eq("id", oppId);
+      }
+    } else {
+      // Log opportunity but can't execute both sides
+      console.log("[ARB] ⚠️  Cannot execute — missing transaction from one or both sides");
+      console.log("[ARB] Opportunity logged for manual review on dashboard");
+
+      if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
           amount_usd: 0,
           realized_pnl: 0,
           fees: 0,
-          status: "failed",
-          error_message: `Missing tx: dflow=${!!dflowTx} jup=${!!jupTx}`,
+          status: "detected",
+          error_message: `Detected only: drift_tx=${!!driftTx} jup_tx=${!!jupTx}. Check Drift Gateway.`,
         });
+        await supabase.from("arb_opportunities").update({ status: "open" }).eq("id", oppId);
       }
-      return;
-    }
-
-    // Step 3: Sign & submit both transactions
-    console.log("[ARB] Signing and submitting both legs...");
-    const [dflowSig, jupSig] = await Promise.all([
-      signAndSubmit(dflowTx, `DFlow-${dflowSide}`),
-      signAndSubmit(jupTx, `Jup-${jupIsYes ? "YES" : "NO"}`),
-    ]);
-
-    const totalCost = dflowCost + jupCost;
-    const payout = halfAmount; // $1 per unit on resolution
-    const profit = payout - totalCost;
-    const fees = totalCost * 0.02;
-    const netPnl = profit - fees;
-
-    const success = dflowSig && jupSig;
-
-    console.log(`[ARB] ${success ? "✅" : "❌"} | Cost: $${totalCost.toFixed(2)} | Net P&L: $${netPnl.toFixed(2)}`);
-    if (dflowSig) console.log(`[ARB] DFlow tx: ${dflowSig}`);
-    if (jupSig) console.log(`[ARB] Jupiter tx: ${jupSig}`);
-
-    if (oppId) {
-      await supabase.from("arb_executions").insert({
-        opportunity_id: oppId,
-        amount_usd: totalCost,
-        realized_pnl: success ? netPnl : 0,
-        fees: success ? fees : 0,
-        status: success ? "filled" : "partial",
-        side_a_tx: dflowSig,
-        side_b_tx: jupSig,
-        side_a_fill_price: opp.strategy === "dflow_yes_jup_no" ? opp.dflow_yes : opp.dflow_no,
-        side_b_fill_price: opp.strategy === "dflow_yes_jup_no" ? opp.jup_no : opp.jup_yes,
-        error_message: success ? null : `Partial fill: dflow=${!!dflowSig} jup=${!!jupSig}`,
-      });
-
-      await supabase
-        .from("arb_opportunities")
-        .update({ status: success ? "executed" : "failed" })
-        .eq("id", oppId);
     }
   } catch (err) {
     console.error("[ARB] ❌ Execution error:", err);
@@ -592,49 +577,60 @@ async function runScan() {
   try {
     console.log(`\n[SCAN] ${new Date().toISOString()} — Fetching markets...`);
 
-    const [dflowMarkets, jupMarkets] = await Promise.all([
-      fetchDFlowMarkets(),
+    const [driftMarkets, jupMarkets] = await Promise.all([
+      fetchDriftBetMarkets(),
       fetchJupMarkets(),
     ]);
 
-    console.log(`[SCAN] DFlow: ${dflowMarkets.length} markets | Jupiter: ${jupMarkets.length} markets`);
+    console.log(`[SCAN] Drift BET: ${driftMarkets.length} markets | Jupiter: ${jupMarkets.length} markets`);
 
-    if (dflowMarkets.length === 0 || jupMarkets.length === 0) {
-      console.log("[SCAN] Not enough data from one platform, skipping arb detection");
+    if (driftMarkets.length === 0 && jupMarkets.length === 0) {
+      console.log("[SCAN] No markets from either platform, skipping");
       return;
     }
 
-    const opportunities = findOpportunities(dflowMarkets, jupMarkets);
-    console.log(`[SCAN] Found ${opportunities.length} arb opportunities above ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}% spread`);
-
-    // Execute top opportunities (limit to 3 per scan to manage risk)
-    const toExecute = opportunities.slice(0, 3);
-    for (const opp of toExecute) {
-      console.log(
-        `[ARB] ${opp.title.slice(0, 50)} | ${opp.strategy} | spread=${(opp.best_spread * 100).toFixed(2)}%`
-      );
-      await executeArb(opp);
-      await sleep(2000); // Rate limit between executions
+    if (driftMarkets.length === 0) {
+      console.log("[SCAN] No Drift BET markets found — checking if API is responding...");
+      // Still log Jupiter markets to DB for dashboard
     }
 
-    // Also upsert to DB for dashboard visibility
-    if (dflowMarkets.length > 0) {
-      const dflowUpserts = dflowMarkets.slice(0, 200).map((m) => ({
-        platform: "dflow",
-        external_id: m.ticker,
-        question: m.title || m.ticker,
-        yes_price: m.yesAsk ?? m.yesBid ?? 0,
-        no_price: m.noAsk ?? m.noBid ?? 0,
-        volume: 0,
-        end_date: m.expirationTime ? new Date(m.expirationTime * 1000).toISOString() : null,
-        category: m.seriesTicker || null,
-        url: null,
+    if (jupMarkets.length === 0) {
+      console.log("[SCAN] No Jupiter markets found — API may be rate-limited");
+    }
+
+    // Find cross-platform arbs
+    if (driftMarkets.length > 0 && jupMarkets.length > 0) {
+      const opportunities = findOpportunities(driftMarkets, jupMarkets);
+      console.log(`[SCAN] Found ${opportunities.length} arb opportunities above ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}% spread`);
+
+      // Execute top opportunities (limit to 3 per scan)
+      for (const opp of opportunities.slice(0, 3)) {
+        console.log(
+          `[ARB] ${opp.title.slice(0, 50)} | ${opp.strategy} | spread=${(opp.best_spread * 100).toFixed(2)}%`
+        );
+        await executeArb(opp);
+        await sleep(2000);
+      }
+    }
+
+    // Upsert Drift markets to DB for dashboard
+    if (driftMarkets.length > 0) {
+      const driftUpserts = driftMarkets.map((m) => ({
+        platform: "drift_bet",
+        external_id: `drift-${m.marketIndex}`,
+        question: m.symbol,
+        yes_price: m.bestAsk || m.markPrice,
+        no_price: 1 - (m.bestBid || m.markPrice),
+        volume: m.volume24h || 0,
+        end_date: null,
+        category: "prediction",
+        url: `https://app.drift.trade/bet`,
         last_synced_at: new Date().toISOString(),
       }));
 
       await supabase
         .from("prediction_markets")
-        .upsert(dflowUpserts, { onConflict: "platform,external_id" });
+        .upsert(driftUpserts, { onConflict: "platform,external_id" });
     }
   } catch (err) {
     console.error("[SCAN] Error:", err);
@@ -654,15 +650,13 @@ async function main() {
     console.warn("[ARB] Could not check wallet balance");
   }
 
-  // Warn if no Jupiter API key
   if (!CONFIG.JUP_PREDICT_API_KEY) {
-    console.warn("[ARB] ⚠️  No JUP_PREDICT_API_KEY set — Jupiter requests may fail");
-    console.warn("[ARB]    Get one at https://portal.jup.ag");
+    console.warn("[ARB] ⚠️  No JUP_PREDICT_API_KEY set — Jupiter requests may be rate-limited");
   }
 
   await runScan();
   setInterval(runScan, CONFIG.SCAN_INTERVAL);
-  console.log("[ARB] Engine running. Scanning DFlow ↔ Jupiter Predict...");
+  console.log("[ARB] Engine running. Scanning Drift BET ↔ Jupiter Predict...");
 }
 
 main().catch(console.error);
