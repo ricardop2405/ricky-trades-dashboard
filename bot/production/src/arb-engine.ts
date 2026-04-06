@@ -34,14 +34,9 @@ const connection = new Connection(CONFIG.HELIUS_HTTP, { commitment: "confirmed" 
 const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
 const WALLET = keypair.publicKey.toBase58();
 
-// Jito block engines — multiple endpoints for redundancy
-const JITO_ENDPOINTS = [
-  "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
-  "https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles",
-  "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",
-  "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",
-  "https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles",
-];
+// Market cooldown — skip recently attempted markets
+const marketCooldowns = new Map<string, number>();
+const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
 
 // ── Proxy Setup ─────────────────────────────────────────
 // Route Jupiter API through proxy to bypass region blocks
@@ -77,7 +72,7 @@ console.log(`[ARB] Amount per trade: $${CONFIG.ARB_AMOUNT}`);
 console.log(`[ARB] Min spread: ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}%`);
 console.log(`[ARB] Scan interval: ${CONFIG.SCAN_INTERVAL / 1000}s`);
 console.log(`[ARB] Jupiter API: ${CONFIG.JUP_PREDICT_API}`);
-console.log(`[ARB] Jito MEV protection: ON`);
+console.log(`[ARB] Execution: Direct parallel (both legs same slot)`);
 console.log(`[ARB] Dynamic priority fees: ON (Helius)`);
 console.log("═══════════════════════════════════════════════════════");
 
@@ -398,6 +393,9 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
 
   for (const market of markets) {
     const { yesPrice, noPrice, spread } = market;
+    // Skip markets on cooldown (recently attempted)
+    const lastAttempt = marketCooldowns.get(market.marketId);
+    if (lastAttempt && (Date.now() - lastAttempt) < COOLDOWN_MS) continue;
     if (spread <= CONFIG.MIN_SPREAD) continue;
 
     const amount = CONFIG.ARB_AMOUNT;
@@ -479,28 +477,63 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
       buildAndSign(noTxRaw),
     ]);
 
-    // Submit as Jito bundle (MEV-protected)
-    console.log("[JITO] Submitting both legs as MEV-protected bundle...");
-    const bundleId = await submitJitoBundle([yesTx.serialize(), noTx.serialize()]);
+    // Send both legs simultaneously via direct RPC (same slot)
+    console.log("[TX] Sending both legs simultaneously...");
+    const [yesSig, noSig] = await Promise.all([
+      sendDirect(yesTx, "YES"),
+      sendDirect(noTx, "NO"),
+    ]);
 
-    if (bundleId) {
-      console.log(`[ARB] ✅ Bundle landed! Net profit: ~$${netProfit.toFixed(4)}`);
+    // Set cooldown regardless of outcome
+    marketCooldowns.set(market.marketId, Date.now());
+
+    if (yesSig && noSig) {
+      console.log(`[ARB] ✅ Both legs landed! Net profit: ~$${netProfit.toFixed(4)}`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
           fees: opp.fees, status: "filled",
-          side_a_tx: bundleId, side_b_tx: bundleId,
+          side_a_tx: yesSig, side_b_tx: noSig,
           side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
         });
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
+    } else if (yesSig && !noSig) {
+      console.error("[ARB] ⚠️  YES landed but NO failed — retrying NO...");
+      let noRetryOk: string | null = null;
+      for (let r = 1; r <= 2; r++) {
+        await sleep(1000);
+        const freshNoRaw = await getExactOutQuote(market.marketId, false, noCost, market.noPrice);
+        if (freshNoRaw) {
+          const freshNo = await buildAndSign(freshNoRaw);
+          noRetryOk = await sendDirect(freshNo, `NO-retry-${r}`);
+          if (noRetryOk) break;
+        }
+      }
+      if (noRetryOk) {
+        console.log(`[ARB] ✅ NO retry succeeded! Both legs filled.`);
+      } else {
+        console.error("[ARB] ⚠️  NO retry failed — one-sided exposure on YES");
+      }
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: totalCost,
+          realized_pnl: noRetryOk ? netProfit : 0,
+          fees: opp.fees, status: noRetryOk ? "filled" : "partial",
+          side_a_tx: yesSig, side_b_tx: noRetryOk || null,
+          side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
+          error_message: noRetryOk ? null : "NO leg failed — one-sided exposure",
+        });
+        await supabase.from("arb_opportunities").update({
+          status: noRetryOk ? "executed" : "failed",
+        }).eq("id", oppId);
+      }
     } else {
-      // Atomic only — no direct fallback to avoid partial fills
-      console.log("[ARB] ❌ Jito bundle failed — aborting (no partial exposure)");
+      console.log("[ARB] ❌ Both legs failed — no exposure");
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
-          status: "failed", error_message: "Jito bundle rejected — aborted to avoid partial fill",
+          status: "failed", error_message: "Both legs failed",
         });
         await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
