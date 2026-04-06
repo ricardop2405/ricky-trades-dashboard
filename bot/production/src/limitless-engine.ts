@@ -660,6 +660,18 @@ async function checkBalance(): Promise<number> {
 
 // ── Main Loop ───────────────────────────────────────────
 async function main(): Promise<void> {
+  // Pre-fetch fee rate so profit math is accurate from scan #1
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (CONFIG.LIMITLESS_API_KEY) headers["X-API-Key"] = CONFIG.LIMITLESS_API_KEY;
+  try {
+    const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, { headers });
+    if (feeRes.ok) {
+      const feeData = await feeRes.json();
+      cachedFeeRateBps = Number(feeData?.rank?.feeRateBps ?? feeData?.feeRateBps ?? 0);
+      console.log(`[LIM] Account fee rate: ${cachedFeeRateBps} bps (${(cachedFeeRateBps / 100).toFixed(1)}%)`);
+    }
+  } catch {}
+
   const balance = await checkBalance();
   if (balance < CONFIG.LIMITLESS_TRADE_SIZE_USD) {
     console.error(`[LIM] ❌ Insufficient USDC: $${balance.toFixed(2)} < $${CONFIG.LIMITLESS_TRADE_SIZE_USD}`);
