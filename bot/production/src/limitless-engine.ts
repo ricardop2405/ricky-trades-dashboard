@@ -176,7 +176,7 @@ async function placeSignedOrder(
     takerAmount,
     expiration: 0n, // no expiration
     nonce: 0n,
-    feeRateBps: 0n,
+    feeRateBps: BigInt(feeRateBps),
     side,
     signatureType: 0, // EOA
   };
