@@ -283,23 +283,36 @@ async function fetchJupMarkets(): Promise<JupMarket[]> {
 
 async function getJupBuyTx(marketId: string, isYes: boolean, amountUsd: number): Promise<string | null> {
   try {
+    // Jupiter Prediction API: POST /orders
+    // Docs: https://dev.jup.ag/api-reference/prediction/create-order
+    const body: Record<string, any> = {
+      ownerPubkey: WALLET,
+      marketId,
+      isYes,
+      isBuy: true,
+      depositMint: CONFIG.JUP_USD_MINT,
+      amount: Math.floor(amountUsd * 1_000_000), // JupUSD micro-units
+      limitPrice: isYes ? 0.99 : 0.99, // max price willing to pay per contract
+    };
+
+    console.log(`[JUP] Creating order: marketId=${marketId} isYes=${isYes} amount=$${amountUsd.toFixed(2)}`);
+
     const res = await fetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
       method: "POST",
       headers: jupHeaders(),
-      body: JSON.stringify({
-        ownerPubkey: WALLET,
-        marketId,
-        isYes,
-        depositMint: CONFIG.JUP_USD_MINT,
-        amount: Math.floor(amountUsd * 1_000_000), // JupUSD micro-units
-        limitPrice: isYes ? 0.99 : 0.99, // max price willing to pay
-      }),
+      body: JSON.stringify(body),
     });
+
+    const rawText = await res.text();
     if (!res.ok) {
-      console.error(`[JUP] Order TX error ${res.status}: ${await res.text()}`);
+      console.error(`[JUP] Order TX error ${res.status}: ${rawText.slice(0, 500)}`);
       return null;
     }
-    const data = await res.json();
+
+    let data: any;
+    try { data = JSON.parse(rawText); } catch { return null; }
+
+    // API returns { transaction: "base64...", txMeta?: {...} }
     return data.transaction || null;
   } catch (err) {
     console.error("[JUP] Order TX error:", err);
