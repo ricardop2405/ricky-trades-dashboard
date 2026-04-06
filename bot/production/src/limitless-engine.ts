@@ -95,7 +95,7 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
   if (CONFIG.LIMITLESS_API_KEY) headers["x-api-key"] = CONFIG.LIMITLESS_API_KEY;
 
   try {
-    const res = await fetch(`${CONFIG.LIMITLESS_API}/markets/active?limit=200`, { headers });
+    const res = await fetch(`${CONFIG.LIMITLESS_API}/markets/active?limit=25`, { headers });
     if (!res.ok) {
       console.error(`[LIM] Markets fetch failed: ${res.status}`);
       return [];
