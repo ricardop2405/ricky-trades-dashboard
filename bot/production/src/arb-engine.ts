@@ -34,8 +34,14 @@ const connection = new Connection(CONFIG.HELIUS_HTTP, { commitment: "confirmed" 
 const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
 const WALLET = keypair.publicKey.toBase58();
 
-// Jito block engine for MEV-protected submission
-const JITO_BLOCK_ENGINE = "https://mainnet.block-engine.jito.wtf/api/v1/bundles";
+// Jito block engines — multiple endpoints for redundancy
+const JITO_ENDPOINTS = [
+  "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
+  "https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  "https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles",
+];
 
 // ── Proxy Setup ─────────────────────────────────────────
 // Route Jupiter API through proxy to bypass region blocks
@@ -227,6 +233,14 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
     console.log(`[JUP] Total events: ${events.length} | Total markets: ${markets.length}`);
     console.log(`[JUP] Short-term (≤15min): ${result.length} | Crypto/5min preferred`);
 
+    // Log category breakdown for debugging
+    const catCounts: Record<string, number> = {};
+    for (const m of markets) {
+      const cat = m.category || "unknown";
+      catCounts[cat] = (catCounts[cat] || 0) + 1;
+    }
+    console.log(`[JUP] Categories: ${Object.entries(catCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+
     const sorted = [...result].sort((a, b) => b.spread - a.spread);
     for (const m of sorted.slice(0, 10)) {
       const sign = m.spread > 0 ? "✅" : "❌";
@@ -295,64 +309,79 @@ async function getExactOutQuote(
 async function submitJitoBundle(
   signedTxs: Uint8Array[],
 ): Promise<string | null> {
-  try {
-    const encodedTxs = signedTxs.map(tx => bs58.encode(tx));
+  const encodedTxs = signedTxs.map(tx => bs58.encode(tx));
+  const payload = JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "sendBundle", params: [encodedTxs],
+  });
 
-    const res = await fetch(JITO_BLOCK_ENGINE, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "sendBundle",
-        params: [encodedTxs],
-      }),
-    });
-
-    const data = await res.json();
-    if (data.error) {
-      console.error("[JITO] Bundle error:", data.error);
-      return null;
-    }
-
-    const bundleId = data.result;
-    console.log(`[JITO] Bundle submitted: ${bundleId}`);
-
-    for (let i = 0; i < 10; i++) {
-      await sleep(2000);
+  // Try each endpoint with retries
+  for (let attempt = 0; attempt < 3; attempt++) {
+    for (const endpoint of JITO_ENDPOINTS) {
       try {
-        const statusRes = await fetch(JITO_BLOCK_ENGINE, {
+        const res = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "getBundleStatuses",
-            params: [[bundleId]],
-          }),
+          body: payload,
         });
-        const statusData = await statusRes.json();
-        const statuses = statusData?.result?.value || [];
-        if (statuses.length > 0) {
-          const s = statuses[0];
-          if (s.confirmation_status === "confirmed" || s.confirmation_status === "finalized") {
-            console.log(`[JITO] Bundle CONFIRMED ✅ (slot ${s.slot})`);
-            return bundleId;
+        const data = await res.json();
+
+        if (data.error) {
+          const msg = data.error.message || "";
+          if (msg.includes("rate limited") || msg.includes("congested")) {
+            console.warn(`[JITO] ${endpoint.split("//")[1].split(".")[0]} rate limited, trying next...`);
+            continue;
           }
-          if (s.err) {
-            console.error(`[JITO] Bundle FAILED:`, s.err);
-            return null;
-          }
+          console.error("[JITO] Bundle error:", data.error);
+          return null;
         }
-      } catch { /* keep polling */ }
+
+        const bundleId = data.result;
+        console.log(`[JITO] Bundle submitted via ${endpoint.split("//")[1].split(".")[0]}: ${bundleId}`);
+
+        // Poll for confirmation
+        for (let i = 0; i < 10; i++) {
+          await sleep(2000);
+          try {
+            const statusRes = await fetch(endpoint, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                jsonrpc: "2.0", id: 1, method: "getBundleStatuses",
+                params: [[bundleId]],
+              }),
+            });
+            const statusData = await statusRes.json();
+            const statuses = statusData?.result?.value || [];
+            if (statuses.length > 0) {
+              const s = statuses[0];
+              if (s.confirmation_status === "confirmed" || s.confirmation_status === "finalized") {
+                console.log(`[JITO] Bundle CONFIRMED ✅ (slot ${s.slot})`);
+                return bundleId;
+              }
+              if (s.err) {
+                console.error(`[JITO] Bundle FAILED:`, s.err);
+                return null;
+              }
+            }
+          } catch { /* keep polling */ }
+        }
+
+        console.warn("[JITO] Bundle status unknown after polling");
+        return bundleId;
+      } catch (err) {
+        console.warn(`[JITO] ${endpoint.split("//")[1].split(".")[0]} error:`, err);
+        continue;
+      }
     }
 
-    console.warn("[JITO] Bundle status unknown after polling");
-    return bundleId;
-  } catch (err) {
-    console.error("[JITO] Submit error:", err);
-    return null;
+    if (attempt < 2) {
+      console.log(`[JITO] All endpoints failed, retrying in 1s (attempt ${attempt + 2}/3)...`);
+      await sleep(1000);
+    }
   }
+
+  console.error("[JITO] All endpoints exhausted after 3 attempts");
+  return null;
 }
 
 // ── Build & Sign Transaction ────────────────────────────
