@@ -118,6 +118,7 @@ interface ArbOpportunity {
 const marketCooldowns = new Map<string, number>();
 const COOLDOWN_MS = 5 * 60 * 1000;
 let orderNonce = 0;
+let cachedFeeRateBps: number | null = null;
 const ENABLE_SPLIT_ARBS = false;
 
 function normalizeBookSide(levels: any[], descending = false): OrderbookLevel[] {
@@ -168,22 +169,24 @@ async function placeSignedOrder(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (CONFIG.LIMITLESS_API_KEY) headers["X-API-Key"] = CONFIG.LIMITLESS_API_KEY;
 
-  // Query the authenticated profile for the account fee band
-  let feeRateBps = 0;
-  try {
-    const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, {
-      headers,
-    });
-    if (feeRes.ok) {
-      const feeData = await feeRes.json();
-      feeRateBps = Number(feeData?.rank?.feeRateBps ?? feeData?.feeRateBps ?? 0);
-      console.log(`[LIM] Fee rate for account: ${feeRateBps} bps`);
-    } else {
-      console.log(`[LIM] Fee profile lookup failed: ${feeRes.status}`);
+  // Use cached fee rate or fetch it once
+  if (cachedFeeRateBps === null) {
+    try {
+      const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, { headers });
+      if (feeRes.ok) {
+        const feeData = await feeRes.json();
+        cachedFeeRateBps = Number(feeData?.rank?.feeRateBps ?? feeData?.feeRateBps ?? 0);
+        console.log(`[LIM] Fee rate for account: ${cachedFeeRateBps} bps`);
+      } else {
+        cachedFeeRateBps = 0;
+        console.log(`[LIM] Fee profile lookup failed: ${feeRes.status}, using 0`);
+      }
+    } catch {
+      cachedFeeRateBps = 0;
+      console.log(`[LIM] Could not fetch fee profile, using 0`);
     }
-  } catch {
-    console.log(`[LIM] Could not fetch fee profile, using 0`);
   }
+  const feeRateBps = cachedFeeRateBps;
 
   const salt = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
   orderNonce++;
@@ -371,6 +374,7 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
 function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
   const contracts = Math.floor(CONFIG.LIMITLESS_TRADE_SIZE_USD);
+  const feeMultiplier = 1 + (cachedFeeRateBps ?? 0) / 10000; // e.g. 1.03 for 300 bps
 
   for (const market of markets) {
     const lastAttempt = marketCooldowns.get(market.slug);
@@ -380,11 +384,12 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
     const noAskFill = getDepthFill(market.noAsks, contracts);
 
     if (yesAskFill && noAskFill) {
-      const totalCost = yesAskFill.totalCost + noAskFill.totalCost;
-      const payout = contracts;
+      // Total cost INCLUDING exchange fees on both buy legs
+      const totalCost = (yesAskFill.totalCost + noAskFill.totalCost) * feeMultiplier;
+      const payout = contracts; // merge gives $1 per contract
       const grossProfit = payout - totalCost;
       const spread = payout > 0 ? grossProfit / payout : 0;
-      const estimatedGas = 0.10;
+      const estimatedGas = 0.15; // be conservative on gas
       const netProfit = grossProfit - estimatedGas;
 
       if (spread > CONFIG.LIMITLESS_MIN_SPREAD && netProfit > 0) {
@@ -655,6 +660,18 @@ async function checkBalance(): Promise<number> {
 
 // ── Main Loop ───────────────────────────────────────────
 async function main(): Promise<void> {
+  // Pre-fetch fee rate so profit math is accurate from scan #1
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (CONFIG.LIMITLESS_API_KEY) headers["X-API-Key"] = CONFIG.LIMITLESS_API_KEY;
+  try {
+    const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, { headers });
+    if (feeRes.ok) {
+      const feeData = await feeRes.json();
+      cachedFeeRateBps = Number(feeData?.rank?.feeRateBps ?? feeData?.feeRateBps ?? 0);
+      console.log(`[LIM] Account fee rate: ${cachedFeeRateBps} bps (${(cachedFeeRateBps / 100).toFixed(1)}%)`);
+    }
+  } catch {}
+
   const balance = await checkBalance();
   if (balance < CONFIG.LIMITLESS_TRADE_SIZE_USD) {
     console.error(`[LIM] ❌ Insufficient USDC: $${balance.toFixed(2)} < $${CONFIG.LIMITLESS_TRADE_SIZE_USD}`);
