@@ -94,6 +94,7 @@ interface JupMarket {
   category: string;
   endDate: string | null;
   volume: number;
+  platform: "jupiter_predict" | "dflow";
 }
 
 interface ArbOpportunity {
