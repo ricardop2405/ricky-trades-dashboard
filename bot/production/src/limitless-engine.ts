@@ -74,6 +74,11 @@ const ORDER_TYPES = {
 } as const;
 
 // ── Types ───────────────────────────────────────────────
+interface OrderbookLevel {
+  price: number;
+  size: number;
+}
+
 interface LimitlessMarket {
   slug: string;
   title: string;
@@ -82,6 +87,10 @@ interface LimitlessMarket {
   yesBid: number;
   noAsk: number;
   noBid: number;
+  yesAsks: OrderbookLevel[];
+  yesBids: OrderbookLevel[];
+  noAsks: OrderbookLevel[];
+  noBids: OrderbookLevel[];
   conditionId: string;
   collateralToken: Address;
   expiresAt: string | null;
@@ -109,6 +118,42 @@ interface ArbOpportunity {
 const marketCooldowns = new Map<string, number>();
 const COOLDOWN_MS = 5 * 60 * 1000;
 let orderNonce = 0;
+const ENABLE_SPLIT_ARBS = false;
+
+function normalizeBookSide(levels: any[], descending = false): OrderbookLevel[] {
+  return (Array.isArray(levels) ? levels : [])
+    .map((level: any) => ({
+      price: Number(level?.price ?? 0),
+      size: Number(level?.size ?? level?.amount ?? level?.quantity ?? level?.shares ?? 0),
+    }))
+    .filter((level) => level.price > 0 && level.size > 0)
+    .sort((a, b) => descending ? b.price - a.price : a.price - b.price);
+}
+
+function getDepthFill(levels: OrderbookLevel[], targetContracts: number): { avgPrice: number; totalCost: number } | null {
+  if (targetContracts <= 0) return null;
+  let remaining = targetContracts;
+  let totalCost = 0;
+
+  for (const level of levels) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, level.size);
+    totalCost += take * level.price;
+    remaining -= take;
+  }
+
+  if (remaining > 1e-9) return null;
+  return { avgPrice: totalCost / targetContracts, totalCost };
+}
+
+async function getConditionalTokenBalance(tokenId: string): Promise<bigint> {
+  return publicClient.readContract({
+    address: CONFIG.CTF_ADDRESS as Address,
+    abi: CTF_ABI,
+    functionName: 'balanceOf',
+    args: [account.address, BigInt(tokenId)],
+  });
+}
 
 // ── Sign & Submit an EIP-712 Order ──────────────────────
 async function placeSignedOrder(
@@ -277,19 +322,23 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
 
           const yesBook = await yesBookRes.json();
           const noBook = await noBookRes.json();
-          const yesAsks = (yesBook.asks || []).sort((a: any, b: any) => a.price - b.price);
-          const yesBids = (yesBook.bids || []).sort((a: any, b: any) => b.price - a.price);
-          const noAsks = (noBook.asks || []).sort((a: any, b: any) => a.price - b.price);
-          const noBids = (noBook.bids || []).sort((a: any, b: any) => b.price - a.price);
+          const yesAsks = normalizeBookSide(yesBook.asks || [], false);
+          const yesBids = normalizeBookSide(yesBook.bids || [], true);
+          const noAsks = normalizeBookSide(noBook.asks || [], false);
+          const noBids = normalizeBookSide(noBook.bids || [], true);
 
           return {
             slug,
             title: m.title || m.question || slug,
             status: m.status || "active",
-            yesAsk: yesAsks.length > 0 ? Number(yesAsks[0].price) : 1,
-            yesBid: yesBids.length > 0 ? Number(yesBids[0].price) : 0,
-            noAsk: noAsks.length > 0 ? Number(noAsks[0].price) : 1,
-            noBid: noBids.length > 0 ? Number(noBids[0].price) : 0,
+            yesAsk: yesAsks.length > 0 ? yesAsks[0].price : 1,
+            yesBid: yesBids.length > 0 ? yesBids[0].price : 0,
+            noAsk: noAsks.length > 0 ? noAsks[0].price : 1,
+            noBid: noBids.length > 0 ? noBids[0].price : 0,
+            yesAsks,
+            yesBids,
+            noAsks,
+            noBids,
             conditionId: m.conditionId || "",
             collateralToken: (m.collateralToken?.address || CONFIG.LIMITLESS_USDC) as Address,
             expiresAt: m.expirationDate || m.expiresAt || null,
@@ -321,49 +370,65 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
 // ── Find Arb Opportunities ──────────────────────────────
 function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
-  const tradeSize = CONFIG.LIMITLESS_TRADE_SIZE_USD;
+  const contracts = Math.floor(CONFIG.LIMITLESS_TRADE_SIZE_USD);
 
   for (const market of markets) {
     const lastAttempt = marketCooldowns.get(market.slug);
     if (lastAttempt && Date.now() - lastAttempt < COOLDOWN_MS) continue;
 
-    // === MERGE: buy YES ask + NO ask, merge for $1 ===
-    const mergeCost = market.yesAsk + market.noAsk;
-    const mergeSpread = 1 - mergeCost;
-    if (mergeSpread > CONFIG.LIMITLESS_MIN_SPREAD) {
-      const totalCost = mergeCost * tradeSize;
-      const payout = tradeSize;
+    const yesAskFill = getDepthFill(market.yesAsks, contracts);
+    const noAskFill = getDepthFill(market.noAsks, contracts);
+
+    if (yesAskFill && noAskFill) {
+      const totalCost = yesAskFill.totalCost + noAskFill.totalCost;
+      const payout = contracts;
       const grossProfit = payout - totalCost;
+      const spread = payout > 0 ? grossProfit / payout : 0;
       const estimatedGas = 0.10;
       const netProfit = grossProfit - estimatedGas;
 
-      if (netProfit > 0) {
+      if (spread > CONFIG.LIMITLESS_MIN_SPREAD && netProfit > 0) {
         opps.push({
-          market, direction: "merge",
-          yesPrice: market.yesAsk, noPrice: market.noAsk,
-          totalCost, payout, spread: mergeSpread,
-          grossProfit, estimatedGas, netProfit,
+          market,
+          direction: 'merge',
+          yesPrice: yesAskFill.avgPrice,
+          noPrice: noAskFill.avgPrice,
+          totalCost,
+          payout,
+          spread,
+          grossProfit,
+          estimatedGas,
+          netProfit,
         });
       }
     }
 
-    // === SPLIT: split $1 into YES+NO, sell YES bid + NO bid ===
-    const splitRevenue = market.yesBid + market.noBid;
-    const splitSpread = splitRevenue - 1;
-    if (splitSpread > CONFIG.LIMITLESS_MIN_SPREAD) {
-      const totalCost = tradeSize;
-      const payout = splitRevenue * tradeSize;
-      const grossProfit = payout - totalCost;
-      const estimatedGas = 0.10;
-      const netProfit = grossProfit - estimatedGas;
+    if (ENABLE_SPLIT_ARBS) {
+      const yesBidFill = getDepthFill(market.yesBids, contracts);
+      const noBidFill = getDepthFill(market.noBids, contracts);
 
-      if (netProfit > 0) {
-        opps.push({
-          market, direction: "split",
-          yesPrice: market.yesBid, noPrice: market.noBid,
-          totalCost, payout, spread: splitSpread,
-          grossProfit, estimatedGas, netProfit,
-        });
+      if (yesBidFill && noBidFill) {
+        const payout = yesBidFill.totalCost + noBidFill.totalCost;
+        const totalCost = contracts;
+        const grossProfit = payout - totalCost;
+        const spread = totalCost > 0 ? grossProfit / totalCost : 0;
+        const estimatedGas = 0.10;
+        const netProfit = grossProfit - estimatedGas;
+
+        if (spread > CONFIG.LIMITLESS_MIN_SPREAD && netProfit > 0) {
+          opps.push({
+            market,
+            direction: 'split',
+            yesPrice: yesBidFill.avgPrice,
+            noPrice: noBidFill.avgPrice,
+            totalCost,
+            payout,
+            spread,
+            grossProfit,
+            estimatedGas,
+            netProfit,
+          });
+        }
       }
     }
   }
@@ -622,10 +687,10 @@ async function main(): Promise<void> {
         }
 
         const best = opps[0];
-        if (best.direction === "merge") {
+        if (best.direction === 'merge') {
           await executeMergeArb(best);
         } else {
-          await executeSplitArb(best);
+          console.log('[LIM] Split arbs are temporarily disabled until dual-leg execution is made hedge-safe.');
         }
       }
     } catch (err) {
