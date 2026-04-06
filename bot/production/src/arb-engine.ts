@@ -371,6 +371,12 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   // The API will return INSUFFICIENT_FUNDS if balance is too low — no pre-check needed.
   console.log(`[BAL] Using Jupiter Predict program balance (not wallet ATA)`);
 
+  if (FAILSAFE_SCAN_ONLY) {
+    console.warn(`[ARB] FAIL-SAFE: skipping live execution to prevent unhedged exposure`);
+    marketCooldowns.set(market.marketId, Date.now());
+    return;
+  }
+
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
     .insert({
