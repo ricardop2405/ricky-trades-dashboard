@@ -95,6 +95,37 @@ interface JupMarket {
   endDate: string | null;
   volume: number;
   platform: "jupiter_predict" | "dflow";
+  closeTime?: number | null;
+  openTime?: number | null;
+}
+
+function toIsoFromUnix(value?: number | null): string | null {
+  if (!value || Number.isNaN(Number(value))) return null;
+  return new Date(Number(value) * 1000).toISOString();
+}
+
+function isShortWindowMarket(input: {
+  title?: string | null;
+  closeTime?: number | null;
+  openTime?: number | null;
+  endDate?: string | null;
+}): boolean {
+  const nowMs = Date.now();
+  const title = (input.title || "").toLowerCase();
+
+  if (input.closeTime && input.openTime) {
+    const durationMs = (Number(input.closeTime) - Number(input.openTime)) * 1000;
+    const remainingMs = Number(input.closeTime) * 1000 - nowMs;
+    return durationMs > 0 && durationMs <= 16 * 60 * 1000 && remainingMs > 0 && remainingMs <= 16 * 60 * 1000;
+  }
+
+  if (input.endDate) {
+    const endMs = new Date(input.endDate).getTime();
+    const remainingMs = endMs - nowMs;
+    if (!Number.isNaN(endMs) && remainingMs > 0 && remainingMs <= 16 * 60 * 1000) return true;
+  }
+
+  return /\b(5m|5 min|5 minute|15m|15 min|15 minute)\b/.test(title);
 }
 
 interface ArbOpportunity {
