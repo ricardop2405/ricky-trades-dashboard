@@ -581,18 +581,29 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
 
     // ── SAFETY CHECK: verify profit before merging ──
     const matchedContracts = Math.min(yesFilled, noFilled);
+    // If cost came back as 0, recalculate from fills × prices
+    if (yesCostUSD < 0.001) {
+      console.log(`[LIM] ⚠️ YES cost was $0 — recalculating: ${yesFilled} × $${yesPrice}`);
+      yesCostUSD = yesFilled * yesPrice;
+    }
+    if (noCostUSD < 0.001) {
+      console.log(`[LIM] ⚠️ NO cost was $0 — recalculating: ${noFilled} × $${noPrice}`);
+      noCostUSD = noFilled * noPrice;
+    }
     const totalActualCost = yesCostUSD + noCostUSD;
     const mergePayout = matchedContracts; // $1 per contract
     const estimatedGasCost = 0.15;
     const actualProfit = mergePayout - totalActualCost - estimatedGasCost;
+    const costPerContract = totalActualCost / matchedContracts;
 
     console.log(`[LIM] ── PROFIT CHECK ──`);
     console.log(`[LIM]   Matched: ${matchedContracts.toFixed(6)} contracts`);
     console.log(`[LIM]   Total cost: $${totalActualCost.toFixed(4)} (YES: $${yesCostUSD.toFixed(4)} + NO: $${noCostUSD.toFixed(4)})`);
+    console.log(`[LIM]   Cost per contract: $${costPerContract.toFixed(4)} (must be < $1.00)`);
     console.log(`[LIM]   Merge payout: $${mergePayout.toFixed(4)}`);
     console.log(`[LIM]   Est. profit after gas: $${actualProfit.toFixed(4)}`);
 
-    if (totalActualCost >= mergePayout) {
+    if (totalActualCost >= mergePayout || costPerContract >= 1.0) {
       // NOT PROFITABLE — sell both sides back instead of merging
       console.log(`[LIM] ❌ ABORT: cost $${totalActualCost.toFixed(4)} >= payout $${mergePayout.toFixed(4)} — selling both back`);
       const yesBidPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
