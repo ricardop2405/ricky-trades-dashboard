@@ -119,7 +119,7 @@ async function placeSignedOrder(
   size: number,
   orderType: "FOK" | "GTC" = "FOK",
 ): Promise<any> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (!CONFIG.LIMITLESS_OWNER_ID) throw new Error("Missing LIMITLESS_OWNER_ID in .env");
   if (CONFIG.LIMITLESS_API_KEY) headers["x-api-key"] = CONFIG.LIMITLESS_API_KEY;
 
   const salt = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
