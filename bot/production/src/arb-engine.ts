@@ -504,6 +504,65 @@ async function sendDirect(tx: VersionedTransaction, label: string): Promise<stri
   }
 }
 
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// ── Get Open Orders ─────────────────────────────────────
+async function getOpenOrders(): Promise<any[]> {
+  try {
+    const res = await jupFetch(
+      `${CONFIG.JUP_PREDICT_API}/orders?ownerPubkey=${WALLET}&status=open`,
+      { headers: jupHeaders() }
+    );
+    if (!res.ok) {
+      console.warn(`[ORDERS] Could not fetch open orders: ${res.status}`);
+      return [];
+    }
+    const data = await res.json();
+    const orders = Array.isArray(data) ? data : (data.orders || []);
+    return orders;
+  } catch (err) {
+    console.warn("[ORDERS] Error fetching open orders:", err);
+    return [];
+  }
+}
+
+// ── Cancel All Open Orders ──────────────────────────────
+async function cancelAllOrders(): Promise<boolean> {
+  try {
+    console.log("[CANCEL] Cancelling all open orders...");
+    const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
+      method: "DELETE",
+      headers: { ...jupHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerPubkey: WALLET }),
+    });
+
+    const rawText = await res.text();
+    if (!res.ok) {
+      console.error(`[CANCEL] API error ${res.status}: ${rawText.slice(0, 300)}`);
+      return false;
+    }
+
+    let data: any;
+    try { data = JSON.parse(rawText); } catch { return false; }
+
+    // Sign and send cancel transaction(s)
+    const txList = data.transactions || (data.transaction ? [data.transaction] : []);
+    for (const txData of txList) {
+      const tx = await buildAndSign(txData);
+      const sig = await sendDirect(tx, "CANCEL");
+      if (sig) console.log(`[CANCEL] ✅ Cancelled: ${sig.slice(0, 16)}...`);
+    }
+
+    if (txList.length === 0) {
+      console.log("[CANCEL] No open orders to cancel");
+    }
+    return true;
+  } catch (err) {
+    console.error("[CANCEL] ❌ Error:", err);
+    return false;
+  }
+}
+
 // ── Main Scan Loop ──────────────────────────────────────
 
 // ── Close All Positions (emergency unwind) ──────────────
