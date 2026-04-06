@@ -174,7 +174,6 @@ function jupHeaders(): Record<string, string> {
 
 async function fetchJupiterMarkets(): Promise<JupMarket[]> {
   try {
-    // Fetch with category=crypto to only get crypto prediction markets
     const url = `${CONFIG.JUP_PREDICT_API}/events?` +
       new URLSearchParams({ includeMarkets: "true", limit: "500", category: "crypto" });
 
@@ -198,25 +197,21 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
 
     const events = Array.isArray(data) ? data : data.events || data.data || [];
     const markets: JupMarket[] = [];
+    const debugCandidates: JupMarket[] = [];
 
-    // Crypto keywords to validate (in case API doesn't filter properly)
     const CRYPTO_KEYWORDS = [
-      "btc", "bitcoin", "eth", "ethereum", "sol", "solana", "price",
-      "above", "below", "crypto", "token", "coin", "usdt", "usdc",
-      "doge", "xrp", "ada", "avax", "bnb", "link", "dot", "matic",
-      "jup", "bonk", "wif", "jto", "pyth", "render", "sui", "apt",
+      "btc", "bitcoin", "eth", "ethereum", "sol", "solana", "doge", "xrp", "ada", "avax",
+      "bnb", "link", "dot", "matic", "jup", "bonk", "wif", "jto", "pyth", "render", "sui", "apt",
     ];
 
     for (const event of events) {
-      const title = (event.title || "").toLowerCase();
-      const category = (event.category || "").toLowerCase();
-
-      // STRICT: only crypto — skip sports, politics, entertainment
-      const isCrypto = category.includes("crypto") ||
-        CRYPTO_KEYWORDS.some(kw => title.includes(kw));
-      if (!isCrypto) continue;
-
+      const category = String(event.category || "").toLowerCase();
+      const eventTitle = String(event.title || "");
       const eventMarkets = event.markets || event.outcomes || [];
+
+      const isCryptoEvent = category.includes("crypto") ||
+        CRYPTO_KEYWORDS.some((kw) => eventTitle.toLowerCase().includes(kw));
+      if (!isCryptoEvent) continue;
 
       for (const m of eventMarkets) {
         const pricing = m.pricing || {};
@@ -233,59 +228,50 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
         if (noPrice > 10) noPrice /= 1_000_000;
         if (yesPrice <= 0 || noPrice <= 0) continue;
 
+        const title = String(m.metadata?.title || m.title || eventTitle || m.marketId);
+        const closeTime = Number(m.closeTime ?? m.resolveAt ?? event.closeTime ?? event.resolveAt ?? 0) || null;
+        const openTime = Number(m.openTime ?? event.openTime ?? event.beginAt ?? 0) || null;
+        const endDate = toIsoFromUnix(closeTime) || event.endDate || m.endDate || null;
         const spread = 1 - (yesPrice + noPrice);
 
-        markets.push({
+        const market: JupMarket = {
           marketId: m.marketId || m.id,
           eventId: event.eventId || event.id,
-          title: m.metadata?.title || event.title || m.title || m.marketId,
+          title,
           status: m.status || "open",
           yesPrice,
           noPrice,
           spread,
           category: category || "crypto",
-          endDate: event.endDate || m.endDate || null,
-          volume: Number(m.volume ?? event.volume ?? 0),
+          endDate,
+          volume: Number(m.volume ?? event.volume ?? event.volumeUsd ?? 0),
           platform: "jupiter_predict",
-        });
+          closeTime,
+          openTime,
+        };
+
+        debugCandidates.push(market);
+        if (market.status === "open" && isShortWindowMarket(market)) {
+          markets.push(market);
+        }
       }
     }
 
-    // Filter: open + resolving within 15 min ONLY (no endDate = skip, we need short-term)
-    const MAX_DURATION_MS = 15 * 60 * 1000;
-    const now = Date.now();
-
-    const result = markets
-      .filter(m => m.status === "open")
-      .filter(m => {
-        if (!m.endDate) return false; // SKIP markets without end date — not short-term
-        const endMs = new Date(m.endDate).getTime();
-        if (isNaN(endMs)) return false;
-        const remaining = endMs - now;
-        return remaining > 0 && remaining <= MAX_DURATION_MS;
-      })
-      .sort((a, b) => b.spread - a.spread);
-
-    console.log(`[JUP] Crypto events: ${events.length} | Crypto markets: ${markets.length} | Short-term open: ${result.length}`);
+    const result = markets.sort((a, b) => b.spread - a.spread);
+    console.log(`[JUP] Crypto events: ${events.length} | Timed crypto markets: ${result.length}`);
     console.log(`[JUP] Positive spread: ${result.filter(m => m.spread > 0).length}`);
 
-    // If no short-term, show what we have for debugging
-    if (result.length === 0 && markets.length > 0) {
-      console.log(`[JUP] ℹ️  ${markets.length} crypto markets found but none expire within 15 min:`);
-      const openMkts = markets.filter(m => m.status === "open").sort((a, b) => b.spread - a.spread);
-      for (const m of openMkts.slice(0, 5)) {
-        const endMs = m.endDate ? new Date(m.endDate).getTime() : 0;
-        const minsLeft = endMs ? ((endMs - now) / 60000).toFixed(0) : "?";
-        console.log(`    "${m.title.slice(0, 50)}" spread=${(m.spread * 100).toFixed(2)}% expires in ${minsLeft}min`);
+    if (result.length === 0 && debugCandidates.length > 0) {
+      console.log(`[JUP] ℹ️ No short-window markets found. Top crypto candidates:`);
+      for (const m of debugCandidates.slice(0, 8)) {
+        const remainingMin = m.closeTime ? Math.round((m.closeTime * 1000 - Date.now()) / 60000) : null;
+        console.log(`    "${m.title.slice(0, 50)}" closeTime=${m.closeTime ?? "none"} remaining=${remainingMin ?? "?"}m spread=${(m.spread * 100).toFixed(2)}%`);
       }
     }
 
     for (const m of result.slice(0, 10)) {
       const sign = m.spread > 0 ? "✅" : "❌";
-      console.log(
-        `  ${sign} "${m.title.slice(0, 55)}" YES=$${m.yesPrice.toFixed(4)} NO=$${m.noPrice.toFixed(4)} ` +
-        `sum=${(m.yesPrice + m.noPrice).toFixed(4)} spread=${(m.spread * 100).toFixed(2)}%`
-      );
+      console.log(`  ${sign} "${m.title.slice(0, 55)}" YES=$${m.yesPrice.toFixed(4)} NO=$${m.noPrice.toFixed(4)} sum=${(m.yesPrice + m.noPrice).toFixed(4)} spread=${(m.spread * 100).toFixed(2)}%`);
     }
 
     return result;
