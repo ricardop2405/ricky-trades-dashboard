@@ -7,10 +7,12 @@
  *
  * Protections:
  *   - Exact-Out quotes (limit-based, no slippage)
- *   - Jito bundles (MEV-protected, hidden from sandwich bots)
- *   - Dynamic priority fees via Helius (pay only what's needed)
- *   - Compute Unit optimization (minimal CU budget)
- *   - SOCKS5 proxy support for region-blocked APIs
+ *   - Contract-based orders with fill price checks (no slippage)
+ *   - Sequential execution (YES first, auto-close if NO fails)
+ *   - Dynamic priority fees via Helius
+ *   - USDC balance pre-check
+ *   - 15-min max market duration filter
+ *   - Market cooldown to avoid retrying same market
  *
  * Usage: npm run arb
  */
@@ -73,7 +75,8 @@ console.log(`[ARB] Min spread: ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}%`);
 console.log(`[ARB] Scan interval: ${CONFIG.SCAN_INTERVAL / 1000}s`);
 console.log(`[ARB] Jupiter API: ${CONFIG.JUP_PREDICT_API}`);
 console.log(`[ARB] Execution: Direct parallel (both legs same slot)`);
-console.log(`[ARB] Dynamic priority fees: ON (Helius)`);
+console.log(`[ARB] Execution: Sequential (YES→NO, auto-close on failure)`);
+console.log(`[ARB] Dynamic priority fees: ON`);
 console.log("═══════════════════════════════════════════════════════");
 
 // ── Types ───────────────────────────────────────────────
@@ -197,15 +200,30 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
       }
     }
 
-    // Include ALL open markets with positive spread — no time filter
-    // (Jupiter Predict markets are inherently short-term)
-    // Also include any market with a profitable spread regardless of category
+    // Filter: open markets resolving within 15 minutes (or no end date for short-term markets)
+    const MAX_DURATION_MS = 15 * 60 * 1000;
+    const now = Date.now();
+
     const result = markets
       .filter(m => m.status === "open")
+      .filter(m => {
+        if (!m.endDate) return true; // short-term markets often lack endDate
+        const endMs = new Date(m.endDate).getTime();
+        if (isNaN(endMs)) return true; // bad date, include
+        const remaining = endMs - now;
+        return remaining > 0 && remaining <= MAX_DURATION_MS;
+      })
       .sort((a, b) => b.spread - a.spread);
 
     console.log(`[JUP] Total events: ${events.length} | Total markets: ${markets.length}`);
     console.log(`[JUP] Open markets: ${result.length} | Positive spread: ${result.filter(m => m.spread > 0).length}`);
+    if (result.length === 0 && markets.length > 0) {
+      console.log(`[JUP] ℹ️  ${markets.length} markets found but none pass filters. Showing all with spread > 0:`);
+      const anyPositive = markets.filter(m => m.status === "open" && m.spread > 0).sort((a, b) => b.spread - a.spread);
+      for (const m of anyPositive.slice(0, 5)) {
+        console.log(`    "${m.title.slice(0, 50)}" spread=${(m.spread * 100).toFixed(2)}% endDate=${m.endDate || "none"}`);
+      }
+    }
 
     // Log category breakdown for debugging
     const catCounts: Record<string, number> = {};
@@ -322,11 +340,10 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
     const totalCost = yesCost + noCost;
     const payout = amount;
 
-    // Fees: ~0.5% platform + Jito tip (minimized for small trades)
+    // Fees: ~0.5% platform + SOL tx fees
     const platformFee = totalCost * 0.005;
-    const jitoTipUsd = CONFIG.JITO_TIP / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD;
-    const priorityFeeUsd = 0.001 * CONFIG.SOL_PRICE_USD;
-    const fees = platformFee + jitoTipUsd + priorityFeeUsd;
+    const txFeeUsd = 0.002 * CONFIG.SOL_PRICE_USD; // ~2 tx fees
+    const fees = platformFee + txFeeUsd;
 
     const grossProfit = payout - totalCost;
     const netProfit = grossProfit - fees;
@@ -348,6 +365,23 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   console.log(`[ARB] YES=$${market.yesPrice.toFixed(4)} + NO=$${market.noPrice.toFixed(4)} = ${(market.yesPrice + market.noPrice).toFixed(4)}`);
   console.log(`[ARB] Spread: ${(market.spread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
   console.log(`[ARB] Buying: YES=$${yesCost.toFixed(2)} + NO=$${noCost.toFixed(2)} = $${totalCost.toFixed(2)}`);
+
+  // USDC balance pre-check
+  try {
+    const { PublicKey } = await import("@solana/web3.js");
+    const { getAssociatedTokenAddress, getAccount } = await import("@solana/spl-token");
+    const usdcMint = new PublicKey(CONFIG.JUP_USD_MINT);
+    const ata = await getAssociatedTokenAddress(usdcMint, keypair.publicKey);
+    const tokenAccount = await getAccount(connection, ata);
+    const usdcBalance = Number(tokenAccount.amount) / 1_000_000;
+    console.log(`[BAL] USDC balance: $${usdcBalance.toFixed(2)}`);
+    if (usdcBalance < totalCost) {
+      console.log(`[ARB] ❌ Insufficient USDC ($${usdcBalance.toFixed(2)} < $${totalCost.toFixed(2)}) — skipping`);
+      return;
+    }
+  } catch (balErr) {
+    console.warn("[BAL] Could not check USDC balance, proceeding anyway:", balErr instanceof Error ? balErr.message : balErr);
+  }
 
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
@@ -594,10 +628,6 @@ async function main() {
 
   if (!CONFIG.JUP_PREDICT_API_KEY) {
     console.warn("[ARB] ⚠️  No JUP_PREDICT_API_KEY — may be rate-limited");
-  }
-
-  if (!PROXY_URL) {
-    console.warn("[ARB] ⚠️  No PROXY_URL set — Jupiter may block your region. Add PROXY_URL to .env");
   }
 
   console.log("[ARB] Starting scan loop...\n");
