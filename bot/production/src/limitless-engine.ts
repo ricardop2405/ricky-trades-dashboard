@@ -570,7 +570,7 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       throw new Error("NO buy not matched — unwound YES position");
     }
     const noFilled = getExecutionContracts(noResult);
-    const noCostUSD = getExecutionCostUSD(noResult, yesFilled, noPrice);
+    let noCostUSD = getExecutionCostUSD(noResult, yesFilled, noPrice);
     if (noFilled <= 0) {
       console.log(`[LIM] ⚠️ NO fill=0 — selling YES back`);
       const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
