@@ -20,6 +20,7 @@ export const CONFIG = {
   SUPABASE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY!,
 
   // ── Limitless (Base Chain) ────────────────────────────
+  LIMITLESS_OWNER_ID: Number(process.env.LIMITLESS_OWNER_ID || 0),
   LIMITLESS_API: process.env.LIMITLESS_API || "https://api.limitless.exchange",
   LIMITLESS_API_KEY: process.env.LIMITLESS_API_KEY || "",
   BASE_RPC_URL: process.env.BASE_RPC_URL || "https://mainnet.base.org",
