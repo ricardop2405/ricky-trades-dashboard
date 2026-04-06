@@ -31,8 +31,8 @@ export const CONFIG = {
 
   // Arb — DFlow + Jupiter Predict
   ARB_AMOUNT: parseFloat(process.env.ARB_AMOUNT_USD || "25"),
-  MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.01"),
-  SCAN_INTERVAL: parseInt(process.env.SCAN_INTERVAL_MS || "30000"),
+  MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.001"),
+  SCAN_INTERVAL: parseInt(process.env.SCAN_INTERVAL_MS || "10000"),
 
   // Drift BET (public Data API — no key needed)
   DRIFT_DATA_API: process.env.DRIFT_DATA_API || "https://data.api.drift.trade",
