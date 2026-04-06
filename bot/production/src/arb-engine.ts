@@ -143,15 +143,16 @@ function jupHeaders(): Record<string, string> {
 
 async function fetchJupiterMarkets(): Promise<JupMarket[]> {
   try {
+    // Fetch with category=crypto to only get crypto prediction markets
     const url = `${CONFIG.JUP_PREDICT_API}/events?` +
-      new URLSearchParams({ includeMarkets: "true", limit: "500" });
+      new URLSearchParams({ includeMarkets: "true", limit: "500", category: "crypto" });
 
     const res = await jupFetch(url, { headers: jupHeaders() });
     const rawText = await res.text();
 
     if (!res.ok) {
       if (rawText.includes("unsupported_region")) {
-        console.error("[JUP] ❌ REGION BLOCKED — set PROXY_URL in .env to route through a supported region");
+        console.error("[JUP] ❌ REGION BLOCKED — set PROXY_URL in .env");
         return [];
       }
       console.error(`[JUP] API ${res.status}: ${rawText.slice(0, 500)}`);
@@ -167,9 +168,23 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
     const events = Array.isArray(data) ? data : data.events || data.data || [];
     const markets: JupMarket[] = [];
 
+    // Crypto keywords to validate (in case API doesn't filter properly)
+    const CRYPTO_KEYWORDS = [
+      "btc", "bitcoin", "eth", "ethereum", "sol", "solana", "price",
+      "above", "below", "crypto", "token", "coin", "usdt", "usdc",
+      "doge", "xrp", "ada", "avax", "bnb", "link", "dot", "matic",
+      "jup", "bonk", "wif", "jto", "pyth", "render", "sui", "apt",
+    ];
+
     for (const event of events) {
-      const title = event.title || "";
-      const category = event.category || "";
+      const title = (event.title || "").toLowerCase();
+      const category = (event.category || "").toLowerCase();
+
+      // STRICT: only crypto — skip sports, politics, entertainment
+      const isCrypto = category.includes("crypto") ||
+        CRYPTO_KEYWORDS.some(kw => title.includes(kw));
+      if (!isCrypto) continue;
+
       const eventMarkets = event.markets || event.outcomes || [];
 
       for (const m of eventMarkets) {
@@ -192,12 +207,12 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
         markets.push({
           marketId: m.marketId || m.id,
           eventId: event.eventId || event.id,
-          title: m.metadata?.title || title || m.title || m.marketId,
+          title: m.metadata?.title || event.title || m.title || m.marketId,
           status: m.status || "open",
           yesPrice,
           noPrice,
           spread,
-          category,
+          category: category || "crypto",
           endDate: event.endDate || m.endDate || null,
           volume: Number(m.volume ?? event.volume ?? 0),
           platform: "jupiter_predict",
@@ -205,41 +220,36 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
       }
     }
 
-    // Filter: open markets resolving within 15 minutes (or no end date for short-term markets)
+    // Filter: open + resolving within 15 min ONLY (no endDate = skip, we need short-term)
     const MAX_DURATION_MS = 15 * 60 * 1000;
     const now = Date.now();
 
     const result = markets
       .filter(m => m.status === "open")
       .filter(m => {
-        if (!m.endDate) return true; // short-term markets often lack endDate
+        if (!m.endDate) return false; // SKIP markets without end date — not short-term
         const endMs = new Date(m.endDate).getTime();
-        if (isNaN(endMs)) return true; // bad date, include
+        if (isNaN(endMs)) return false;
         const remaining = endMs - now;
         return remaining > 0 && remaining <= MAX_DURATION_MS;
       })
       .sort((a, b) => b.spread - a.spread);
 
-    console.log(`[JUP] Total events: ${events.length} | Total markets: ${markets.length}`);
-    console.log(`[JUP] Open markets: ${result.length} | Positive spread: ${result.filter(m => m.spread > 0).length}`);
+    console.log(`[JUP] Crypto events: ${events.length} | Crypto markets: ${markets.length} | Short-term open: ${result.length}`);
+    console.log(`[JUP] Positive spread: ${result.filter(m => m.spread > 0).length}`);
+
+    // If no short-term, show what we have for debugging
     if (result.length === 0 && markets.length > 0) {
-      console.log(`[JUP] ℹ️  ${markets.length} markets found but none pass filters. Showing all with spread > 0:`);
-      const anyPositive = markets.filter(m => m.status === "open" && m.spread > 0).sort((a, b) => b.spread - a.spread);
-      for (const m of anyPositive.slice(0, 5)) {
-        console.log(`    "${m.title.slice(0, 50)}" spread=${(m.spread * 100).toFixed(2)}% endDate=${m.endDate || "none"}`);
+      console.log(`[JUP] ℹ️  ${markets.length} crypto markets found but none expire within 15 min:`);
+      const openMkts = markets.filter(m => m.status === "open").sort((a, b) => b.spread - a.spread);
+      for (const m of openMkts.slice(0, 5)) {
+        const endMs = m.endDate ? new Date(m.endDate).getTime() : 0;
+        const minsLeft = endMs ? ((endMs - now) / 60000).toFixed(0) : "?";
+        console.log(`    "${m.title.slice(0, 50)}" spread=${(m.spread * 100).toFixed(2)}% expires in ${minsLeft}min`);
       }
     }
 
-    // Log category breakdown for debugging
-    const catCounts: Record<string, number> = {};
-    for (const m of markets) {
-      const cat = m.category || "unknown";
-      catCounts[cat] = (catCounts[cat] || 0) + 1;
-    }
-    console.log(`[JUP] Categories: ${Object.entries(catCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`);
-
-    const sorted = [...result].sort((a, b) => b.spread - a.spread);
-    for (const m of sorted.slice(0, 10)) {
+    for (const m of result.slice(0, 10)) {
       const sign = m.spread > 0 ? "✅" : "❌";
       console.log(
         `  ${sign} "${m.title.slice(0, 55)}" YES=$${m.yesPrice.toFixed(4)} NO=$${m.noPrice.toFixed(4)} ` +
