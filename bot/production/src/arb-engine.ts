@@ -282,89 +282,63 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
 }
 
 // ── DFlow 5-Minute Crypto Markets ───────────────────────
-const DFLOW_API = CONFIG.DFLOW_METADATA_API || "https://prediction-markets-api.dflow.net";
+const DFLOW_API = "https://dev-prediction-markets-api.dflow.net";
 
 async function fetchDFlowCryptoMarkets(): Promise<JupMarket[]> {
   try {
-    const markets: JupMarket[] = [];
-
-    // 1. Discover 5-min / 15-min crypto event tickers
-    const cryptoEvents = new Set<string>();
-    let evtCursor: string | null = null;
-    for (let p = 0; p < 10; p++) {
-      const params = new URLSearchParams({ limit: "100" });
-      if (evtCursor) params.set("cursor", evtCursor);
-      const r = await fetch(`${DFLOW_API}/api/v1/events?${params}`);
-      if (!r.ok) break;
-      const d = await r.json();
-      for (const e of (d.events || [])) {
-        const st = (e.seriesTicker || "").toUpperCase();
-        if (st.includes("5M") || st.includes("15M") || st.includes("MIN")) {
-          cryptoEvents.add(e.ticker);
-        }
-      }
-      evtCursor = d.cursor;
-      if (!evtCursor || (d.events || []).length < 100) break;
-    }
-
-    if (cryptoEvents.size === 0) {
-      console.log("[DFLOW] No 5-min crypto events found");
+    const eventUrl = `${DFLOW_API}/api/v1/events?withNestedMarkets=true&limit=100`;
+    const res = await fetch(eventUrl);
+    if (!res.ok) {
+      console.log(`[DFLOW] Event fetch failed: ${res.status}`);
       return [];
     }
 
-    // 2. Fetch markets for those events
-    let mkCursor: string | null = null;
-    for (let p = 0; p < 50; p++) {
-      const params = new URLSearchParams({ limit: "100", status: "active" });
-      if (mkCursor) params.set("cursor", mkCursor);
-      const r = await fetch(`${DFLOW_API}/api/v1/markets?${params}`);
-      if (!r.ok) break;
-      const d = await r.json();
-      const batch = d.markets || d.data || (Array.isArray(d) ? d : []);
-      if (!batch.length) break;
+    const data = await res.json();
+    const events = data.events || [];
+    const markets: JupMarket[] = [];
 
-      for (const m of batch) {
-        if (!cryptoEvents.has(m.eventTicker)) continue;
-        const yesPrice = m.yesAsk ?? m.yesBid ?? 0;
-        const noPrice = m.noAsk ?? m.noBid ?? 0;
+    const CRYPTO_KEYS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "ADA", "AVAX", "BNB", "LINK", "JUP", "BONK", "WIF", "SUI", "APT"];
+
+    for (const event of events) {
+      const series = String(event.seriesTicker || "").toUpperCase();
+      const title = String(event.title || "").toUpperCase();
+      const subtitle = String(event.subtitle || "").toUpperCase();
+      const isCrypto = CRYPTO_KEYS.some((k) => series.includes(k) || title.includes(k) || subtitle.includes(k));
+      const looksTimed = series.includes("5M") || series.includes("15M") || title.includes("5 MIN") || title.includes("15 MIN") || subtitle.includes("5 MIN") || subtitle.includes("15 MIN");
+      if (!isCrypto || !looksTimed) continue;
+
+      for (const m of (event.markets || [])) {
+        const yesPrice = Number(m.yesAsk ?? m.yesBid ?? 0);
+        const noPrice = Number(m.noAsk ?? m.noBid ?? 0);
         if (yesPrice <= 0 || noPrice <= 0) continue;
 
-        const spread = 1 - (yesPrice + noPrice);
-        markets.push({
+        const market: JupMarket = {
           marketId: m.ticker || m.id,
-          eventId: m.eventTicker || "",
-          title: m.title || m.ticker,
-          status: "open",
+          eventId: m.eventTicker || event.ticker || "",
+          title: m.title || event.title || m.ticker,
+          status: m.status || "open",
           yesPrice,
           noPrice,
-          spread,
+          spread: 1 - (yesPrice + noPrice),
           category: "crypto",
-          endDate: m.expirationTime ? new Date(m.expirationTime * 1000).toISOString() : null,
-          volume: m.volume || 0,
+          endDate: toIsoFromUnix(Number(m.closeTime ?? m.expirationTime ?? 0) || null),
+          volume: Number(m.volume || event.volume || 0),
           platform: "dflow",
-        });
-      }
+          closeTime: Number(m.closeTime ?? m.expirationTime ?? 0) || null,
+          openTime: Number(m.openTime ?? 0) || null,
+        };
 
-      mkCursor = d.cursor;
-      if (!mkCursor) break;
+        if (market.status === "open" && isShortWindowMarket(market)) {
+          markets.push(market);
+        }
+      }
     }
 
-    // Filter to markets expiring within 15 min
-    const now = Date.now();
-    const MAX_DUR = 15 * 60 * 1000;
-    const result = markets.filter(m => {
-      if (!m.endDate) return true;
-      const endMs = new Date(m.endDate).getTime();
-      if (isNaN(endMs)) return true;
-      const remaining = endMs - now;
-      return remaining > 0 && remaining <= MAX_DUR;
-    }).sort((a, b) => b.spread - a.spread);
-
-    console.log(`[DFLOW] ${cryptoEvents.size} crypto events | ${markets.length} markets | ${result.filter(m => m.spread > 0).length} positive spread`);
-    for (const m of result.filter(m => m.spread > 0).slice(0, 5)) {
+    const result = markets.sort((a, b) => b.spread - a.spread);
+    console.log(`[DFLOW] Timed crypto markets: ${result.length} | Positive spread: ${result.filter(m => m.spread > 0).length}`);
+    for (const m of result.slice(0, 5)) {
       console.log(`  ✅ DFLOW "${m.title.slice(0, 50)}" YES=$${m.yesPrice.toFixed(4)} NO=$${m.noPrice.toFixed(4)} spread=${(m.spread * 100).toFixed(2)}%`);
     }
-
     return result;
   } catch (err) {
     console.error("[DFLOW] Fetch error:", err);
