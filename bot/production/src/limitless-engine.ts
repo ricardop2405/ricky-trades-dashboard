@@ -475,25 +475,36 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
 
   try {
     const contracts = Math.floor(tradeSize);
-    const mergeAmount = parseUnits(String(contracts), 6);
 
-    // Step 1: Buy YES
-    console.log(`[LIM] Buying YES: ${contracts} contracts @ avg $${yesPrice.toFixed(4)}`);
+    console.log(`[LIM] Buying YES: target ${contracts} contracts @ avg $${yesPrice.toFixed(4)}`);
     const yesResult = await placeSignedOrder(market, 0, market.yesTokenId, yesPrice, contracts, "FOK");
     if (!yesResult?.execution?.matched) {
       throw new Error("YES buy was not matched — aborting");
     }
+    const yesFilled = getExecutionContracts(yesResult);
+    if (yesFilled <= 0) {
+      throw new Error("YES buy returned 0 filled contracts");
+    }
+    console.log(`[LIM]   YES filled: ${yesFilled.toFixed(6)} contracts`);
 
-    // Step 2: Buy NO
-    console.log(`[LIM] Buying NO: ${contracts} contracts @ avg $${noPrice.toFixed(4)}`);
-    const noResult = await placeSignedOrder(market, 0, market.noTokenId, noPrice, contracts, "FOK");
+    console.log(`[LIM] Buying NO to match YES fill: ${yesFilled.toFixed(6)} contracts @ avg $${noPrice.toFixed(4)}`);
+    const noResult = await placeSignedOrder(market, 0, market.noTokenId, noPrice, yesFilled, "FOK");
     if (!noResult?.execution?.matched) {
-      console.error("[LIM] ❌ NO buy not matched — holding YES for manual exit");
       throw new Error("NO buy was not matched — unhedged YES position");
     }
+    const noFilled = getExecutionContracts(noResult);
+    if (noFilled <= 0) {
+      throw new Error("NO buy returned 0 filled contracts");
+    }
+    console.log(`[LIM]   NO filled: ${noFilled.toFixed(6)} contracts`);
 
-    // Step 3: Merge YES + NO via CTF
-    console.log(`[LIM] Merging ${contracts} YES/NO via CTF...`);
+    const matchedContracts = Math.min(yesFilled, noFilled);
+    if (matchedContracts <= 0) {
+      throw new Error("No matched YES/NO contracts to merge");
+    }
+
+    const mergeAmount = parseUnits(matchedContracts.toFixed(6), 6);
+    console.log(`[LIM] Merging ${matchedContracts.toFixed(6)} YES/NO via CTF...`);
     const mergeHash = await walletClient.writeContract({
       address: CONFIG.CTF_ADDRESS as Address,
       abi: CTF_ABI,
@@ -507,12 +518,27 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       ],
     });
 
+    const leftoverYes = Math.max(0, yesFilled - matchedContracts);
+    const leftoverNo = Math.max(0, noFilled - matchedContracts);
+
+    if (leftoverYes > 0.00001) {
+      const unwindYesPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
+      console.log(`[LIM] Unwinding leftover YES: ${leftoverYes.toFixed(6)} @ $${unwindYesPrice.toFixed(4)}`);
+      await placeSignedOrder(market, 1, market.yesTokenId, unwindYesPrice, leftoverYes, "FOK");
+    }
+
+    if (leftoverNo > 0.00001) {
+      const unwindNoPrice = market.noBid > 0 ? market.noBid : noPrice * 0.95;
+      console.log(`[LIM] Unwinding leftover NO: ${leftoverNo.toFixed(6)} @ $${unwindNoPrice.toFixed(4)}`);
+      await placeSignedOrder(market, 1, market.noTokenId, unwindNoPrice, leftoverNo, "FOK");
+    }
+
     const receipt = await publicClient.waitForTransactionReceipt({ hash: mergeHash });
     const gasUsed = Number(receipt.gasUsed) * Number(receipt.effectiveGasPrice || 0n);
     const gasCostEth = Number(formatUnits(BigInt(gasUsed), 18));
 
     console.log(`[LIM] ✅ MERGED! tx=${mergeHash}`);
-    console.log(`[LIM]   Gas: ${gasCostEth.toFixed(6)} ETH | Net profit: ~$${netProfit.toFixed(4)}`);
+    console.log(`[LIM]   Gas: ${gasCostEth.toFixed(6)} ETH | Estimated net: ~$${netProfit.toFixed(4)}`);
 
     await logExecution(opp, "success", mergeHash, gasCostEth);
   } catch (err) {
