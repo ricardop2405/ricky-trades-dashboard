@@ -463,7 +463,14 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   console.log(`[ARB] Buying: YES=$${yesCost.toFixed(2)} + NO=$${noCost.toFixed(2)} = $${totalCost.toFixed(2)}`);
 
   // Note: Jupiter Predict holds funds inside their program, not in the wallet's ATA.
-  // The API will return INSUFFICIENT_FUNDS if balance is too low — no pre-check needed.
+  // DFlow markets: scan-only (no on-chain execution yet — different platform)
+  if (market.platform === "dflow") {
+    console.log(`[ARB] 📊 DFlow opportunity logged (execution not yet supported — needs DFlow SDK)`);
+    marketCooldowns.set(market.marketId, Date.now());
+    return;
+  }
+
+  // Jupiter: atomic execution via Jito bundles
   console.log(`[BAL] Using Jupiter Predict program balance (not wallet ATA)`);
 
   const { data: oppRow } = await supabase
