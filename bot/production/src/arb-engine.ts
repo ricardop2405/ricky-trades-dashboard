@@ -78,8 +78,7 @@ console.log(`[ARB] Amount per trade: $${CONFIG.ARB_AMOUNT}`);
 console.log(`[ARB] Min spread: ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}%`);
 console.log(`[ARB] Scan interval: ${CONFIG.SCAN_INTERVAL / 1000}s`);
 console.log(`[ARB] Jupiter API: ${CONFIG.JUP_PREDICT_API}`);
-console.log(`[ARB] Execution: FAIL-SAFE scan only (live trading disabled)`);
-console.log(`[ARB] Reason: Jupiter /orders confirms tx submission, not guaranteed dual fills`);
+console.log(`[ARB] Execution: ATOMIC via Jito bundles (both legs same slot or neither)`);
 console.log(`[ARB] Dynamic priority fees: ON`);
 console.log("═══════════════════════════════════════════════════════");
 
