@@ -357,8 +357,8 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
           if (!slug || !yesTokenId || !noTokenId || !venueExchange) return null;
 
           const [yesBookRes, noBookRes] = await Promise.all([
-            fetch(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${yesTokenId}`, { headers }),
-            fetch(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${noTokenId}`, { headers }),
+            fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${yesTokenId}`, { headers }),
+            fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${noTokenId}`, { headers }),
           ]);
 
           if (!yesBookRes.ok || !noBookRes.ok) return null;
@@ -524,7 +524,7 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       throw new Error("YES buy was not matched — aborting");
     }
     const yesFilled = getExecutionContracts(yesResult);
-    const yesCostUSD = getExecutionCostUSD(yesResult);
+    const yesCostUSD = getExecutionCostUSD(yesResult, contracts, yesPrice);
     if (yesFilled <= 0) {
       throw new Error("YES buy returned 0 filled contracts");
     }
@@ -541,7 +541,7 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       throw new Error("NO buy not matched — unwound YES position");
     }
     const noFilled = getExecutionContracts(noResult);
-    const noCostUSD = getExecutionCostUSD(noResult);
+    const noCostUSD = getExecutionCostUSD(noResult, yesFilled, noPrice);
     if (noFilled <= 0) {
       console.log(`[LIM] ⚠️ NO fill=0 — selling YES back`);
       const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
