@@ -483,7 +483,72 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
 }
 }
 
-// ── Direct TX Submission (Fallback) ─────────────────────
+// ── Jito Bundle Submission (Atomic) ──────────────────────
+async function sendJitoBundle(txs: VersionedTransaction[]): Promise<string | null> {
+  try {
+    // Jito expects base58-encoded serialized transactions
+    const encodedTxs = txs.map(tx => bs58.encode(tx.serialize()));
+
+    const res = await fetch(JITO_BUNDLE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "sendBundle",
+        params: [encodedTxs],
+      }),
+    });
+
+    const data = await res.json() as any;
+
+    if (data.error) {
+      console.error(`[JITO] Bundle error: ${JSON.stringify(data.error)}`);
+      return null;
+    }
+
+    const bundleId = data.result;
+    console.log(`[JITO] Bundle submitted: ${bundleId}`);
+
+    // Poll for bundle status (up to 30s)
+    for (let i = 0; i < 15; i++) {
+      await sleep(2000);
+      try {
+        const statusRes = await fetch(JITO_BUNDLE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getBundleStatuses",
+            params: [[bundleId]],
+          }),
+        });
+        const statusData = await statusRes.json() as any;
+        const statuses = statusData?.result?.value || [];
+        if (statuses.length > 0) {
+          const s = statuses[0];
+          console.log(`[JITO] Bundle status: ${s.confirmation_status || s.status}`);
+          if (s.confirmation_status === "confirmed" || s.confirmation_status === "finalized") {
+            return bundleId;
+          }
+          if (s.err || s.confirmation_status === "failed") {
+            console.error(`[JITO] Bundle failed:`, s.err);
+            return null;
+          }
+        }
+      } catch { /* retry */ }
+    }
+
+    console.warn("[JITO] Bundle status unknown after 30s — treating as failed");
+    return null;
+  } catch (err) {
+    console.error("[JITO] Bundle submission error:", err);
+    return null;
+  }
+}
+
+// ── Direct TX Submission (Fallback for cancels/closes) ──
 async function sendDirect(tx: VersionedTransaction, label: string): Promise<string | null> {
   try {
     const sig = await connection.sendRawTransaction(tx.serialize(), {
@@ -502,8 +567,6 @@ async function sendDirect(tx: VersionedTransaction, label: string): Promise<stri
     return null;
   }
 }
-
-// sleep imported from ./utils
 
 // ── Get Open Orders ─────────────────────────────────────
 async function getOpenOrders(): Promise<any[]> {
