@@ -553,7 +553,7 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       throw new Error("YES buy was not matched — aborting");
     }
     const yesFilled = getExecutionContracts(yesResult);
-    const yesCostUSD = getExecutionCostUSD(yesResult, contracts, yesPrice);
+    let yesCostUSD = getExecutionCostUSD(yesResult, contracts, yesPrice);
     if (yesFilled <= 0) {
       throw new Error("YES buy returned 0 filled contracts");
     }
