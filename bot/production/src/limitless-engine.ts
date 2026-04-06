@@ -187,13 +187,21 @@ function getExecutionContracts(result: any): number {
 
 function getExecutionCostUSD(result: any, fallbackContracts: number, fallbackPrice: number): number {
   const raw = result?.execution?.totalsRaw ?? result?.execution?.totals ?? {};
-  // Try multiple fields the API might return
-  const spent = Number(raw.makerAmountNet ?? raw.makerAmountGross ?? raw.totalCost ?? 0);
-  if (spent > 0) return spent / 1e6;
-  // Fallback: contracts × price (what we asked for)
+  // Try every possible field the API might return for cost
+  const candidates = [
+    raw.makerAmountNet, raw.makerAmountGross, raw.totalCost,
+    raw.collateralAmount, raw.cost, raw.amount,
+  ];
+  for (const c of candidates) {
+    const v = Number(c ?? 0);
+    if (v > 0) return v / 1e6;
+  }
+  // ALWAYS fall back to filled contracts × price — never return 0
   const filled = getExecutionContracts(result);
   const contracts = filled > 0 ? filled : fallbackContracts;
-  return contracts * fallbackPrice;
+  const cost = contracts * fallbackPrice;
+  console.log(`[LIM] ⚠️ Cost fallback used: ${contracts.toFixed(6)} × $${fallbackPrice.toFixed(4)} = $${cost.toFixed(4)}`);
+  return cost;
 }
 
 // ── Sign & Submit an EIP-712 Order ──────────────────────
