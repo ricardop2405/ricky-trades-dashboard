@@ -416,17 +416,27 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
       buildAndSign(noTxRaw),
     ]);
 
-    // Send both legs simultaneously via direct RPC (same slot)
-    console.log("[TX] Sending both legs simultaneously...");
-    const [yesSig, noSig] = await Promise.all([
-      sendDirect(yesTx, "YES"),
-      sendDirect(noTx, "NO"),
-    ]);
-
-    // Set cooldown regardless of outcome
+    // SEQUENTIAL: Send YES first, then NO only if YES confirms
+    console.log("[TX] Step 1: Sending YES leg...");
+    const yesSig = await sendDirect(yesTx, "YES");
     marketCooldowns.set(market.marketId, Date.now());
 
-    if (yesSig && noSig) {
+    if (!yesSig) {
+      console.log("[ARB] ❌ YES failed — no exposure, safe abort");
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed", error_message: "YES leg failed — no exposure",
+        });
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      }
+      return;
+    }
+
+    console.log("[TX] Step 2: YES confirmed, sending NO leg...");
+    const noSig = await sendDirect(noTx, "NO");
+
+    if (noSig) {
       console.log(`[ARB] ✅ Both legs landed! Net profit: ~$${netProfit.toFixed(4)}`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
@@ -437,42 +447,15 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
         });
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
-    } else if (yesSig && !noSig) {
-      console.error("[ARB] ⚠️  YES landed but NO failed — retrying NO...");
-      let noRetryOk: string | null = null;
-      for (let r = 1; r <= 2; r++) {
-        await sleep(1000);
-        const freshNoRaw = await getExactOutQuote(market.marketId, false, noCost, market.noPrice);
-        if (freshNoRaw) {
-          const freshNo = await buildAndSign(freshNoRaw);
-          noRetryOk = await sendDirect(freshNo, `NO-retry-${r}`);
-          if (noRetryOk) break;
-        }
-      }
-      if (noRetryOk) {
-        console.log(`[ARB] ✅ NO retry succeeded! Both legs filled.`);
-      } else {
-        console.error("[ARB] ⚠️  NO retry failed — one-sided exposure on YES");
-      }
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: totalCost,
-          realized_pnl: noRetryOk ? netProfit : 0,
-          fees: opp.fees, status: noRetryOk ? "filled" : "partial",
-          side_a_tx: yesSig, side_b_tx: noRetryOk || null,
-          side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
-          error_message: noRetryOk ? null : "NO leg failed — one-sided exposure",
-        });
-        await supabase.from("arb_opportunities").update({
-          status: noRetryOk ? "executed" : "failed",
-        }).eq("id", oppId);
-      }
     } else {
-      console.log("[ARB] ❌ Both legs failed — no exposure");
+      // NO failed — must close YES position to avoid exposure
+      console.error("[ARB] ⚠️  NO failed — closing YES position to avoid exposure...");
+      const closed = await closeAllPositions();
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
-          status: "failed", error_message: "Both legs failed",
+          status: "failed",
+          error_message: `NO failed — auto-closed YES position (${closed ? "success" : "MANUAL CLOSE NEEDED"})`,
         });
         await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
@@ -511,6 +494,57 @@ async function sendDirect(tx: VersionedTransaction, label: string): Promise<stri
 }
 
 // ── Main Scan Loop ──────────────────────────────────────
+
+// ── Close All Positions (emergency unwind) ──────────────
+async function closeAllPositions(): Promise<boolean> {
+  try {
+    console.log("[CLOSE] Requesting close-all-positions transaction...");
+    const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/positions`, {
+      method: "DELETE",
+      headers: {
+        ...jupHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ownerPubkey: WALLET }),
+    });
+
+    const rawText = await res.text();
+    if (!res.ok) {
+      console.error(`[CLOSE] API error ${res.status}: ${rawText.slice(0, 300)}`);
+      return false;
+    }
+
+    let data: any;
+    try { data = JSON.parse(rawText); } catch { return false; }
+
+    if (data.transaction) {
+      const tx = await buildAndSign(data.transaction);
+      const sig = await sendDirect(tx, "CLOSE-ALL");
+      if (sig) {
+        console.log(`[CLOSE] ✅ All positions closed: ${sig.slice(0, 16)}...`);
+        return true;
+      }
+    }
+
+    // If multiple transactions returned
+    if (data.transactions && Array.isArray(data.transactions)) {
+      for (const txData of data.transactions) {
+        const tx = await buildAndSign(txData);
+        await sendDirect(tx, "CLOSE");
+      }
+      console.log("[CLOSE] ✅ Closed all positions");
+      return true;
+    }
+
+    console.error("[CLOSE] No transaction returned");
+    return false;
+  } catch (err) {
+    console.error("[CLOSE] ❌ Error closing positions:", err);
+    return false;
+  }
+}
+
+// ── Main Scan Loop continued ────────────────────────────
 async function runScan() {
   try {
     console.log(`\n[SCAN] ${new Date().toISOString()} ─────────────────────────`);
