@@ -187,13 +187,21 @@ function getExecutionContracts(result: any): number {
 
 function getExecutionCostUSD(result: any, fallbackContracts: number, fallbackPrice: number): number {
   const raw = result?.execution?.totalsRaw ?? result?.execution?.totals ?? {};
-  // Try multiple fields the API might return
-  const spent = Number(raw.makerAmountNet ?? raw.makerAmountGross ?? raw.totalCost ?? 0);
-  if (spent > 0) return spent / 1e6;
-  // Fallback: contracts × price (what we asked for)
+  // Try every possible field the API might return for cost
+  const candidates = [
+    raw.makerAmountNet, raw.makerAmountGross, raw.totalCost,
+    raw.collateralAmount, raw.cost, raw.amount,
+  ];
+  for (const c of candidates) {
+    const v = Number(c ?? 0);
+    if (v > 0) return v / 1e6;
+  }
+  // ALWAYS fall back to filled contracts × price — never return 0
   const filled = getExecutionContracts(result);
   const contracts = filled > 0 ? filled : fallbackContracts;
-  return contracts * fallbackPrice;
+  const cost = contracts * fallbackPrice;
+  console.log(`[LIM] ⚠️ Cost fallback used: ${contracts.toFixed(6)} × $${fallbackPrice.toFixed(4)} = $${cost.toFixed(4)}`);
+  return cost;
 }
 
 // ── Sign & Submit an EIP-712 Order ──────────────────────
@@ -432,6 +440,13 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
       const estimatedGas = 0.15; // be conservative on gas
       const netProfit = grossProfit - estimatedGas;
 
+      // HARD RULE: combined price per contract MUST be < $1 (investment < payout)
+      const combinedPricePerContract = totalCost / contracts;
+      if (combinedPricePerContract >= 0.97) {
+        // Skip: too close to $1, no guaranteed profit after fees/gas
+        continue;
+      }
+
       if (spread > CONFIG.LIMITLESS_MIN_SPREAD && netProfit > 0) {
         opps.push({
           market,
@@ -538,7 +553,7 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       throw new Error("YES buy was not matched — aborting");
     }
     const yesFilled = getExecutionContracts(yesResult);
-    const yesCostUSD = getExecutionCostUSD(yesResult, contracts, yesPrice);
+    let yesCostUSD = getExecutionCostUSD(yesResult, contracts, yesPrice);
     if (yesFilled <= 0) {
       throw new Error("YES buy returned 0 filled contracts");
     }
@@ -555,7 +570,7 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       throw new Error("NO buy not matched — unwound YES position");
     }
     const noFilled = getExecutionContracts(noResult);
-    const noCostUSD = getExecutionCostUSD(noResult, yesFilled, noPrice);
+    let noCostUSD = getExecutionCostUSD(noResult, yesFilled, noPrice);
     if (noFilled <= 0) {
       console.log(`[LIM] ⚠️ NO fill=0 — selling YES back`);
       const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
@@ -566,18 +581,29 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
 
     // ── SAFETY CHECK: verify profit before merging ──
     const matchedContracts = Math.min(yesFilled, noFilled);
+    // If cost came back as 0, recalculate from fills × prices
+    if (yesCostUSD < 0.001) {
+      console.log(`[LIM] ⚠️ YES cost was $0 — recalculating: ${yesFilled} × $${yesPrice}`);
+      yesCostUSD = yesFilled * yesPrice;
+    }
+    if (noCostUSD < 0.001) {
+      console.log(`[LIM] ⚠️ NO cost was $0 — recalculating: ${noFilled} × $${noPrice}`);
+      noCostUSD = noFilled * noPrice;
+    }
     const totalActualCost = yesCostUSD + noCostUSD;
     const mergePayout = matchedContracts; // $1 per contract
     const estimatedGasCost = 0.15;
     const actualProfit = mergePayout - totalActualCost - estimatedGasCost;
+    const costPerContract = totalActualCost / matchedContracts;
 
     console.log(`[LIM] ── PROFIT CHECK ──`);
     console.log(`[LIM]   Matched: ${matchedContracts.toFixed(6)} contracts`);
     console.log(`[LIM]   Total cost: $${totalActualCost.toFixed(4)} (YES: $${yesCostUSD.toFixed(4)} + NO: $${noCostUSD.toFixed(4)})`);
+    console.log(`[LIM]   Cost per contract: $${costPerContract.toFixed(4)} (must be < $1.00)`);
     console.log(`[LIM]   Merge payout: $${mergePayout.toFixed(4)}`);
     console.log(`[LIM]   Est. profit after gas: $${actualProfit.toFixed(4)}`);
 
-    if (totalActualCost >= mergePayout) {
+    if (totalActualCost >= mergePayout || costPerContract >= 1.0) {
       // NOT PROFITABLE — sell both sides back instead of merging
       console.log(`[LIM] ❌ ABORT: cost $${totalActualCost.toFixed(4)} >= payout $${mergePayout.toFixed(4)} — selling both back`);
       const yesBidPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
