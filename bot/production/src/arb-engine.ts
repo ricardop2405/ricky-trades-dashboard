@@ -773,11 +773,18 @@ async function runScan() {
   try {
     console.log(`\n[SCAN] ${new Date().toISOString()} ─────────────────────────`);
 
-    const markets = await fetchJupiterMarkets();
+    // Fetch Jupiter + DFlow in parallel
+    const [jupMarkets, dflowMarkets] = await Promise.all([
+      fetchJupiterMarkets(),
+      fetchDFlowCryptoMarkets(),
+    ]);
+    const markets = [...jupMarkets, ...dflowMarkets];
+
     if (markets.length === 0) {
-      console.log("[SCAN] No markets found — retrying next interval");
+      console.log("[SCAN] No markets found on either platform — retrying next interval");
       return;
     }
+    console.log(`[SCAN] Total: ${markets.length} markets (Jupiter=${jupMarkets.length}, DFlow=${dflowMarkets.length})`);
 
     const arbs = findArbs(markets);
 
