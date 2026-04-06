@@ -277,7 +277,11 @@ async function fetchDFlowCryptoMarkets(): Promise<JupMarket[]> {
           openTime: Number(m.openTime ?? 0) || null,
         };
 
-        if (market.status === "open" && isShortWindowMarket(market)) {
+        // Simple time check: must close within 16 minutes
+        const now = Date.now() / 1000;
+        const ct = market.closeTime;
+        const isTimedOpen = market.status === "open" && ct && ct > now && (ct - now) <= 16 * 60;
+        if (isTimedOpen) {
           markets.push(market);
         }
       }
