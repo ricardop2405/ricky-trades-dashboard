@@ -5,7 +5,9 @@
   "scripts": {
     "mev": "ts-node src/mev-engine.ts",
     "arb": "ts-node src/arb-engine.ts",
+    "limitless": "ts-node src/limitless-engine.ts",
     "both": "concurrently \"npm run mev\" \"npm run arb\"",
+    "all": "concurrently \"npm run mev\" \"npm run arb\" \"npm run limitless\"",
     "start": "npm run both"
   },
   "dependencies": {
@@ -15,7 +17,8 @@
     "dotenv": "^16.4.5",
     "socks-proxy-agent": "^8.0.2",
     "https-proxy-agent": "^7.0.4",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "viem": "^2.21.0"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
