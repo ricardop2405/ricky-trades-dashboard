@@ -86,45 +86,89 @@ function dflowHeaders(): Record<string, string> {
 
 async function fetchDFlowMarkets(): Promise<DFlowMarket[]> {
   const allMarkets: DFlowMarket[] = [];
-  let cursor: string | null = null;
 
   try {
-    // Only fetch active markets — avoids thousands of finalized/dead markets
-    for (let page = 0; page < 10; page++) {
+    // Strategy: fetch active markets from general endpoint PLUS
+    // discover 15-minute crypto markets via events → market tickers
+    
+    // 1. Fetch general active markets (politics, sports, long-term crypto)
+    let cursor: string | null = null;
+    for (let page = 0; page < 5; page++) {
       const params = new URLSearchParams({ limit: "100", status: "active" });
-      if (cursor) params.set("cursor", cursor.toString());
-
-      const res = await fetch(
-        `${CONFIG.DFLOW_METADATA_API}/api/v1/markets?${params}`,
-        { headers: dflowHeaders() }
-      );
-      if (!res.ok) {
-        console.error(`[DFLOW] API ${res.status}: ${await res.text()}`);
-        break;
-      }
-
+      if (cursor) params.set("cursor", cursor);
+      const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/markets?${params}`, { headers: dflowHeaders() });
+      if (!res.ok) break;
       const data = await res.json();
-      const markets: DFlowMarket[] = Array.isArray(data)
-        ? data
-        : data.markets || data.data || [];
-
+      const markets = Array.isArray(data) ? data : data.markets || data.data || [];
       allMarkets.push(...markets);
+      const next = data.cursor || data.next_cursor;
+      if (!next || markets.length < 100) break;
+      cursor = next;
+    }
 
-      const nextCursor = data.cursor || data.next_cursor;
-      if (!nextCursor || markets.length < 100) break;
-      cursor = nextCursor;
+    // 2. Discover 15-min crypto events via events endpoint
+    const CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"];
+    const cryptoEventTickers: string[] = [];
+    
+    // Scan recent events for 15M series
+    let evtCursor: string | null = null;
+    for (let page = 0; page < 5; page++) {
+      const params = new URLSearchParams({ limit: "200" });
+      if (evtCursor) params.set("cursor", evtCursor);
+      const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/events?${params}`, { headers: dflowHeaders() });
+      if (!res.ok) break;
+      const data = await res.json();
+      const events = data.events || [];
+      for (const e of events) {
+        if (CRYPTO_SERIES.includes(e.seriesTicker)) {
+          cryptoEventTickers.push(e.ticker);
+        }
+      }
+      const next = data.cursor;
+      if (!next || events.length < 200) break;
+      evtCursor = next;
+    }
+
+    console.log(`[DFLOW] Found ${cryptoEventTickers.length} fifteen-min crypto events`);
+
+    // 3. Fetch markets for each crypto event ticker by scanning deeper
+    // Markets are at high cursor values; batch fetch them
+    if (cryptoEventTickers.length > 0) {
+      const eventSet = new Set(cryptoEventTickers);
+      // Scan market pages looking for these event tickers
+      let mkCursor = "28000"; // 15M markets start around cursor 28000+
+      for (let page = 0; page < 30; page++) {
+        const params = new URLSearchParams({ limit: "100", cursor: mkCursor });
+        const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/markets?${params}`, { headers: dflowHeaders() });
+        if (!res.ok) break;
+        const data = await res.json();
+        const markets = Array.isArray(data) ? data : data.markets || data.data || [];
+        if (markets.length === 0) break;
+
+        for (const m of markets) {
+          if (eventSet.has(m.eventTicker)) {
+            allMarkets.push(m);
+          }
+        }
+
+        const next = data.cursor;
+        if (!next) break;
+        mkCursor = next.toString();
+        await sleep(200); // Rate limit protection
+      }
     }
 
     // Log what we found
-    const withPrices = allMarkets.filter((m) => m.yesBid != null || m.yesAsk != null);
+    const withPrices = allMarkets.filter((m: any) => m.yesBid != null || m.yesAsk != null);
+    const crypto15m = allMarkets.filter((m: any) => (m.eventTicker || "").includes("15M"));
     console.log(
-      `[DFLOW] Fetched ${allMarkets.length} active markets | ${withPrices.length} with prices`
+      `[DFLOW] Total: ${allMarkets.length} markets | ${withPrices.length} with prices | ${crypto15m.length} fifteen-min crypto`
     );
 
-    for (const m of allMarkets.slice(0, 10)) {
+    for (const m of crypto15m.slice(0, 5)) {
       console.log(
         `  ${m.ticker} "${(m.title || "").slice(0, 50)}" ` +
-        `yesBid=${m.yesBid} yesAsk=${m.yesAsk} noBid=${m.noBid} noAsk=${m.noAsk}`
+        `yesBid=${m.yesBid} yesAsk=${m.yesAsk} status=${m.status}`
       );
     }
 
