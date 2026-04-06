@@ -374,12 +374,6 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   // The API will return INSUFFICIENT_FUNDS if balance is too low — no pre-check needed.
   console.log(`[BAL] Using Jupiter Predict program balance (not wallet ATA)`);
 
-  if (FAILSAFE_SCAN_ONLY) {
-    console.warn(`[ARB] FAIL-SAFE: skipping live execution to prevent unhedged exposure`);
-    marketCooldowns.set(market.marketId, Date.now());
-    return;
-  }
-
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
     .insert({
@@ -420,63 +414,57 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
       return;
     }
 
-    // Sign both
+    // Sign both transactions
     const [yesTx, noTx] = await Promise.all([
       buildAndSign(yesTxRaw),
       buildAndSign(noTxRaw),
     ]);
 
-    // PARALLEL: Send both legs simultaneously
-    console.log("[TX] Sending YES + NO legs in parallel...");
-    const [yesSig, noSig] = await Promise.all([
-      sendDirect(yesTx, "YES"),
-      sendDirect(noTx, "NO"),
-    ]);
+    // ── ATOMIC: Submit as Jito bundle ──────────────────────
+    // Jito guarantees: both txs land in the SAME slot, or neither does.
+    console.log("[JITO] Submitting YES + NO as atomic Jito bundle...");
+
+    const bundleResult = await sendJitoBundle([yesTx, noTx]);
     marketCooldowns.set(market.marketId, Date.now());
 
-    const yesOk = !!yesSig;
-    const noOk = !!noSig;
+    if (bundleResult) {
+      console.log(`[ARB] ✅ Jito bundle landed! Bundle ID: ${bundleResult}`);
 
-    if (yesOk && noOk) {
-      // Both txs confirmed — but check if they are fills or open orders
-      console.log("[ARB] Both txs confirmed on-chain, verifying fill status...");
-      await sleep(3000); // Wait for state to settle
-
+      // Verify both txs confirmed
+      await sleep(3000);
       const openOrders = await getOpenOrders();
       if (openOrders.length > 0) {
-        console.log(`[ARB] ⚠️  ${openOrders.length} unfilled open orders detected — cancelling all`);
+        console.log(`[ARB] ⚠️  ${openOrders.length} unfilled open orders — cancelling`);
         await cancelAllOrders();
         await closeAllPositions();
         if (oppId) {
           await supabase.from("arb_executions").insert({
             opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
             status: "failed",
-            error_message: `Orders placed but not filled — cancelled ${openOrders.length} open orders`,
+            error_message: `Bundle landed but orders unfilled — cancelled ${openOrders.length}`,
           });
           await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
         }
       } else {
-        console.log(`[ARB] ✅ Both legs filled! Net profit: ~$${netProfit.toFixed(4)}`);
+        console.log(`[ARB] ✅ Both legs filled atomically! Net profit: ~$${netProfit.toFixed(4)}`);
         if (oppId) {
           await supabase.from("arb_executions").insert({
             opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
             fees: opp.fees, status: "filled",
-            side_a_tx: yesSig, side_b_tx: noSig,
+            side_a_tx: bs58.encode(yesTx.signatures[0]),
+            side_b_tx: bs58.encode(noTx.signatures[0]),
             side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
           });
           await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
         }
       }
     } else {
-      // One or both txs failed — cancel any open orders and close positions
-      console.error(`[ARB] ⚠️  Partial failure: YES=${yesOk} NO=${noOk} — cleaning up`);
-      await cancelAllOrders();
-      await closeAllPositions();
+      console.error(`[ARB] ❌ Jito bundle failed — no exposure, both legs rejected atomically`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
           status: "failed",
-          error_message: `Partial: YES=${yesOk} NO=${noOk} — auto-cancelled & closed`,
+          error_message: "Jito bundle rejected — atomic failure, no exposure",
         });
         await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
@@ -492,6 +480,7 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
       });
     }
   }
+}
 }
 
 // ── Direct TX Submission (Fallback) ─────────────────────
