@@ -416,46 +416,57 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
       buildAndSign(noTxRaw),
     ]);
 
-    // SEQUENTIAL: Send YES first, then NO only if YES confirms
-    console.log("[TX] Step 1: Sending YES leg...");
-    const yesSig = await sendDirect(yesTx, "YES");
+    // PARALLEL: Send both legs simultaneously
+    console.log("[TX] Sending YES + NO legs in parallel...");
+    const [yesSig, noSig] = await Promise.all([
+      sendDirect(yesTx, "YES"),
+      sendDirect(noTx, "NO"),
+    ]);
     marketCooldowns.set(market.marketId, Date.now());
 
-    if (!yesSig) {
-      console.log("[ARB] ❌ YES failed — no exposure, safe abort");
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
-          status: "failed", error_message: "YES leg failed — no exposure",
-        });
-        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
-      }
-      return;
-    }
+    const yesOk = !!yesSig;
+    const noOk = !!noSig;
 
-    console.log("[TX] Step 2: YES confirmed, sending NO leg...");
-    const noSig = await sendDirect(noTx, "NO");
+    if (yesOk && noOk) {
+      // Both txs confirmed — but check if they are fills or open orders
+      console.log("[ARB] Both txs confirmed on-chain, verifying fill status...");
+      await sleep(3000); // Wait for state to settle
 
-    if (noSig) {
-      console.log(`[ARB] ✅ Both legs landed! Net profit: ~$${netProfit.toFixed(4)}`);
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
-          fees: opp.fees, status: "filled",
-          side_a_tx: yesSig, side_b_tx: noSig,
-          side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
-        });
-        await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+      const openOrders = await getOpenOrders();
+      if (openOrders.length > 0) {
+        console.log(`[ARB] ⚠️  ${openOrders.length} unfilled open orders detected — cancelling all`);
+        await cancelAllOrders();
+        await closeAllPositions();
+        if (oppId) {
+          await supabase.from("arb_executions").insert({
+            opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+            status: "failed",
+            error_message: `Orders placed but not filled — cancelled ${openOrders.length} open orders`,
+          });
+          await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+        }
+      } else {
+        console.log(`[ARB] ✅ Both legs filled! Net profit: ~$${netProfit.toFixed(4)}`);
+        if (oppId) {
+          await supabase.from("arb_executions").insert({
+            opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
+            fees: opp.fees, status: "filled",
+            side_a_tx: yesSig, side_b_tx: noSig,
+            side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
+          });
+          await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+        }
       }
     } else {
-      // NO failed — must close YES position to avoid exposure
-      console.error("[ARB] ⚠️  NO failed — closing YES position to avoid exposure...");
-      const closed = await closeAllPositions();
+      // One or both txs failed — cancel any open orders and close positions
+      console.error(`[ARB] ⚠️  Partial failure: YES=${yesOk} NO=${noOk} — cleaning up`);
+      await cancelAllOrders();
+      await closeAllPositions();
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
           status: "failed",
-          error_message: `NO failed — auto-closed YES position (${closed ? "success" : "MANUAL CLOSE NEEDED"})`,
+          error_message: `Partial: YES=${yesOk} NO=${noOk} — auto-cancelled & closed`,
         });
         await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
@@ -490,6 +501,65 @@ async function sendDirect(tx: VersionedTransaction, label: string): Promise<stri
   } catch (err) {
     console.error(`[TX] ${label} error:`, err);
     return null;
+  }
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// ── Get Open Orders ─────────────────────────────────────
+async function getOpenOrders(): Promise<any[]> {
+  try {
+    const res = await jupFetch(
+      `${CONFIG.JUP_PREDICT_API}/orders?ownerPubkey=${WALLET}&status=open`,
+      { headers: jupHeaders() }
+    );
+    if (!res.ok) {
+      console.warn(`[ORDERS] Could not fetch open orders: ${res.status}`);
+      return [];
+    }
+    const data = await res.json();
+    const orders = Array.isArray(data) ? data : (data.orders || []);
+    return orders;
+  } catch (err) {
+    console.warn("[ORDERS] Error fetching open orders:", err);
+    return [];
+  }
+}
+
+// ── Cancel All Open Orders ──────────────────────────────
+async function cancelAllOrders(): Promise<boolean> {
+  try {
+    console.log("[CANCEL] Cancelling all open orders...");
+    const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
+      method: "DELETE",
+      headers: { ...jupHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerPubkey: WALLET }),
+    });
+
+    const rawText = await res.text();
+    if (!res.ok) {
+      console.error(`[CANCEL] API error ${res.status}: ${rawText.slice(0, 300)}`);
+      return false;
+    }
+
+    let data: any;
+    try { data = JSON.parse(rawText); } catch { return false; }
+
+    // Sign and send cancel transaction(s)
+    const txList = data.transactions || (data.transaction ? [data.transaction] : []);
+    for (const txData of txList) {
+      const tx = await buildAndSign(txData);
+      const sig = await sendDirect(tx, "CANCEL");
+      if (sig) console.log(`[CANCEL] ✅ Cancelled: ${sig.slice(0, 16)}...`);
+    }
+
+    if (txList.length === 0) {
+      console.log("[CANCEL] No open orders to cancel");
+    }
+    return true;
+  } catch (err) {
+    console.error("[CANCEL] ❌ Error:", err);
+    return false;
   }
 }
 
@@ -615,6 +685,16 @@ async function main() {
 
   if (!CONFIG.JUP_PREDICT_API_KEY) {
     console.warn("[ARB] ⚠️  No JUP_PREDICT_API_KEY — may be rate-limited");
+  }
+
+  // Startup cleanup: cancel any stale open orders from previous runs
+  console.log("[ARB] Checking for stale open orders...");
+  const staleOrders = await getOpenOrders();
+  if (staleOrders.length > 0) {
+    console.log(`[ARB] Found ${staleOrders.length} stale open orders — cancelling`);
+    await cancelAllOrders();
+  } else {
+    console.log("[ARB] No stale orders ✅");
   }
 
   console.log("[ARB] Starting scan loop...\n");
