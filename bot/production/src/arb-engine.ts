@@ -197,36 +197,15 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
       }
     }
 
-    // Filter: any open market that resolves within 15 minutes
-    const MAX_DURATION_MS = 15 * 60 * 1000; // 15 minutes
-    const now = Date.now();
-
-    const shortTermMarkets = markets.filter(m => {
-      if (m.status !== "open") return false;
-      if (!m.endDate) return true; // no end date = short-term, include it
-      const endMs = new Date(m.endDate).getTime();
-      const remaining = endMs - now;
-      return remaining > 0 && remaining <= MAX_DURATION_MS;
-    });
-
-    // Sort: crypto/5-min first (preferred), then everything else
-    const isCrypto5min = (m: JupMarket) => {
-      const t = (m.title + " " + m.category).toLowerCase();
-      return t.includes("btc") || t.includes("eth") || t.includes("sol") ||
-        t.includes("bitcoin") || t.includes("ethereum") || t.includes("solana") ||
-        t.includes("crypto") || t.includes("5min") || t.includes("5-min") ||
-        t.includes("5 min");
-    };
-
-    const result = shortTermMarkets.sort((a, b) => {
-      const aCrypto = isCrypto5min(a) ? 1 : 0;
-      const bCrypto = isCrypto5min(b) ? 1 : 0;
-      if (bCrypto !== aCrypto) return bCrypto - aCrypto; // crypto first
-      return b.spread - a.spread; // then by spread
-    });
+    // Include ALL open markets with positive spread — no time filter
+    // (Jupiter Predict markets are inherently short-term)
+    // Also include any market with a profitable spread regardless of category
+    const result = markets
+      .filter(m => m.status === "open")
+      .sort((a, b) => b.spread - a.spread);
 
     console.log(`[JUP] Total events: ${events.length} | Total markets: ${markets.length}`);
-    console.log(`[JUP] Short-term (≤15min): ${result.length} | Crypto/5min preferred`);
+    console.log(`[JUP] Open markets: ${result.length} | Positive spread: ${result.filter(m => m.spread > 0).length}`);
 
     // Log category breakdown for debugging
     const catCounts: Record<string, number> = {};
