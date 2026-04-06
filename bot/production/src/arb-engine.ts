@@ -115,6 +115,39 @@ interface ArbOpportunity {
   netProfit: number;
 }
 
+// ── Dynamic Priority Fees (Helius) ──────────────────────
+async function getOptimalPriorityFee(): Promise<number> {
+  try {
+    const res = await fetch(CONFIG.HELIUS_HTTP, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "priority-fee",
+        method: "getPriorityFeeEstimate",
+        params: [{ options: { priorityLevel: "High" } }],
+      }),
+    });
+    const data = await res.json();
+    const fee = data?.result?.priorityFeeEstimate || 50_000;
+    return Math.min(fee, 500_000);
+  } catch {
+    return 50_000;
+  }
+}
+
+const BASE_CU_LIMIT = 200_000;
+
+// ── Jupiter Predict API (proxied) ───────────────────────
+function jupHeaders(): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  if (CONFIG.JUP_PREDICT_API_KEY) {
+    h["x-api-key"] = CONFIG.JUP_PREDICT_API_KEY;
+    h["Authorization"] = `Bearer ${CONFIG.JUP_PREDICT_API_KEY}`;
+  }
+  return h;
+}
+
 // ── Jupiter Timed Crypto Markets ────────────────────────
 // Correct API: https://prediction-market-api.jup.ag/api/v1/events/crypto/timed
 // Requires: subcategory (coin) + tags (timeframe)
