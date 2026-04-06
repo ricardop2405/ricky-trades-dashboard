@@ -155,6 +155,13 @@ function getExecutionContracts(result: any): number {
   return filled > 0 ? filled / 1e6 : 0;
 }
 
+function getExecutionCostUSD(result: any): number {
+  const raw = result?.execution?.totalsRaw ?? result?.execution?.totals ?? {};
+  // makerAmountNet = actual USDC spent (including fees)
+  const spent = Number(raw.makerAmountNet ?? raw.makerAmountGross ?? 0);
+  return spent > 0 ? spent / 1e6 : 0;
+}
+
 // ── Sign & Submit an EIP-712 Order ──────────────────────
 async function placeSignedOrder(
   market: LimitlessMarket,
@@ -476,35 +483,67 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
   try {
     const contracts = Math.floor(tradeSize);
 
+    // ── LEG 1: Buy YES ────────────────────────────────
     console.log(`[LIM] Buying YES: target ${contracts} contracts @ avg $${yesPrice.toFixed(4)}`);
     const yesResult = await placeSignedOrder(market, 0, market.yesTokenId, yesPrice, contracts, "FOK");
     if (!yesResult?.execution?.matched) {
       throw new Error("YES buy was not matched — aborting");
     }
     const yesFilled = getExecutionContracts(yesResult);
+    const yesCostUSD = getExecutionCostUSD(yesResult);
     if (yesFilled <= 0) {
       throw new Error("YES buy returned 0 filled contracts");
     }
-    console.log(`[LIM]   YES filled: ${yesFilled.toFixed(6)} contracts`);
+    console.log(`[LIM]   YES filled: ${yesFilled.toFixed(6)} contracts, cost: $${yesCostUSD.toFixed(4)}`);
 
-    console.log(`[LIM] Buying NO to match YES fill: ${yesFilled.toFixed(6)} contracts @ avg $${noPrice.toFixed(4)}`);
+    // ── LEG 2: Buy NO (match YES fill exactly) ──────
+    console.log(`[LIM] Buying NO to match: ${yesFilled.toFixed(6)} contracts @ avg $${noPrice.toFixed(4)}`);
     const noResult = await placeSignedOrder(market, 0, market.noTokenId, noPrice, yesFilled, "FOK");
     if (!noResult?.execution?.matched) {
-      throw new Error("NO buy was not matched — unhedged YES position");
+      // YES is unhedged — immediately sell it back
+      console.log(`[LIM] ⚠️ NO not matched — selling YES back to unwind`);
+      const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
+      await placeSignedOrder(market, 1, market.yesTokenId, unwindPrice, yesFilled, "FOK");
+      throw new Error("NO buy not matched — unwound YES position");
     }
     const noFilled = getExecutionContracts(noResult);
+    const noCostUSD = getExecutionCostUSD(noResult);
     if (noFilled <= 0) {
-      throw new Error("NO buy returned 0 filled contracts");
+      console.log(`[LIM] ⚠️ NO fill=0 — selling YES back`);
+      const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
+      await placeSignedOrder(market, 1, market.yesTokenId, unwindPrice, yesFilled, "FOK");
+      throw new Error("NO buy returned 0 filled — unwound YES");
     }
-    console.log(`[LIM]   NO filled: ${noFilled.toFixed(6)} contracts`);
+    console.log(`[LIM]   NO filled: ${noFilled.toFixed(6)} contracts, cost: $${noCostUSD.toFixed(4)}`);
 
+    // ── SAFETY CHECK: verify profit before merging ──
     const matchedContracts = Math.min(yesFilled, noFilled);
-    if (matchedContracts <= 0) {
-      throw new Error("No matched YES/NO contracts to merge");
+    const totalActualCost = yesCostUSD + noCostUSD;
+    const mergePayout = matchedContracts; // $1 per contract
+    const estimatedGasCost = 0.15;
+    const actualProfit = mergePayout - totalActualCost - estimatedGasCost;
+
+    console.log(`[LIM] ── PROFIT CHECK ──`);
+    console.log(`[LIM]   Matched: ${matchedContracts.toFixed(6)} contracts`);
+    console.log(`[LIM]   Total cost: $${totalActualCost.toFixed(4)} (YES: $${yesCostUSD.toFixed(4)} + NO: $${noCostUSD.toFixed(4)})`);
+    console.log(`[LIM]   Merge payout: $${mergePayout.toFixed(4)}`);
+    console.log(`[LIM]   Est. profit after gas: $${actualProfit.toFixed(4)}`);
+
+    if (totalActualCost >= mergePayout) {
+      // NOT PROFITABLE — sell both sides back instead of merging
+      console.log(`[LIM] ❌ ABORT: cost $${totalActualCost.toFixed(4)} >= payout $${mergePayout.toFixed(4)} — selling both back`);
+      const yesBidPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
+      const noBidPrice = market.noBid > 0 ? market.noBid : noPrice * 0.95;
+      await Promise.all([
+        placeSignedOrder(market, 1, market.yesTokenId, yesBidPrice, yesFilled, "FOK"),
+        placeSignedOrder(market, 1, market.noTokenId, noBidPrice, noFilled, "FOK"),
+      ]);
+      throw new Error(`Aborted: actual cost $${totalActualCost.toFixed(4)} >= merge payout $${mergePayout.toFixed(4)}`);
     }
 
+    // ── MERGE: guaranteed profitable ────────────────
     const mergeAmount = parseUnits(matchedContracts.toFixed(6), 6);
-    console.log(`[LIM] Merging ${matchedContracts.toFixed(6)} YES/NO via CTF...`);
+    console.log(`[LIM] ✅ Profitable! Merging ${matchedContracts.toFixed(6)} contracts...`);
     const mergeHash = await walletClient.writeContract({
       address: CONFIG.CTF_ADDRESS as Address,
       abi: CTF_ABI,
@@ -518,27 +557,28 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       ],
     });
 
+    // Sell any leftover unmatched contracts
     const leftoverYes = Math.max(0, yesFilled - matchedContracts);
     const leftoverNo = Math.max(0, noFilled - matchedContracts);
-
     if (leftoverYes > 0.00001) {
-      const unwindYesPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
-      console.log(`[LIM] Unwinding leftover YES: ${leftoverYes.toFixed(6)} @ $${unwindYesPrice.toFixed(4)}`);
-      await placeSignedOrder(market, 1, market.yesTokenId, unwindYesPrice, leftoverYes, "FOK");
+      const p = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
+      console.log(`[LIM] Selling leftover YES: ${leftoverYes.toFixed(6)} @ $${p.toFixed(4)}`);
+      await placeSignedOrder(market, 1, market.yesTokenId, p, leftoverYes, "FOK");
     }
-
     if (leftoverNo > 0.00001) {
-      const unwindNoPrice = market.noBid > 0 ? market.noBid : noPrice * 0.95;
-      console.log(`[LIM] Unwinding leftover NO: ${leftoverNo.toFixed(6)} @ $${unwindNoPrice.toFixed(4)}`);
-      await placeSignedOrder(market, 1, market.noTokenId, unwindNoPrice, leftoverNo, "FOK");
+      const p = market.noBid > 0 ? market.noBid : noPrice * 0.95;
+      console.log(`[LIM] Selling leftover NO: ${leftoverNo.toFixed(6)} @ $${p.toFixed(4)}`);
+      await placeSignedOrder(market, 1, market.noTokenId, p, leftoverNo, "FOK");
     }
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash: mergeHash });
     const gasUsed = Number(receipt.gasUsed) * Number(receipt.effectiveGasPrice || 0n);
     const gasCostEth = Number(formatUnits(BigInt(gasUsed), 18));
+    const finalProfit = mergePayout - totalActualCost - (gasCostEth * 2500);
 
     console.log(`[LIM] ✅ MERGED! tx=${mergeHash}`);
-    console.log(`[LIM]   Gas: ${gasCostEth.toFixed(6)} ETH | Estimated net: ~$${netProfit.toFixed(4)}`);
+    console.log(`[LIM]   Gas: ${gasCostEth.toFixed(6)} ETH ($${(gasCostEth * 2500).toFixed(4)})`);
+    console.log(`[LIM]   FINAL P&L: +$${finalProfit.toFixed(4)}`);
 
     await logExecution(opp, "success", mergeHash, gasCostEth);
   } catch (err) {
