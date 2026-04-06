@@ -34,9 +34,9 @@ export const CONFIG = {
   MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.01"),
   SCAN_INTERVAL: parseInt(process.env.SCAN_INTERVAL_MS || "30000"),
 
-  // DFlow API (dev endpoints — no key needed)
-  DFLOW_METADATA_API: process.env.DFLOW_METADATA_API || "https://dev-prediction-markets-api.dflow.net",
-  DFLOW_TRADE_API: process.env.DFLOW_TRADE_API || "https://dev-quote-api.dflow.net",
+  // DFlow API (production endpoints for 15-min crypto markets)
+  DFLOW_METADATA_API: process.env.DFLOW_METADATA_API || "https://prediction-markets-api.dflow.net",
+  DFLOW_TRADE_API: process.env.DFLOW_TRADE_API || "https://quote-api.dflow.net",
   DFLOW_API_KEY: process.env.DFLOW_API_KEY || "",
 
   // Jupiter Predict API

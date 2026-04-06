@@ -246,10 +246,21 @@ async function fetchJupMarkets(): Promise<JupMarket[]> {
     for (const event of events) {
       const eventMarkets = event.markets || event.outcomes || [];
       for (const m of eventMarkets) {
+        // Extract pricing from various possible response shapes
+        const pricing = m.pricing || {};
+        // Jupiter may return prices as raw integers (micro-units) or decimals
+        // Try multiple field names the API might use
+        const buyYes = pricing.buyYesPriceUsd ?? pricing.buyYesPrice ?? pricing.yes_price ?? m.yesPrice ?? m.yes_price ?? 0;
+        const buyNo = pricing.buyNoPriceUsd ?? pricing.buyNoPrice ?? pricing.no_price ?? m.noPrice ?? m.no_price ?? 0;
+        
         markets.push({
           ...m,
           eventId: event.eventId || event.id,
           metadata: { title: event.title || m.metadata?.title || m.title, marketId: m.marketId || m.id },
+          pricing: {
+            buyYesPriceUsd: Number(buyYes) || 0,
+            buyNoPriceUsd: Number(buyNo) || 0,
+          },
         });
       }
     }
@@ -320,10 +331,9 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
   const topMatches: { df: string; jup: string; score: number; spread1: number; spread2: number }[] = [];
 
   for (const df of dflowMarkets) {
-    // Use yesAsk for buying YES (what you pay), noBid is irrelevant for arb
-    // For arb: buy YES at yesAsk, buy NO at noAsk (taker prices)
-    const dfYes = df.yesAsk ?? df.yesBid ?? 0;
-    const dfNo = df.noAsk ?? df.noBid ?? 0;
+    // Use yesAsk for buying YES (what you pay), noAsk for buying NO
+    const dfYes = Number(df.yesAsk ?? df.yesBid ?? 0) || 0;
+    const dfNo = Number(df.noAsk ?? df.noBid ?? 0) || 0;
     if (dfYes === 0 && dfNo === 0) continue;
 
     for (const jm of jupMarkets) {
@@ -334,11 +344,14 @@ function findOpportunities(dflowMarkets: DFlowMarket[], jupMarkets: JupMarket[])
       const score = matchScore(dfTitle, jTitle);
 
       // Jupiter prices — buy-side USD quotes
-      let jYes = jm.pricing?.buyYesPriceUsd ?? 0;
-      let jNo = jm.pricing?.buyNoPriceUsd ?? 0;
+      let jYes = Number(jm.pricing?.buyYesPriceUsd ?? 0) || 0;
+      let jNo = Number(jm.pricing?.buyNoPriceUsd ?? 0) || 0;
       // If prices look like micro-units (> 10 USD), convert
       if (jYes > 10) jYes = jYes / 1_000_000;
       if (jNo > 10) jNo = jNo / 1_000_000;
+
+      // Skip if either side has no valid price
+      if ((jYes === 0 && jNo === 0)) continue;
 
       const spread1 = 1 - (dfYes + jNo);
       const spread2 = 1 - (dfNo + jYes);
