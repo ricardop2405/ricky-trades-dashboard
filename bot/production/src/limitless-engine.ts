@@ -183,14 +183,14 @@ async function placeSignedOrder(
   // Build the API payload
   const payload = {
     order: {
-      salt: salt.toString(),
+      salt: Number(salt),
       maker: account.address,
       signer: account.address,
       taker: "0x0000000000000000000000000000000000000000",
       tokenId,
-      makerAmount: makerAmount.toString(),
-      takerAmount: takerAmount.toString(),
-      expiration: "0",
+      makerAmount: Number(makerAmount),
+      takerAmount: Number(takerAmount),
+      expiration: 0,
       nonce: orderNonce,
       feeRateBps: 0,
       side,
@@ -198,6 +198,7 @@ async function placeSignedOrder(
       signature,
       ...(orderType === "GTC" ? { price } : {}),
     },
+    ownerId: CONFIG.LIMITLESS_OWNER_ID,
     orderType,
     marketSlug: market.slug,
   };
