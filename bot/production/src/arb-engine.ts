@@ -39,7 +39,10 @@ const WALLET = keypair.publicKey.toBase58();
 // Market cooldown — skip recently attempted markets
 const marketCooldowns = new Map<string, number>();
 const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
-const FAILSAFE_SCAN_ONLY = true;
+const FAILSAFE_SCAN_ONLY = false; // Atomic via Jito bundles now
+
+// Jito bundle endpoints (mainnet)
+const JITO_BUNDLE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles";
 
 // ── Proxy Setup ─────────────────────────────────────────
 // Route Jupiter API through proxy to bypass region blocks
