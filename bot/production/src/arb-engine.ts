@@ -819,7 +819,7 @@ async function runScan() {
 
     // Upsert to DB for dashboard
     const upserts = markets.slice(0, 50).map(m => ({
-      platform: "jupiter_predict",
+      platform: m.platform,
       external_id: m.marketId,
       question: m.title,
       yes_price: m.yesPrice,
@@ -827,7 +827,7 @@ async function runScan() {
       volume: m.volume,
       end_date: m.endDate,
       category: m.category || "crypto",
-      url: `https://www.jup.ag/predict/${m.marketId}`,
+      url: m.platform === "jupiter_predict" ? `https://www.jup.ag/predict/${m.marketId}` : null,
       last_synced_at: new Date().toISOString(),
     }));
 
