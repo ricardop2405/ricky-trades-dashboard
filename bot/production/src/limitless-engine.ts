@@ -153,8 +153,9 @@ async function placeSignedOrder(
       // BUY FOK: makerAmount = USDC to spend
       makerAmount = BigInt(Math.floor(price * size * 1e6));
     } else {
-      // SELL FOK: makerAmount = shares to sell
-      makerAmount = BigInt(Math.floor(size * 1e6));
+      // SELL FOK: keep makerAmount under available balance after fees
+      const safeSize = feeRateBps > 0 ? size / (1 + feeRateBps / 10000) : size;
+      makerAmount = BigInt(Math.floor(safeSize * 1e6));
     }
     takerAmount = 1n;
   } else {
