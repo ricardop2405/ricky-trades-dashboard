@@ -481,8 +481,14 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
   return opps.sort((a, b) => b.netProfit - a.netProfit);
 }
 
-// ── Ensure ERC20 Approval ───────────────────────────────
-async function ensureApproval(token: Address, spender: Address, amount: bigint): Promise<void> {
+// ── Ensure ERC20 Approval (max uint256 for gas savings) ─
+const MAX_UINT256 = 2n ** 256n - 1n;
+const approvedSpenders = new Set<string>();
+
+async function ensureApproval(token: Address, spender: Address): Promise<void> {
+  const key = `${token}-${spender}`;
+  if (approvedSpenders.has(key)) return; // already approved this session
+
   const allowance = await publicClient.readContract({
     address: token,
     abi: ERC20_ABI,
@@ -490,17 +496,19 @@ async function ensureApproval(token: Address, spender: Address, amount: bigint):
     args: [account.address, spender],
   });
 
-  if (allowance < amount) {
-    console.log("[LIM] Approving token spend...");
+  // If allowance is less than $10k worth, set to max
+  if (allowance < parseUnits("10000", 6)) {
+    console.log(`[LIM] Approving ${spender.slice(0, 10)}... for max USDC...`);
     const hash = await walletClient.writeContract({
       address: token,
       abi: ERC20_ABI,
       functionName: "approve",
-      args: [spender, amount * 10n],
+      args: [spender, MAX_UINT256],
     });
     await publicClient.waitForTransactionReceipt({ hash });
     console.log(`[LIM] ✅ Approved: ${hash}`);
   }
+  approvedSpenders.add(key);
 }
 
 // ── Execute Merge Arb ───────────────────────────────────
