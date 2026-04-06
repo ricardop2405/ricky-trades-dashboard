@@ -405,31 +405,30 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
 // ── Execute Arb ─────────────────────────────────────────
 async function executeArb(opp: ArbOpportunity): Promise<void> {
   const { market, yesCost, noCost, totalCost, netProfit } = opp;
+  const downMarketId = (market as any).downMarketId || market.marketId;
 
   console.log(`\n[ARB] ═══ EXECUTING ═════════════════════════════════`);
-  console.log(`[ARB] Market: ${market.title}`);
-  console.log(`[ARB] YES=$${market.yesPrice.toFixed(4)} + NO=$${market.noPrice.toFixed(4)} = ${(market.yesPrice + market.noPrice).toFixed(4)}`);
+  console.log(`[ARB] Event: ${market.title}`);
+  console.log(`[ARB] Up YES=$${market.yesPrice.toFixed(4)} + Down YES=$${market.noPrice.toFixed(4)} = ${(market.yesPrice + market.noPrice).toFixed(4)}`);
   console.log(`[ARB] Spread: ${(market.spread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
-  console.log(`[ARB] Buying: YES=$${yesCost.toFixed(2)} + NO=$${noCost.toFixed(2)} = $${totalCost.toFixed(2)}`);
+  console.log(`[ARB] Buying: Up YES=$${yesCost.toFixed(2)} + Down YES=$${noCost.toFixed(2)} = $${totalCost.toFixed(2)}`);
+  console.log(`[ARB] Up market: ${market.marketId} | Down market: ${downMarketId}`);
 
-  // Note: Jupiter Predict holds funds inside their program, not in the wallet's ATA.
-  // DFlow markets: scan-only (no on-chain execution yet — different platform)
   if (market.platform === "dflow") {
-    console.log(`[ARB] 📊 DFlow opportunity logged (execution not yet supported — needs DFlow SDK)`);
+    console.log(`[ARB] 📊 DFlow opportunity logged (execution not yet supported)`);
     marketCooldowns.set(market.marketId, Date.now());
     return;
   }
 
-  // Jupiter: atomic execution via Jito bundles
   console.log(`[BAL] Using Jupiter Predict program balance (not wallet ATA)`);
 
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
     .insert({
       market_a_id: market.marketId,
-      market_b_id: market.marketId,
-      side_a: "yes",
-      side_b: "no",
+      market_b_id: downMarketId,
+      side_a: "up_yes",
+      side_b: "down_yes",
       price_a: market.yesPrice,
       price_b: market.noPrice,
       spread: market.spread,
@@ -444,19 +443,19 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
     const priorityFee = await getOptimalPriorityFee();
     console.log(`[FEE] Dynamic priority fee: ${priorityFee} microlamports/CU`);
 
-    // Get exact-out quotes for both sides (limit-based, no slippage)
-    const [yesTxRaw, noTxRaw] = await Promise.all([
+    // Buy YES on Up market + YES on Down market (both are YES buys on different markets)
+    const [upTxRaw, downTxRaw] = await Promise.all([
       getExactOutQuote(market.marketId, true, yesCost, market.yesPrice),
-      getExactOutQuote(market.marketId, false, noCost, market.noPrice),
+      getExactOutQuote(downMarketId, true, noCost, market.noPrice),
     ]);
 
-    if (!yesTxRaw || !noTxRaw) {
+    if (!upTxRaw || !downTxRaw) {
       console.log("[ARB] ⚠️  Could not get quotes — prices moved or region blocked");
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
           status: "failed",
-          error_message: `Quote failed: yes=${!!yesTxRaw} no=${!!noTxRaw}`,
+          error_message: `Quote failed: up=${!!upTxRaw} down=${!!downTxRaw}`,
         });
         await supabase.from("arb_opportunities").update({ status: "expired" }).eq("id", oppId);
       }
