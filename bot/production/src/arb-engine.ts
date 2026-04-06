@@ -196,29 +196,36 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
       }
     }
 
-    // Target crypto/5-min markets + any with positive spreads
-    const cryptoMarkets = markets.filter(m => {
+    // Filter: any open market that resolves within 15 minutes
+    const MAX_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+    const now = Date.now();
+
+    const shortTermMarkets = markets.filter(m => {
       if (m.status !== "open") return false;
-      const t = m.title.toLowerCase();
-      return t.includes("btc") || t.includes("eth") || t.includes("sol") ||
-        t.includes("bitcoin") || t.includes("ethereum") || t.includes("solana") ||
-        t.includes("crypto") || t.includes("price") || t.includes("above") ||
-        t.includes("below") || t.includes("5min") || t.includes("5-min") ||
-        t.includes("5 min") || m.category?.toLowerCase().includes("crypto");
+      if (!m.endDate) return true; // no end date = short-term, include it
+      const endMs = new Date(m.endDate).getTime();
+      const remaining = endMs - now;
+      return remaining > 0 && remaining <= MAX_DURATION_MS;
     });
 
-    const profitableAny = markets.filter(m =>
-      m.status === "open" && m.spread > CONFIG.MIN_SPREAD
-    );
+    // Sort: crypto/5-min first (preferred), then everything else
+    const isCrypto5min = (m: JupMarket) => {
+      const t = (m.title + " " + m.category).toLowerCase();
+      return t.includes("btc") || t.includes("eth") || t.includes("sol") ||
+        t.includes("bitcoin") || t.includes("ethereum") || t.includes("solana") ||
+        t.includes("crypto") || t.includes("5min") || t.includes("5-min") ||
+        t.includes("5 min");
+    };
 
-    const combined = new Map<string, JupMarket>();
-    for (const m of [...cryptoMarkets, ...profitableAny]) {
-      combined.set(m.marketId, m);
-    }
-    const result = Array.from(combined.values());
+    const result = shortTermMarkets.sort((a, b) => {
+      const aCrypto = isCrypto5min(a) ? 1 : 0;
+      const bCrypto = isCrypto5min(b) ? 1 : 0;
+      if (bCrypto !== aCrypto) return bCrypto - aCrypto; // crypto first
+      return b.spread - a.spread; // then by spread
+    });
 
     console.log(`[JUP] Total events: ${events.length} | Total markets: ${markets.length}`);
-    console.log(`[JUP] Crypto/5min: ${cryptoMarkets.length} | Profitable: ${profitableAny.length} | Combined: ${result.length}`);
+    console.log(`[JUP] Short-term (≤15min): ${result.length} | Crypto/5min preferred`);
 
     const sorted = [...result].sort((a, b) => b.spread - a.spread);
     for (const m of sorted.slice(0, 10)) {
