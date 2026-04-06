@@ -169,22 +169,24 @@ async function placeSignedOrder(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (CONFIG.LIMITLESS_API_KEY) headers["X-API-Key"] = CONFIG.LIMITLESS_API_KEY;
 
-  // Query the authenticated profile for the account fee band
-  let feeRateBps = 0;
-  try {
-    const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, {
-      headers,
-    });
-    if (feeRes.ok) {
-      const feeData = await feeRes.json();
-      feeRateBps = Number(feeData?.rank?.feeRateBps ?? feeData?.feeRateBps ?? 0);
-      console.log(`[LIM] Fee rate for account: ${feeRateBps} bps`);
-    } else {
-      console.log(`[LIM] Fee profile lookup failed: ${feeRes.status}`);
+  // Use cached fee rate or fetch it once
+  if (cachedFeeRateBps === null) {
+    try {
+      const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/profiles/${account.address}`, { headers });
+      if (feeRes.ok) {
+        const feeData = await feeRes.json();
+        cachedFeeRateBps = Number(feeData?.rank?.feeRateBps ?? feeData?.feeRateBps ?? 0);
+        console.log(`[LIM] Fee rate for account: ${cachedFeeRateBps} bps`);
+      } else {
+        cachedFeeRateBps = 0;
+        console.log(`[LIM] Fee profile lookup failed: ${feeRes.status}, using 0`);
+      }
+    } catch {
+      cachedFeeRateBps = 0;
+      console.log(`[LIM] Could not fetch fee profile, using 0`);
     }
-  } catch {
-    console.log(`[LIM] Could not fetch fee profile, using 0`);
   }
+  const feeRateBps = cachedFeeRateBps;
 
   const salt = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
   orderNonce++;
