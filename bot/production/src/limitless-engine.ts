@@ -118,6 +118,7 @@ interface ArbOpportunity {
 const marketCooldowns = new Map<string, number>();
 const COOLDOWN_MS = 5 * 60 * 1000;
 let orderNonce = 0;
+let cachedFeeRateBps: number | null = null;
 const ENABLE_SPLIT_ARBS = false;
 
 function normalizeBookSide(levels: any[], descending = false): OrderbookLevel[] {
