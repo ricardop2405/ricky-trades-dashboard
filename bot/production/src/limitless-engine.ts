@@ -155,6 +155,13 @@ function getExecutionContracts(result: any): number {
   return filled > 0 ? filled / 1e6 : 0;
 }
 
+function getExecutionCostUSD(result: any): number {
+  const raw = result?.execution?.totalsRaw ?? result?.execution?.totals ?? {};
+  // makerAmountNet = actual USDC spent (including fees)
+  const spent = Number(raw.makerAmountNet ?? raw.makerAmountGross ?? 0);
+  return spent > 0 ? spent / 1e6 : 0;
+}
+
 // ── Sign & Submit an EIP-712 Order ──────────────────────
 async function placeSignedOrder(
   market: LimitlessMarket,
