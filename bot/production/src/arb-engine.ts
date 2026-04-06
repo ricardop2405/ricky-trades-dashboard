@@ -236,7 +236,7 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
   }
 }
 
-// ── Exact-Out Quote (Limit-Based, No Slippage) ─────────
+// ── Create Order (deposit-based buy) ────────────────────
 async function getExactOutQuote(
   marketId: string,
   isYes: boolean,
@@ -251,15 +251,12 @@ async function getExactOutQuote(
       marketId,
       isYes,
       isBuy: true,
-      depositMint: CONFIG.JUP_USD_MINT,
-      amount: maxInputMicro,
-      limitPrice,
-      exactOut: true,
+      depositAmount: maxInputMicro,
     };
 
     console.log(
-      `[JUP] Exact-out quote: ${isYes ? "YES" : "NO"} market=${marketId.slice(0, 12)}... ` +
-      `limit=$${limitPrice.toFixed(4)} maxInput=$${maxInputUsd.toFixed(2)}`
+      `[JUP] Order: ${isYes ? "YES" : "NO"} market=${marketId.slice(0, 12)}... ` +
+      `depositAmount=$${maxInputUsd.toFixed(2)} (${maxInputMicro} micro)`
     );
 
     const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
