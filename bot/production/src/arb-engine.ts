@@ -10,7 +10,7 @@
  *   - Jito bundles (MEV-protected, hidden from sandwich bots)
  *   - Dynamic priority fees via Helius (pay only what's needed)
  *   - Compute Unit optimization (minimal CU budget)
- *   - Profit-check guardrail (tx reverts if no profit)
+ *   - SOCKS5 proxy support for region-blocked APIs
  *
  * Usage: npm run arb
  */
@@ -20,12 +20,11 @@ import {
   Keypair,
   VersionedTransaction,
   LAMPORTS_PER_SOL,
-  ComputeBudgetProgram,
-  TransactionMessage,
-  PublicKey,
 } from "@solana/web3.js";
 import { createClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
+import { SocksProxyAgent } from "socks-proxy-agent";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { CONFIG } from "./config";
 import { sleep } from "./utils";
 
@@ -37,6 +36,32 @@ const WALLET = keypair.publicKey.toBase58();
 
 // Jito block engine for MEV-protected submission
 const JITO_BLOCK_ENGINE = "https://mainnet.block-engine.jito.wtf/api/v1/bundles";
+
+// ── Proxy Setup ─────────────────────────────────────────
+// Route Jupiter API through proxy to bypass region blocks
+// Set PROXY_URL in .env (e.g. socks5://user:pass@host:port or http://host:port)
+const PROXY_URL = process.env.PROXY_URL || "";
+let proxyAgent: any = null;
+
+if (PROXY_URL) {
+  if (PROXY_URL.startsWith("socks")) {
+    proxyAgent = new SocksProxyAgent(PROXY_URL);
+  } else {
+    proxyAgent = new HttpsProxyAgent(PROXY_URL);
+  }
+  console.log(`[PROXY] Routing Jupiter API through proxy: ${PROXY_URL.replace(/\/\/.*@/, "//***@")}`);
+} else {
+  console.log("[PROXY] No PROXY_URL set — Jupiter requests go direct (may be region-blocked)");
+}
+
+// Proxied fetch for Jupiter API only
+async function jupFetch(url: string, init?: RequestInit): Promise<Response> {
+  if (!proxyAgent) return fetch(url, init);
+
+  // Use Node.js native fetch with agent
+  const nodeFetch = (await import("node-fetch")).default;
+  return nodeFetch(url, { ...init, agent: proxyAgent } as any) as unknown as Response;
+}
 
 console.log("═══════════════════════════════════════════════════════");
 console.log("  RICKY TRADES — Jupiter Predict Intra-Platform Arb");
@@ -58,7 +83,7 @@ interface JupMarket {
   status: string;
   yesPrice: number;
   noPrice: number;
-  spread: number;         // 1 - (yes + no) = guaranteed profit margin
+  spread: number;
   category: string;
   endDate: string | null;
   volume: number;
@@ -66,13 +91,13 @@ interface JupMarket {
 
 interface ArbOpportunity {
   market: JupMarket;
-  yesCost: number;        // USD to buy YES side
-  noCost: number;         // USD to buy NO side
-  totalCost: number;      // yesCost + noCost
-  payout: number;         // always = amount (one side resolves to $1/share)
-  grossProfit: number;    // payout - totalCost
-  fees: number;           // estimated on-chain + platform fees
-  netProfit: number;      // grossProfit - fees
+  yesCost: number;
+  noCost: number;
+  totalCost: number;
+  payout: number;
+  grossProfit: number;
+  fees: number;
+  netProfit: number;
 }
 
 // ── Dynamic Priority Fees (Helius) ──────────────────────
@@ -90,18 +115,15 @@ async function getOptimalPriorityFee(): Promise<number> {
     });
     const data = await res.json();
     const fee = data?.result?.priorityFeeEstimate || 50_000;
-    return Math.min(fee, 500_000); // Cap at 0.5M microlamports
+    return Math.min(fee, 500_000);
   } catch {
-    return 50_000; // Fallback: 50k microlamports
+    return 50_000;
   }
 }
 
-// ── Compute Unit Estimation ─────────────────────────────
-// Prediction market swaps are simple; we budget tight CU
-const BASE_CU_LIMIT = 200_000; // Single swap ~80-120k CU
-const BUNDLE_CU_LIMIT = 400_000; // Both legs in one bundle
+const BASE_CU_LIMIT = 200_000;
 
-// ── Jupiter Predict API ─────────────────────────────────
+// ── Jupiter Predict API (proxied) ───────────────────────
 function jupHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (CONFIG.JUP_PREDICT_API_KEY) {
@@ -116,10 +138,14 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
     const url = `${CONFIG.JUP_PREDICT_API}/events?` +
       new URLSearchParams({ includeMarkets: "true", limit: "500" });
 
-    const res = await fetch(url, { headers: jupHeaders() });
+    const res = await jupFetch(url, { headers: jupHeaders() });
     const rawText = await res.text();
 
     if (!res.ok) {
+      if (rawText.includes("unsupported_region")) {
+        console.error("[JUP] ❌ REGION BLOCKED — set PROXY_URL in .env to route through a supported region");
+        return [];
+      }
       console.error(`[JUP] API ${res.status}: ${rawText.slice(0, 500)}`);
       return [];
     }
@@ -149,10 +175,8 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
           m.noPrice ?? m.no_price ?? 0
         );
 
-        // Convert micro-units if needed
         if (yesPrice > 10) yesPrice /= 1_000_000;
         if (noPrice > 10) noPrice /= 1_000_000;
-
         if (yesPrice <= 0 || noPrice <= 0) continue;
 
         const spread = 1 - (yesPrice + noPrice);
@@ -172,19 +196,17 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
       }
     }
 
-    // Filter for active 5-minute crypto markets specifically
+    // Target crypto/5-min markets + any with positive spreads
     const cryptoMarkets = markets.filter(m => {
       if (m.status !== "open") return false;
       const t = m.title.toLowerCase();
-      const isCrypto = t.includes("btc") || t.includes("eth") || t.includes("sol") ||
+      return t.includes("btc") || t.includes("eth") || t.includes("sol") ||
         t.includes("bitcoin") || t.includes("ethereum") || t.includes("solana") ||
         t.includes("crypto") || t.includes("price") || t.includes("above") ||
         t.includes("below") || t.includes("5min") || t.includes("5-min") ||
         t.includes("5 min") || m.category?.toLowerCase().includes("crypto");
-      return isCrypto;
     });
 
-    // Also keep all markets with profitable spreads (might miss categorization)
     const profitableAny = markets.filter(m =>
       m.status === "open" && m.spread > CONFIG.MIN_SPREAD
     );
@@ -196,10 +218,8 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
     const result = Array.from(combined.values());
 
     console.log(`[JUP] Total events: ${events.length} | Total markets: ${markets.length}`);
-    console.log(`[JUP] Crypto/5min markets: ${cryptoMarkets.length} | Profitable any: ${profitableAny.length}`);
-    console.log(`[JUP] Combined targets: ${result.length}`);
+    console.log(`[JUP] Crypto/5min: ${cryptoMarkets.length} | Profitable: ${profitableAny.length} | Combined: ${result.length}`);
 
-    // Log top spreads
     const sorted = [...result].sort((a, b) => b.spread - a.spread);
     for (const m of sorted.slice(0, 10)) {
       const sign = m.spread > 0 ? "✅" : "❌";
@@ -217,7 +237,6 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
 }
 
 // ── Exact-Out Quote (Limit-Based, No Slippage) ─────────
-// Instead of market buy, we request exact output amount at a fixed price
 async function getExactOutQuote(
   marketId: string,
   isYes: boolean,
@@ -225,10 +244,7 @@ async function getExactOutQuote(
   limitPrice: number,
 ): Promise<string | null> {
   try {
-    // Exact-out: specify how many outcome tokens we want
-    // At resolution, 1 outcome token = $1, so we want maxInputUsd/limitPrice tokens
-    const exactOutTokens = Math.floor(maxInputUsd / limitPrice);
-    const maxInputMicro = Math.floor(maxInputUsd * 1_000_000); // Convert to micro-units
+    const maxInputMicro = Math.floor(maxInputUsd * 1_000_000);
 
     const body = {
       ownerPubkey: WALLET,
@@ -236,9 +252,8 @@ async function getExactOutQuote(
       isYes,
       isBuy: true,
       depositMint: CONFIG.JUP_USD_MINT,
-      // Exact-out: we specify the output amount and max input
       amount: maxInputMicro,
-      limitPrice,  // Won't fill above this price → zero slippage
+      limitPrice,
       exactOut: true,
     };
 
@@ -247,7 +262,7 @@ async function getExactOutQuote(
       `limit=$${limitPrice.toFixed(4)} maxInput=$${maxInputUsd.toFixed(2)}`
     );
 
-    const res = await fetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
+    const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
       method: "POST",
       headers: jupHeaders(),
       body: JSON.stringify(body),
@@ -255,7 +270,11 @@ async function getExactOutQuote(
 
     const rawText = await res.text();
     if (!res.ok) {
-      console.error(`[JUP] Quote error ${res.status}: ${rawText.slice(0, 500)}`);
+      if (rawText.includes("unsupported_region")) {
+        console.error("[JUP] ❌ REGION BLOCKED on order — need PROXY_URL");
+      } else {
+        console.error(`[JUP] Quote error ${res.status}: ${rawText.slice(0, 500)}`);
+      }
       return null;
     }
 
@@ -269,14 +288,10 @@ async function getExactOutQuote(
 }
 
 // ── Jito Bundle Submission (MEV Protection) ─────────────
-// Sends both YES+NO trades as a Jito bundle so sandwich bots can't
-// see or front-run either leg individually
 async function submitJitoBundle(
   signedTxs: Uint8Array[],
-  tipLamports: number,
 ): Promise<string | null> {
   try {
-    // Encode transactions as base58 for Jito
     const encodedTxs = signedTxs.map(tx => bs58.encode(tx));
 
     const res = await fetch(JITO_BLOCK_ENGINE, {
@@ -299,7 +314,6 @@ async function submitJitoBundle(
     const bundleId = data.result;
     console.log(`[JITO] Bundle submitted: ${bundleId}`);
 
-    // Poll for confirmation
     for (let i = 0; i < 10; i++) {
       await sleep(2000);
       try {
@@ -330,26 +344,17 @@ async function submitJitoBundle(
     }
 
     console.warn("[JITO] Bundle status unknown after polling");
-    return bundleId; // May still land
+    return bundleId;
   } catch (err) {
     console.error("[JITO] Submit error:", err);
     return null;
   }
 }
 
-// ── Build Optimized Transaction ─────────────────────────
-// Adds compute budget + priority fee instructions for minimal cost
-async function buildOptimizedTx(
-  base64Tx: string,
-  priorityFee: number,
-  cuLimit: number,
-): Promise<VersionedTransaction> {
+// ── Build & Sign Transaction ────────────────────────────
+async function buildAndSign(base64Tx: string): Promise<VersionedTransaction> {
   const txBuf = Buffer.from(base64Tx, "base64");
   const tx = VersionedTransaction.deserialize(txBuf);
-
-  // The Jupiter API tx should already include the swap instruction
-  // We prepend compute budget instructions for CU optimization
-  // Note: if the API already sets these, the first ones take precedence
   tx.sign([keypair]);
   return tx;
 }
@@ -360,43 +365,32 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
 
   for (const market of markets) {
     const { yesPrice, noPrice, spread } = market;
-
-    // Only arb if YES + NO < 1 (spread > 0 means guaranteed profit)
     if (spread <= CONFIG.MIN_SPREAD) continue;
 
     const amount = CONFIG.ARB_AMOUNT;
-    const yesCost = yesPrice * amount;  // Cost to buy YES shares
-    const noCost = noPrice * amount;    // Cost to buy NO shares
+    const yesCost = yesPrice * amount;
+    const noCost = noPrice * amount;
     const totalCost = yesCost + noCost;
-    const payout = amount;              // One side resolves to $1/share
+    const payout = amount;
 
-    // Fees: ~0.5% platform + dynamic priority fee + Jito tip
+    // Fees: ~0.5% platform + Jito tip (minimized for small trades)
     const platformFee = totalCost * 0.005;
     const jitoTipUsd = CONFIG.JITO_TIP / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD;
-    const priorityFeeUsd = 0.001 * CONFIG.SOL_PRICE_USD; // ~0.001 SOL estimate
+    const priorityFeeUsd = 0.001 * CONFIG.SOL_PRICE_USD;
     const fees = platformFee + jitoTipUsd + priorityFeeUsd;
 
     const grossProfit = payout - totalCost;
     const netProfit = grossProfit - fees;
 
     if (netProfit > 0) {
-      opps.push({
-        market,
-        yesCost,
-        noCost,
-        totalCost,
-        payout,
-        grossProfit,
-        fees,
-        netProfit,
-      });
+      opps.push({ market, yesCost, noCost, totalCost, payout, grossProfit, fees, netProfit });
     }
   }
 
   return opps.sort((a, b) => b.netProfit - a.netProfit);
 }
 
-// ── Execute Arb (Both Legs via Jito Bundle) ─────────────
+// ── Execute Arb ─────────────────────────────────────────
 async function executeArb(opp: ArbOpportunity): Promise<void> {
   const { market, yesCost, noCost, totalCost, netProfit } = opp;
 
@@ -406,12 +400,11 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   console.log(`[ARB] Spread: ${(market.spread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
   console.log(`[ARB] Buying: YES=$${yesCost.toFixed(2)} + NO=$${noCost.toFixed(2)} = $${totalCost.toFixed(2)}`);
 
-  // Insert opportunity to DB
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
     .insert({
       market_a_id: market.marketId,
-      market_b_id: market.marketId,  // Same market, both sides
+      market_b_id: market.marketId,
       side_a: "yes",
       side_b: "no",
       price_a: market.yesPrice,
@@ -425,83 +418,65 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   const oppId = oppRow?.id;
 
   try {
-    // Get dynamic priority fee
     const priorityFee = await getOptimalPriorityFee();
     console.log(`[FEE] Dynamic priority fee: ${priorityFee} microlamports/CU`);
 
-    // Step 1: Get exact-out quotes for both sides (limit-based, no slippage)
+    // Get exact-out quotes for both sides (limit-based, no slippage)
     const [yesTxRaw, noTxRaw] = await Promise.all([
       getExactOutQuote(market.marketId, true, yesCost, market.yesPrice),
       getExactOutQuote(market.marketId, false, noCost, market.noPrice),
     ]);
 
     if (!yesTxRaw || !noTxRaw) {
-      console.log("[ARB] ⚠️  Could not get quotes for both sides — prices may have moved");
-
+      console.log("[ARB] ⚠️  Could not get quotes — prices moved or region blocked");
       if (oppId) {
         await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: 0,
-          realized_pnl: 0,
-          fees: 0,
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
           status: "failed",
-          error_message: `Quote failed: yes=${!!yesTxRaw} no=${!!noTxRaw}. Price moved.`,
+          error_message: `Quote failed: yes=${!!yesTxRaw} no=${!!noTxRaw}`,
         });
         await supabase.from("arb_opportunities").update({ status: "expired" }).eq("id", oppId);
       }
       return;
     }
 
-    // Step 2: Sign both transactions
-    const yesTx = await buildOptimizedTx(yesTxRaw, priorityFee, BASE_CU_LIMIT);
-    const noTx = await buildOptimizedTx(noTxRaw, priorityFee, BASE_CU_LIMIT);
+    // Sign both
+    const [yesTx, noTx] = await Promise.all([
+      buildAndSign(yesTxRaw),
+      buildAndSign(noTxRaw),
+    ]);
 
-    // Step 3: Submit as Jito bundle (MEV-protected, atomic-ish)
+    // Submit as Jito bundle (MEV-protected)
     console.log("[JITO] Submitting both legs as MEV-protected bundle...");
-    const bundleId = await submitJitoBundle(
-      [yesTx.serialize(), noTx.serialize()],
-      CONFIG.JITO_TIP,
-    );
+    const bundleId = await submitJitoBundle([yesTx.serialize(), noTx.serialize()]);
 
     if (bundleId) {
-      console.log(`[ARB] ✅ Bundle landed! ID: ${bundleId}`);
-      console.log(`[ARB] Net profit: ~$${netProfit.toFixed(4)}`);
-
+      console.log(`[ARB] ✅ Bundle landed! Net profit: ~$${netProfit.toFixed(4)}`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: totalCost,
-          realized_pnl: netProfit,
-          fees: opp.fees,
-          status: "filled",
-          side_a_tx: bundleId,
-          side_b_tx: bundleId,
-          side_a_fill_price: market.yesPrice,
-          side_b_fill_price: market.noPrice,
+          opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
+          fees: opp.fees, status: "filled",
+          side_a_tx: bundleId, side_b_tx: bundleId,
+          side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
         });
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
     } else {
-      // Jito bundle failed — try direct submission as fallback
-      console.log("[ARB] Jito bundle failed, trying direct submission...");
-
-      const yesSig = await sendDirect(yesTx, "YES-leg");
-      const noSig = await sendDirect(noTx, "NO-leg");
+      // Fallback: direct submission
+      console.log("[ARB] Jito failed, trying direct...");
+      const [yesSig, noSig] = await Promise.all([
+        sendDirect(yesTx, "YES"), sendDirect(noTx, "NO"),
+      ]);
       const success = yesSig && noSig;
-
       console.log(`[ARB] Direct: YES=${yesSig ? "✅" : "❌"} NO=${noSig ? "✅" : "❌"}`);
 
       if (oppId) {
         await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: success ? totalCost : 0,
-          realized_pnl: success ? netProfit : 0,
-          fees: success ? opp.fees : 0,
+          opportunity_id: oppId, amount_usd: success ? totalCost : 0,
+          realized_pnl: success ? netProfit : 0, fees: success ? opp.fees : 0,
           status: success ? "filled" : "partial",
-          side_a_tx: yesSig,
-          side_b_tx: noSig,
-          side_a_fill_price: market.yesPrice,
-          side_b_fill_price: market.noPrice,
+          side_a_tx: yesSig, side_b_tx: noSig,
+          side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
           error_message: success ? null : `Partial: yes=${!!yesSig} no=${!!noSig}`,
         });
         await supabase.from("arb_opportunities").update({
@@ -514,10 +489,7 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
     if (oppId) {
       await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       await supabase.from("arb_executions").insert({
-        opportunity_id: oppId,
-        amount_usd: 0,
-        realized_pnl: 0,
-        fees: 0,
+        opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
         status: "failed",
         error_message: err instanceof Error ? err.message : "Unknown error",
       });
@@ -529,9 +501,7 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
 async function sendDirect(tx: VersionedTransaction, label: string): Promise<string | null> {
   try {
     const sig = await connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: false,
-      maxRetries: 3,
-      preflightCommitment: "confirmed",
+      skipPreflight: false, maxRetries: 3, preflightCommitment: "confirmed",
     });
     console.log(`[TX] ${label} sent: ${sig.slice(0, 16)}...`);
     const conf = await connection.confirmTransaction(sig, "confirmed");
@@ -554,27 +524,19 @@ async function runScan() {
 
     const markets = await fetchJupiterMarkets();
     if (markets.length === 0) {
-      console.log("[SCAN] No markets found, retrying next interval");
+      console.log("[SCAN] No markets found — retrying next interval");
       return;
     }
 
-    // Find intra-platform arbs
     const arbs = findArbs(markets);
 
     if (arbs.length === 0) {
-      // Show closest markets to threshold
-      const allSpreads = markets
-        .filter(m => m.spread > 0)
-        .sort((a, b) => b.spread - a.spread);
-
+      const allSpreads = markets.filter(m => m.spread > 0).sort((a, b) => b.spread - a.spread);
       console.log(`[SCAN] No arbs above ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}% min spread`);
       if (allSpreads.length > 0) {
         console.log(`[SCAN] Closest positive spreads:`);
         for (const m of allSpreads.slice(0, 5)) {
-          console.log(
-            `  "${m.title.slice(0, 50)}" spread=${(m.spread * 100).toFixed(3)}% ` +
-            `(need ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}%)`
-          );
+          console.log(`  "${m.title.slice(0, 50)}" spread=${(m.spread * 100).toFixed(3)}%`);
         }
       }
       return;
@@ -582,19 +544,15 @@ async function runScan() {
 
     console.log(`\n[SCAN] 🎯 FOUND ${arbs.length} ARB OPPORTUNITIES!`);
     for (const a of arbs) {
-      console.log(
-        `  💰 "${a.market.title.slice(0, 50)}" ` +
-        `spread=${(a.market.spread * 100).toFixed(2)}% net=$${a.netProfit.toFixed(4)}`
-      );
+      console.log(`  💰 "${a.market.title.slice(0, 50)}" spread=${(a.market.spread * 100).toFixed(2)}% net=$${a.netProfit.toFixed(4)}`);
     }
 
-    // Execute top 3 arbs per scan cycle
     for (const arb of arbs.slice(0, 3)) {
       await executeArb(arb);
       await sleep(2000);
     }
 
-    // Upsert markets to DB for dashboard
+    // Upsert to DB for dashboard
     const upserts = markets.slice(0, 50).map(m => ({
       platform: "jupiter_predict",
       external_id: m.marketId,
@@ -611,7 +569,6 @@ async function runScan() {
     await supabase
       .from("prediction_markets")
       .upsert(upserts, { onConflict: "platform,external_id" });
-
   } catch (err) {
     console.error("[SCAN] Error:", err);
   }
@@ -631,6 +588,10 @@ async function main() {
 
   if (!CONFIG.JUP_PREDICT_API_KEY) {
     console.warn("[ARB] ⚠️  No JUP_PREDICT_API_KEY — may be rate-limited");
+  }
+
+  if (!PROXY_URL) {
+    console.warn("[ARB] ⚠️  No PROXY_URL set — Jupiter may block your region. Add PROXY_URL to .env");
   }
 
   console.log("[ARB] Starting scan loop...\n");
