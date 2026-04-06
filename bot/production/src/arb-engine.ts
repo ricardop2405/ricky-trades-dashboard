@@ -758,9 +758,7 @@ async function main() {
     console.log("[ARB] No stale orders ✅");
   }
 
-  if (FAILSAFE_SCAN_ONLY) {
-    console.warn("[ARB] FAIL-SAFE mode active — scanning only, no live orders will be placed");
-  }
+  console.log("[ARB] 🔒 Atomic execution via Jito bundles — both legs land together or not at all");
 
   console.log("[ARB] Starting scan loop...\n");
   await runScan();
