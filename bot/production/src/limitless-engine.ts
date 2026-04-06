@@ -147,13 +147,12 @@ function getDepthFill(levels: OrderbookLevel[], targetContracts: number): { avgP
   return { avgPrice: totalCost / targetContracts, totalCost };
 }
 
-async function getConditionalTokenBalance(tokenId: string): Promise<bigint> {
-  return publicClient.readContract({
-    address: CONFIG.CTF_ADDRESS as Address,
-    abi: CTF_ABI,
-    functionName: 'balanceOf',
-    args: [account.address, BigInt(tokenId)],
-  });
+function getExecutionContracts(result: any): number {
+  const raw = result?.execution?.totalsRaw ?? result?.execution?.totals ?? {};
+  const net = Number(raw.contractsNet ?? 0);
+  const gross = Number(raw.contractsGross ?? 0);
+  const filled = net || gross;
+  return filled > 0 ? filled / 1e6 : 0;
 }
 
 // ── Sign & Submit an EIP-712 Order ──────────────────────
