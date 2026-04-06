@@ -123,6 +123,19 @@ async function placeSignedOrder(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (CONFIG.LIMITLESS_API_KEY) headers["X-API-Key"] = CONFIG.LIMITLESS_API_KEY;
 
+  // Query the fee rate for this token from the API
+  let feeRateBps = 0;
+  try {
+    const feeRes = await fetch(`${CONFIG.LIMITLESS_API}/fee-rate?tokenID=${tokenId}`);
+    if (feeRes.ok) {
+      const feeData = await feeRes.json();
+      feeRateBps = Number(feeData.feeRateBps ?? feeData.fee_rate_bps ?? feeData ?? 0);
+      console.log(`[LIM] Fee rate for token: ${feeRateBps} bps`);
+    }
+  } catch (e) {
+    console.log(`[LIM] Could not fetch fee rate, using 0`);
+  }
+
   const salt = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
   orderNonce++;
 
@@ -163,7 +176,7 @@ async function placeSignedOrder(
     takerAmount,
     expiration: 0n, // no expiration
     nonce: 0n,
-    feeRateBps: 0n,
+    feeRateBps: BigInt(feeRateBps),
     side,
     signatureType: 0, // EOA
   };
@@ -193,7 +206,7 @@ async function placeSignedOrder(
       takerAmount: Number(takerAmount),
       expiration: "0",
       nonce: 0,
-      feeRateBps: 0,
+      feeRateBps: feeRateBps,
       side,
       signatureType: 0,
       signature,
