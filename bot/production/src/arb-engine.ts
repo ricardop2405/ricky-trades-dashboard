@@ -174,12 +174,21 @@ function jupHeaders(): Record<string, string> {
 
 async function fetchJupiterMarkets(): Promise<JupMarket[]> {
   try {
-    const url = `${CONFIG.JUP_PREDICT_API}/events?` +
+    // Try the dedicated timed crypto endpoint first, then fall back to generic
+    const timedUrl = `${CONFIG.JUP_PREDICT_API}/events/crypto/timed?includeMarkets=true`;
+    const genericUrl = `${CONFIG.JUP_PREDICT_API}/events?` +
       new URLSearchParams({ includeMarkets: "true", limit: "500", category: "crypto" });
 
-    const res = await jupFetch(url, { headers: jupHeaders() });
-    const rawText = await res.text();
-
+    let rawText = "";
+    let res = await jupFetch(timedUrl, { headers: jupHeaders() });
+    if (res.ok) {
+      rawText = await res.text();
+      console.log("[JUP] Using /events/crypto/timed endpoint ✅");
+    } else {
+      console.log(`[JUP] /events/crypto/timed returned ${res.status}, falling back to /events?category=crypto`);
+      res = await jupFetch(genericUrl, { headers: jupHeaders() });
+      rawText = await res.text();
+    }
     if (!res.ok) {
       if (rawText.includes("unsupported_region")) {
         console.error("[JUP] ❌ REGION BLOCKED — set PROXY_URL in .env");
