@@ -466,61 +466,14 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
     } else {
-      // Fallback: sequential submission — send YES first, then NO
-      // If NO fails, we're exposed on one side, so we must be careful
-      console.log("[ARB] Jito failed, trying direct (sequential to avoid partial fills)...");
-
-      // Send YES first
-      const yesSig = await sendDirect(yesTx, "YES");
-      if (!yesSig) {
-        console.log("[ARB] ❌ YES failed — aborting (no exposure)");
-        if (oppId) {
-          await supabase.from("arb_executions").insert({
-            opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
-            status: "failed", error_message: "YES leg failed to land",
-          });
-          await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
-        }
-        return;
-      }
-
-      // YES landed — now send NO (retry up to 3 times)
-      let noSig: string | null = null;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        noSig = await sendDirect(noTx, `NO (attempt ${attempt})`);
-        if (noSig) break;
-        if (attempt < 3) {
-          console.log(`[ARB] NO attempt ${attempt} failed, retrying in 2s...`);
-          await sleep(2000);
-          // Re-fetch NO quote in case the original expired
-          const freshNoTxRaw = await getExactOutQuote(market.marketId, false, noCost, market.noPrice);
-          if (freshNoTxRaw) {
-            const freshNoTx = await buildAndSign(freshNoTxRaw);
-            noSig = await sendDirect(freshNoTx, `NO (attempt ${attempt + 1})`);
-            if (noSig) break;
-          }
-        }
-      }
-
-      const success = !!noSig;
-      console.log(`[ARB] Direct: YES=✅ NO=${noSig ? "✅" : "❌ FAILED — EXPOSED ON YES SIDE"}`);
-      if (!noSig) {
-        console.error("[ARB] ⚠️  CRITICAL: YES filled but NO failed! You have one-sided exposure.");
-        console.error("[ARB] ⚠️  Consider manually selling the YES position to close exposure.");
-      }
-
+      // Atomic only — no direct fallback to avoid partial fills
+      console.log("[ARB] ❌ Jito bundle failed — aborting (no partial exposure)");
       if (oppId) {
         await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: success ? totalCost : 0,
-          realized_pnl: success ? netProfit : 0, fees: success ? opp.fees : 0,
-          status: success ? "filled" : "partial",
-          side_a_tx: yesSig, side_b_tx: noSig || null,
-          side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
-          error_message: success ? null : `Partial: yes=${!!yesSig} no=${!!noSig}`,
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed", error_message: "Jito bundle rejected — aborted to avoid partial fill",
         });
-        await supabase.from("arb_opportunities").update({
-          status: success ? "executed" : "failed",
-        }).eq("id", oppId);
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
     }
   } catch (err) {
