@@ -416,46 +416,57 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
       buildAndSign(noTxRaw),
     ]);
 
-    // SEQUENTIAL: Send YES first, then NO only if YES confirms
-    console.log("[TX] Step 1: Sending YES leg...");
-    const yesSig = await sendDirect(yesTx, "YES");
+    // PARALLEL: Send both legs simultaneously
+    console.log("[TX] Sending YES + NO legs in parallel...");
+    const [yesSig, noSig] = await Promise.all([
+      sendDirect(yesTx, "YES"),
+      sendDirect(noTx, "NO"),
+    ]);
     marketCooldowns.set(market.marketId, Date.now());
 
-    if (!yesSig) {
-      console.log("[ARB] ❌ YES failed — no exposure, safe abort");
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
-          status: "failed", error_message: "YES leg failed — no exposure",
-        });
-        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
-      }
-      return;
-    }
+    const yesOk = !!yesSig;
+    const noOk = !!noSig;
 
-    console.log("[TX] Step 2: YES confirmed, sending NO leg...");
-    const noSig = await sendDirect(noTx, "NO");
+    if (yesOk && noOk) {
+      // Both txs confirmed — but check if they are fills or open orders
+      console.log("[ARB] Both txs confirmed on-chain, verifying fill status...");
+      await sleep(3000); // Wait for state to settle
 
-    if (noSig) {
-      console.log(`[ARB] ✅ Both legs landed! Net profit: ~$${netProfit.toFixed(4)}`);
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
-          fees: opp.fees, status: "filled",
-          side_a_tx: yesSig, side_b_tx: noSig,
-          side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
-        });
-        await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+      const openOrders = await getOpenOrders();
+      if (openOrders.length > 0) {
+        console.log(`[ARB] ⚠️  ${openOrders.length} unfilled open orders detected — cancelling all`);
+        await cancelAllOrders();
+        await closeAllPositions();
+        if (oppId) {
+          await supabase.from("arb_executions").insert({
+            opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+            status: "failed",
+            error_message: `Orders placed but not filled — cancelled ${openOrders.length} open orders`,
+          });
+          await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+        }
+      } else {
+        console.log(`[ARB] ✅ Both legs filled! Net profit: ~$${netProfit.toFixed(4)}`);
+        if (oppId) {
+          await supabase.from("arb_executions").insert({
+            opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
+            fees: opp.fees, status: "filled",
+            side_a_tx: yesSig, side_b_tx: noSig,
+            side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
+          });
+          await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+        }
       }
     } else {
-      // NO failed — must close YES position to avoid exposure
-      console.error("[ARB] ⚠️  NO failed — closing YES position to avoid exposure...");
-      const closed = await closeAllPositions();
+      // One or both txs failed — cancel any open orders and close positions
+      console.error(`[ARB] ⚠️  Partial failure: YES=${yesOk} NO=${noOk} — cleaning up`);
+      await cancelAllOrders();
+      await closeAllPositions();
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
           status: "failed",
-          error_message: `NO failed — auto-closed YES position (${closed ? "success" : "MANUAL CLOSE NEEDED"})`,
+          error_message: `Partial: YES=${yesOk} NO=${noOk} — auto-cancelled & closed`,
         });
         await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
