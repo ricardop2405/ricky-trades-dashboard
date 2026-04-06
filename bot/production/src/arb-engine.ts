@@ -463,16 +463,16 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
     }
 
     // Sign both transactions
-    const [yesTx, noTx] = await Promise.all([
-      buildAndSign(yesTxRaw),
-      buildAndSign(noTxRaw),
+    const [upTx, downTx] = await Promise.all([
+      buildAndSign(upTxRaw),
+      buildAndSign(downTxRaw),
     ]);
 
     // ── ATOMIC: Submit as Jito bundle ──────────────────────
     // Jito guarantees: both txs land in the SAME slot, or neither does.
-    console.log("[JITO] Submitting YES + NO as atomic Jito bundle...");
+    console.log("[JITO] Submitting Up YES + Down YES as atomic Jito bundle...");
 
-    const bundleResult = await sendJitoBundle([yesTx, noTx]);
+    const bundleResult = await sendJitoBundle([upTx, downTx]);
     marketCooldowns.set(market.marketId, Date.now());
 
     if (bundleResult) {
