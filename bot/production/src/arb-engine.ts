@@ -200,6 +200,7 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
           category,
           endDate: event.endDate || m.endDate || null,
           volume: Number(m.volume ?? event.volume ?? 0),
+          platform: "jupiter_predict",
         });
       }
     }
