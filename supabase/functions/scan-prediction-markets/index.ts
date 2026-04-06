@@ -62,22 +62,30 @@ Deno.serve(async (req) => {
         if (!cursor || batch.length < 100) break;
       }
 
-      // 1b. Discover 15-min crypto event tickers
-      const CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"];
+      // 1b. Dynamically discover ALL short-window crypto event tickers
+      // Do NOT hardcode series — they are auto-created and transient
       const cryptoEvents = new Set<string>();
+      const discoveredSeries = new Set<string>();
       let evtCursor: string | null = null;
-      for (let p = 0; p < 5; p++) {
-        const params = new URLSearchParams({ limit: "200" });
+      for (let p = 0; p < 10; p++) {
+        // IMPORTANT: Do NOT pass isInitialized — 15-min markets may not
+        // have trades yet in current window and would be filtered out
+        const params = new URLSearchParams({ limit: "100" });
         if (evtCursor) params.set("cursor", evtCursor);
         const r = await fetch(`${DFLOW_API}/api/v1/events?${params}`);
         if (!r.ok) break;
         const d = await r.json();
         for (const e of (d.events || [])) {
-          if (CRYPTO_SERIES.includes(e.seriesTicker)) cryptoEvents.add(e.ticker);
+          const st = (e.seriesTicker || "").toUpperCase();
+          if (st.includes("15M") || st.includes("5M") || st.includes("MIN")) {
+            cryptoEvents.add(e.ticker);
+            discoveredSeries.add(st);
+          }
         }
         evtCursor = d.cursor;
-        if (!evtCursor || (d.events || []).length < 200) break;
+        if (!evtCursor || (d.events || []).length < 100) break;
       }
+      console.log(`DFlow discovered series: ${[...discoveredSeries].join(", ") || "none"}`);
 
       // 1c. Fetch 15-min markets (they live at high cursor offsets)
       if (cryptoEvents.size > 0) {
@@ -93,7 +101,7 @@ Deno.serve(async (req) => {
           if (!mkCursor) break;
         }
       }
-      console.log(`DFlow: ${dflowMarkets.length} markets (${[...new Set(dflowMarkets.filter((m: any) => (m.eventTicker||'').includes('15M')).map((m: any) => m.eventTicker))].length} fifteen-min)`);
+      console.log(`DFlow: ${dflowMarkets.length} markets (${[...new Set(dflowMarkets.filter((m: any) => /15M|5M|MIN/i.test(m.eventTicker||'')).map((m: any) => m.eventTicker))].length} short-window crypto)`);
     } catch (e) {
       console.error("DFlow fetch error:", e);
     }

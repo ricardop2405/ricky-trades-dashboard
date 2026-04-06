@@ -106,30 +106,40 @@ async function fetchDFlowMarkets(): Promise<DFlowMarket[]> {
       cursor = next;
     }
 
-    // 2. Discover 15-min crypto events via events endpoint
-    const CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"];
+    // 2. Dynamically discover ALL 15-min crypto series via Metadata API
+    //    Don't hardcode series tickers — they are auto-created and transient
     const cryptoEventTickers: string[] = [];
+    const discoveredSeries = new Set<string>();
     
-    // Scan recent events for 15M series
     let evtCursor: string | null = null;
-    for (let page = 0; page < 5; page++) {
-      const params = new URLSearchParams({ limit: "200" });
+    for (let page = 0; page < 10; page++) {
+      // IMPORTANT: Do NOT pass isInitialized=true — 15-min markets reset
+      // constantly and may not have trades yet in current window
+      const params = new URLSearchParams({ limit: "100" });
       if (evtCursor) params.set("cursor", evtCursor);
       const res = await fetch(`${CONFIG.DFLOW_METADATA_API}/api/v1/events?${params}`, { headers: dflowHeaders() });
-      if (!res.ok) break;
+      if (!res.ok) {
+        console.error(`[DFLOW] Events fetch failed: ${res.status}`);
+        break;
+      }
       const data = await res.json();
       const events = data.events || [];
       for (const e of events) {
-        if (CRYPTO_SERIES.includes(e.seriesTicker)) {
+        // Match any series that looks like a 15-min or 5-min crypto series
+        const st = (e.seriesTicker || "").toUpperCase();
+        if (st.includes("15M") || st.includes("5M") || st.includes("MIN")) {
           cryptoEventTickers.push(e.ticker);
+          discoveredSeries.add(st);
         }
       }
       const next = data.cursor;
-      if (!next || events.length < 200) break;
+      if (!next || events.length < 100) break;
       evtCursor = next;
+      await sleep(150); // Rate limit protection
     }
 
-    console.log(`[DFLOW] Found ${cryptoEventTickers.length} fifteen-min crypto events`);
+    console.log(`[DFLOW] Discovered ${discoveredSeries.size} crypto series: ${[...discoveredSeries].join(", ")}`);
+    console.log(`[DFLOW] Found ${cryptoEventTickers.length} short-window crypto events`);
 
     // 3. Fetch markets for each crypto event ticker by scanning deeper
     // Markets are at high cursor values; batch fetch them
