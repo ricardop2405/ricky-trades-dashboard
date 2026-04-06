@@ -83,44 +83,48 @@ interface ArbOpportunity {
 // ── Drift BET API ───────────────────────────────────────
 async function fetchDriftBetMarkets(): Promise<DriftBetMarket[]> {
   try {
-    // Fetch all perp markets from Drift Data API
-    const res = await fetch(`${DRIFT_DATA_API}/markets/perp`);
+    // Correct endpoint: /stats/markets — filter by symbols ending with "-BET"
+    const res = await fetch(`${DRIFT_DATA_API}/stats/markets`);
     if (!res.ok) {
       console.error(`[DRIFT] API ${res.status}: ${await res.text()}`);
       return [];
     }
 
     const data = await res.json();
-    const allMarkets = Array.isArray(data) ? data : data.markets || data.data || [];
+    const allMarkets = data.markets || data.data || (Array.isArray(data) ? data : []);
 
-    // Filter to prediction markets only (contractType = "prediction")
+    // Filter: must end with "-BET" and be active (not settled/delisted)
     const betMarkets = allMarkets.filter((m: any) =>
-      m.contractType === "prediction" || m.contractType === "Prediction" ||
-      (m.symbol && m.symbol.includes("BET"))
+      m.symbol?.endsWith("-BET") && m.status === "active"
     );
 
-    console.log(`[DRIFT] Total perp markets: ${allMarkets.length} | Prediction (BET): ${betMarkets.length}`);
+    const settledBets = allMarkets.filter((m: any) =>
+      m.symbol?.endsWith("-BET") && m.status !== "active"
+    );
 
-    // Parse into our format
+    console.log(`[DRIFT] Total markets: ${allMarkets.length} | Active BET: ${betMarkets.length} | Settled BET: ${settledBets.length}`);
+
     const parsed: DriftBetMarket[] = betMarkets.map((m: any) => ({
-      marketIndex: m.marketIndex ?? m.market_index ?? 0,
-      symbol: m.symbol || m.name || `MARKET-${m.marketIndex}`,
-      contractType: m.contractType || m.contract_type || "prediction",
+      marketIndex: m.marketIndex ?? 0,
+      symbol: m.symbol || "",
+      contractType: "prediction",
       status: m.status || "active",
-      markPrice: Number(m.markPrice ?? m.mark_price ?? 0),
-      oraclePrice: Number(m.oraclePrice ?? m.oracle_price ?? 0),
-      bestBid: Number(m.bestBid ?? m.best_bid ?? 0),
-      bestAsk: Number(m.bestAsk ?? m.best_ask ?? 0),
-      volume24h: Number(m.volume24h ?? m.volume_24h ?? 0),
+      markPrice: Number(m.markPrice ?? 0),
+      oraclePrice: Number(m.oraclePrice ?? 0),
+      bestBid: Number(m.price ?? m.markPrice ?? 0),
+      bestAsk: Number(m.price ?? m.markPrice ?? 0),
+      volume24h: Number(m.quoteVolume ?? 0),
     }));
 
-    // Log samples
     for (const m of parsed.slice(0, 5)) {
       console.log(
         `  [DRIFT] ${m.symbol} idx=${m.marketIndex} ` +
-        `bid=${m.bestBid.toFixed(4)} ask=${m.bestAsk.toFixed(4)} ` +
-        `mark=${m.markPrice.toFixed(4)} status=${m.status}`
+        `price=${m.markPrice.toFixed(4)} oracle=${m.oraclePrice.toFixed(4)} status=${m.status}`
       );
+    }
+
+    if (betMarkets.length === 0 && settledBets.length > 0) {
+      console.log(`[DRIFT] ⚠️  All ${settledBets.length} BET markets are settled. Waiting for new listings on app.drift.trade/bet`);
     }
 
     return parsed;
