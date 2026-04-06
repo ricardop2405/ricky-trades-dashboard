@@ -39,6 +39,7 @@ const WALLET = keypair.publicKey.toBase58();
 // Market cooldown — skip recently attempted markets
 const marketCooldowns = new Map<string, number>();
 const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+const FAILSAFE_SCAN_ONLY = true;
 
 // ── Proxy Setup ─────────────────────────────────────────
 // Route Jupiter API through proxy to bypass region blocks
@@ -74,8 +75,8 @@ console.log(`[ARB] Amount per trade: $${CONFIG.ARB_AMOUNT}`);
 console.log(`[ARB] Min spread: ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}%`);
 console.log(`[ARB] Scan interval: ${CONFIG.SCAN_INTERVAL / 1000}s`);
 console.log(`[ARB] Jupiter API: ${CONFIG.JUP_PREDICT_API}`);
-console.log(`[ARB] Execution: Direct parallel (both legs same slot)`);
-console.log(`[ARB] Execution: Sequential (YES→NO, auto-close on failure)`);
+console.log(`[ARB] Execution: FAIL-SAFE scan only (live trading disabled)`);
+console.log(`[ARB] Reason: Jupiter /orders confirms tx submission, not guaranteed dual fills`);
 console.log(`[ARB] Dynamic priority fees: ON`);
 console.log("═══════════════════════════════════════════════════════");
 
@@ -369,6 +370,12 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   // Note: Jupiter Predict holds funds inside their program, not in the wallet's ATA.
   // The API will return INSUFFICIENT_FUNDS if balance is too low — no pre-check needed.
   console.log(`[BAL] Using Jupiter Predict program balance (not wallet ATA)`);
+
+  if (FAILSAFE_SCAN_ONLY) {
+    console.warn(`[ARB] FAIL-SAFE: skipping live execution to prevent unhedged exposure`);
+    marketCooldowns.set(market.marketId, Date.now());
+    return;
+  }
 
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
@@ -695,6 +702,10 @@ async function main() {
     await cancelAllOrders();
   } else {
     console.log("[ARB] No stale orders ✅");
+  }
+
+  if (FAILSAFE_SCAN_ONLY) {
+    console.warn("[ARB] FAIL-SAFE mode active — scanning only, no live orders will be placed");
   }
 
   console.log("[ARB] Starting scan loop...\n");
