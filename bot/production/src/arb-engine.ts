@@ -252,7 +252,7 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
   }
 }
 
-// ── Create Order (deposit-based buy) ────────────────────
+// ── Create Order (contract-based buy with price limit) ──
 async function getExactOutQuote(
   marketId: string,
   isYes: boolean,
@@ -260,19 +260,24 @@ async function getExactOutQuote(
   limitPrice: number,
 ): Promise<string | null> {
   try {
-    const maxInputMicro = Math.floor(maxInputUsd * 1_000_000);
+    // Calculate contracts: we want to spend maxInputUsd at limitPrice per contract
+    // contracts = depositAmount / price
+    const contracts = Math.floor(maxInputUsd / limitPrice);
+    const depositMicro = Math.floor(maxInputUsd * 1_000_000);
 
     const body = {
       ownerPubkey: WALLET,
       marketId,
       isYes,
       isBuy: true,
-      depositAmount: maxInputMicro,
+      contracts: contracts,
+      depositAmount: String(depositMicro),
+      depositMint: CONFIG.JUP_USD_MINT,
     };
 
     console.log(
       `[JUP] Order: ${isYes ? "YES" : "NO"} market=${marketId.slice(0, 12)}... ` +
-      `depositAmount=$${maxInputUsd.toFixed(2)} (${maxInputMicro} micro)`
+      `${contracts} contracts @ limit $${limitPrice.toFixed(4)} | deposit=$${maxInputUsd.toFixed(2)}`
     );
 
     const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
@@ -293,6 +298,19 @@ async function getExactOutQuote(
 
     let data: any;
     try { data = JSON.parse(rawText); } catch { return null; }
+
+    // Check maxBuyPriceUsd — reject if fill price exceeds our limit
+    if (data.maxBuyPriceUsd) {
+      const maxFillPrice = Number(data.maxBuyPriceUsd) / 1_000_000;
+      if (maxFillPrice > limitPrice * 1.02) { // 2% tolerance
+        console.error(
+          `[JUP] ❌ Fill price $${maxFillPrice.toFixed(4)} exceeds limit $${limitPrice.toFixed(4)} — skipping`
+        );
+        return null;
+      }
+      console.log(`[JUP] ✅ Fill price: $${maxFillPrice.toFixed(4)} (within limit)`);
+    }
+
     return data.transaction || null;
   } catch (err) {
     console.error("[JUP] Quote error:", err);
