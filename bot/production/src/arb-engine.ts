@@ -366,22 +366,9 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
   console.log(`[ARB] Spread: ${(market.spread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
   console.log(`[ARB] Buying: YES=$${yesCost.toFixed(2)} + NO=$${noCost.toFixed(2)} = $${totalCost.toFixed(2)}`);
 
-  // USDC balance pre-check
-  try {
-    const { PublicKey } = await import("@solana/web3.js");
-    const { getAssociatedTokenAddress, getAccount } = await import("@solana/spl-token");
-    const usdcMint = new PublicKey(CONFIG.JUP_USD_MINT);
-    const ata = await getAssociatedTokenAddress(usdcMint, keypair.publicKey);
-    const tokenAccount = await getAccount(connection, ata);
-    const usdcBalance = Number(tokenAccount.amount) / 1_000_000;
-    console.log(`[BAL] USDC balance: $${usdcBalance.toFixed(2)}`);
-    if (usdcBalance < totalCost) {
-      console.log(`[ARB] ❌ Insufficient USDC ($${usdcBalance.toFixed(2)} < $${totalCost.toFixed(2)}) — skipping`);
-      return;
-    }
-  } catch (balErr) {
-    console.warn("[BAL] Could not check USDC balance, proceeding anyway:", balErr instanceof Error ? balErr.message : balErr);
-  }
+  // Note: Jupiter Predict holds funds inside their program, not in the wallet's ATA.
+  // The API will return INSUFFICIENT_FUNDS if balance is too low — no pre-check needed.
+  console.log(`[BAL] Using Jupiter Predict program balance (not wallet ATA)`);
 
   const { data: oppRow } = await supabase
     .from("arb_opportunities")
