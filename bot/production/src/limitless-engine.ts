@@ -374,6 +374,7 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
 function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
   const contracts = Math.floor(CONFIG.LIMITLESS_TRADE_SIZE_USD);
+  const feeMultiplier = 1 + (cachedFeeRateBps ?? 0) / 10000; // e.g. 1.03 for 300 bps
 
   for (const market of markets) {
     const lastAttempt = marketCooldowns.get(market.slug);
@@ -383,11 +384,12 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
     const noAskFill = getDepthFill(market.noAsks, contracts);
 
     if (yesAskFill && noAskFill) {
-      const totalCost = yesAskFill.totalCost + noAskFill.totalCost;
-      const payout = contracts;
+      // Total cost INCLUDING exchange fees on both buy legs
+      const totalCost = (yesAskFill.totalCost + noAskFill.totalCost) * feeMultiplier;
+      const payout = contracts; // merge gives $1 per contract
       const grossProfit = payout - totalCost;
       const spread = payout > 0 ? grossProfit / payout : 0;
-      const estimatedGas = 0.10;
+      const estimatedGas = 0.15; // be conservative on gas
       const netProfit = grossProfit - estimatedGas;
 
       if (spread > CONFIG.LIMITLESS_MIN_SPREAD && netProfit > 0) {
