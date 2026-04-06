@@ -95,32 +95,39 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
   if (CONFIG.LIMITLESS_API_KEY) headers["x-api-key"] = CONFIG.LIMITLESS_API_KEY;
 
   try {
-    // Get active markets
-    const res = await fetch(`${CONFIG.LIMITLESS_API}/markets?status=active&limit=200`, { headers });
+    const res = await fetch(`${CONFIG.LIMITLESS_API}/markets/active?limit=200`, { headers });
     if (!res.ok) {
       console.error(`[LIM] Markets fetch failed: ${res.status}`);
       return [];
     }
 
     const data = await res.json();
-    const rawMarkets = Array.isArray(data) ? data : data.markets || data.data || [];
+    const rawMarkets = Array.isArray(data) ? data : data.data || data.markets || [];
     const markets: LimitlessMarket[] = [];
 
-    // Fetch orderbooks in parallel (batched)
     const batchSize = 10;
     for (let i = 0; i < rawMarkets.length; i += batchSize) {
       const batch = rawMarkets.slice(i, i + batchSize);
       const bookPromises = batch.map(async (m: any) => {
         try {
           const slug = m.slug || m.id;
-          const bookRes = await fetch(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook`, { headers });
-          if (!bookRes.ok) return null;
+          const yesTokenId = m.tokens?.yes || m.tokens?.[0];
+          const noTokenId = m.tokens?.no || m.tokens?.[1];
+          if (!slug || !yesTokenId || !noTokenId) return null;
 
-          const book = await bookRes.json();
-          const yesAsks = (book.yes?.asks || book.yesAsks || []).sort((a: any, b: any) => a.price - b.price);
-          const yesBids = (book.yes?.bids || book.yesBids || []).sort((a: any, b: any) => b.price - a.price);
-          const noAsks = (book.no?.asks || book.noAsks || []).sort((a: any, b: any) => a.price - b.price);
-          const noBids = (book.no?.bids || book.noBids || []).sort((a: any, b: any) => b.price - a.price);
+          const [yesBookRes, noBookRes] = await Promise.all([
+            fetch(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${yesTokenId}`, { headers }),
+            fetch(`${CONFIG.LIMITLESS_API}/markets/${slug}/orderbook?tokenId=${noTokenId}`, { headers }),
+          ]);
+
+          if (!yesBookRes.ok || !noBookRes.ok) return null;
+
+          const yesBook = await yesBookRes.json();
+          const noBook = await noBookRes.json();
+          const yesAsks = (yesBook.asks || []).sort((a: any, b: any) => a.price - b.price);
+          const yesBids = (yesBook.bids || []).sort((a: any, b: any) => b.price - a.price);
+          const noAsks = (noBook.asks || []).sort((a: any, b: any) => a.price - b.price);
+          const noBids = (noBook.bids || []).sort((a: any, b: any) => b.price - a.price);
 
           return {
             slug,
@@ -130,10 +137,10 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
             yesBid: yesBids.length > 0 ? Number(yesBids[0].price) : 0,
             noAsk: noAsks.length > 0 ? Number(noAsks[0].price) : 1,
             noBid: noBids.length > 0 ? Number(noBids[0].price) : 0,
-            conditionId: m.conditionId || m.condition_id || "",
-            collateralToken: (m.collateralToken || m.collateral_token || CONFIG.LIMITLESS_USDC) as Address,
-            expiresAt: m.expiresAt || m.expires_at || m.endDate || null,
-            category: m.category || null,
+            conditionId: m.conditionId || "",
+            collateralToken: (m.collateralToken?.address || CONFIG.LIMITLESS_USDC) as Address,
+            expiresAt: m.expirationDate || m.expiresAt || null,
+            category: Array.isArray(m.categories) ? m.categories[0] || null : m.category || null,
             volume: Number(m.volume || 0),
           } as LimitlessMarket;
         } catch {
