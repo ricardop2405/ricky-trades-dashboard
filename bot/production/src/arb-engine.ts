@@ -499,8 +499,8 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
           await supabase.from("arb_executions").insert({
             opportunity_id: oppId, amount_usd: totalCost, realized_pnl: netProfit,
             fees: opp.fees, status: "filled",
-            side_a_tx: bs58.encode(yesTx.signatures[0]),
-            side_b_tx: bs58.encode(noTx.signatures[0]),
+            side_a_tx: bs58.encode(upTx.signatures[0]),
+            side_b_tx: bs58.encode(downTx.signatures[0]),
             side_a_fill_price: market.yesPrice, side_b_fill_price: market.noPrice,
           });
           await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
