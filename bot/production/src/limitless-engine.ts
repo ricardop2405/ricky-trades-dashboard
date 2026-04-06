@@ -471,33 +471,25 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
 
   try {
     const contracts = Math.floor(tradeSize);
-    const yesBefore = await getConditionalTokenBalance(market.yesTokenId);
-    const noBefore = await getConditionalTokenBalance(market.noTokenId);
+    const mergeAmount = parseUnits(String(contracts), 6);
 
+    // Step 1: Buy YES
     console.log(`[LIM] Buying YES: ${contracts} contracts @ avg $${yesPrice.toFixed(4)}`);
-    await placeSignedOrder(market, 0, market.yesTokenId, yesPrice, contracts, "FOK");
+    const yesResult = await placeSignedOrder(market, 0, market.yesTokenId, yesPrice, contracts, "FOK");
+    if (!yesResult?.execution?.matched) {
+      throw new Error("YES buy was not matched — aborting");
+    }
 
+    // Step 2: Buy NO
     console.log(`[LIM] Buying NO: ${contracts} contracts @ avg $${noPrice.toFixed(4)}`);
-    await placeSignedOrder(market, 0, market.noTokenId, noPrice, contracts, "FOK");
-
-    const yesAfter = await getConditionalTokenBalance(market.yesTokenId);
-    const noAfter = await getConditionalTokenBalance(market.noTokenId);
-    const yesBought = yesAfter > yesBefore ? yesAfter - yesBefore : 0n;
-    const noBought = noAfter > noBefore ? noAfter - noBefore : 0n;
-    const mergeAmount = yesBought < noBought ? yesBought : noBought;
-
-    console.log(`[LIM]   Actual YES bought: ${formatUnits(yesBought, 6)}`);
-    console.log(`[LIM]   Actual NO bought: ${formatUnits(noBought, 6)}`);
-
-    if (mergeAmount <= 0n) {
-      throw new Error("No hedgeable size acquired; refusing to merge bad inventory math");
+    const noResult = await placeSignedOrder(market, 0, market.noTokenId, noPrice, contracts, "FOK");
+    if (!noResult?.execution?.matched) {
+      console.error("[LIM] ❌ NO buy not matched — holding YES for manual exit");
+      throw new Error("NO buy was not matched — unhedged YES position");
     }
 
-    if (yesBought !== noBought) {
-      console.log("[LIM] ⚠️ Imbalanced fills detected; only merging the matched hedgeable amount");
-    }
-
-    console.log(`[LIM] Merging ${formatUnits(mergeAmount, 6)} YES/NO via CTF...`);
+    // Step 3: Merge YES + NO via CTF
+    console.log(`[LIM] Merging ${contracts} YES/NO via CTF...`);
     const mergeHash = await walletClient.writeContract({
       address: CONFIG.CTF_ADDRESS as Address,
       abi: CTF_ABI,
