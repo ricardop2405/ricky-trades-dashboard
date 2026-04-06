@@ -525,9 +525,11 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
   try {
     const contracts = Math.floor(tradeSize);
 
-    // ── Approve USDC for the exchange before buying ───
-    const usdcNeeded = parseUnits(String(Math.ceil(tradeSize * 2)), 6); // enough for both legs
-    await ensureApproval(market.collateralToken, market.venueExchange, usdcNeeded);
+    // ── Approve USDC for exchange + CTF ────────────────
+    await Promise.all([
+      ensureApproval(market.collateralToken, market.venueExchange),
+      ensureApproval(market.collateralToken, CONFIG.CTF_ADDRESS as Address),
+    ]);
 
     // ── LEG 1: Buy YES ────────────────────────────────
     console.log(`[LIM] Buying YES: target ${contracts} contracts @ avg $${yesPrice.toFixed(4)}`);
