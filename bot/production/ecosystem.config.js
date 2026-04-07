@@ -3,7 +3,7 @@ module.exports = {
     {
       name: "ricky-mev",
       script: "./node_modules/.bin/ts-node",
-      args: "src/mev-engine.ts",
+      args: "--transpile-only src/mev-engine.ts",
       cwd: __dirname,
       interpreter: "node",
       restart_delay: 5000,
