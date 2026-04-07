@@ -83,14 +83,15 @@ const walletClient = createWalletClient({ account, chain: polygon, transport: ht
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log("═══════════════════════════════════════════════════════");
-console.log("  RICKY TRADES — Polymarket Hourly Arb Engine");
-console.log("  CLOB Execution + CTF Merge");
+console.log("  RICKY TRADES — Polymarket Atomic Arb Engine");
+console.log("  FOK Orders + CTF Merge = Zero-Risk Execution");
 console.log("═══════════════════════════════════════════════════════");
 console.log(`[POLY] Mode: ${DRY_RUN ? "🔍 DRY RUN (scan only)" : "⚡ LIVE TRADING"}`);
 console.log(`[POLY] Wallet: ${account.address}`);
 console.log(`[POLY] Trade size: $${TRADE_SIZE_USD}`);
 console.log(`[POLY] Min spread: ${(MIN_SPREAD * 100).toFixed(1)}%`);
-console.log(`[POLY] Max market duration: ${MAX_MARKET_DURATION_MIN} min`);
+console.log(`[POLY] Market filter: ALL active markets (merge is instant)`);
+console.log(`[POLY] Order type: FOK (Fill-or-Kill) — atomic, $0 if no fill`);
 console.log(`[POLY] Scan interval: ${SCAN_INTERVAL_MS / 1000}s`);
 console.log(`[POLY] CLOB creds: ${POLY_API_KEY ? "✅ provided" : "⚠️ will auto-derive"}`);
 console.log("═══════════════════════════════════════════════════════");
