@@ -6,8 +6,9 @@
     "mev": "ts-node src/mev-engine.ts",
     "arb": "ts-node src/arb-engine.ts",
     "limitless": "ts-node --transpile-only src/limitless-engine.ts",
+    "cow": "ts-node --transpile-only src/cow-polymarket-engine.ts",
     "both": "concurrently \"npm run mev\" \"npm run arb\"",
-    "all": "concurrently \"npm run mev\" \"npm run arb\" \"npm run limitless\"",
+    "all": "concurrently \"npm run mev\" \"npm run arb\" \"npm run limitless\" \"npm run cow\"",
     "start": "npm run both"
   },
   "dependencies": {
