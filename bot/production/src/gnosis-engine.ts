@@ -49,9 +49,8 @@ const walletClient = account
 // ── Constants ───────────────────────────────────────────
 const WXDAI = "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"; // Wrapped xDAI (native stablecoin)
 
-// Omen subgraph on Gnosis (decentralized network)
-const OMEN_SUBGRAPH =
-  "https://gateway.thegraph.com/api/subgraphs/id/9fUVQpFwzpdWS9bq5WkAnmKbNNcoBwatMR4yZq81pbbz";
+// Omen subgraph on Gnosis (requires Graph gateway key unless custom URL is provided)
+const OMEN_SUBGRAPH = CONFIG.GNOSIS_OMEN_SUBGRAPH_URL;
 
 // Azuro Backend API
 const AZURO_API = "https://api.azuro.org/api/v1";
@@ -60,6 +59,14 @@ const AZURO_SUBGRAPH =
 
 // CoW Swap on Gnosis
 const COW_API = "https://api.cow.fi/xdai/api/v1";
+
+let omenWarningShown = false;
+
+function getGraphQLErrorMessage(payload: any): string | null {
+  const firstError = payload?.errors?.[0];
+  if (!firstError) return null;
+  return firstError.message || "Unknown GraphQL error";
+}
 
 // ── Types ───────────────────────────────────────────────
 interface MarketOpportunity {
@@ -107,8 +114,16 @@ async function fetchWithRetry(
 // ═══════════════════════════════════════════════════════
 
 async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
+  if (!OMEN_SUBGRAPH) {
+    if (!omenWarningShown) {
+      console.warn("[OMEN] Skipping — set GRAPH_API_KEY or GNOSIS_OMEN_SUBGRAPH_URL in .env");
+      omenWarningShown = true;
+    }
+    return [];
+  }
+
   const now = Math.floor(Date.now() / 1000);
-  const maxSettlement = now + 7 * 86400; // Within 7 days (wider net)
+  const maxSettlement = now + 86400; // Within 24 hours
 
   const query = `{
     fixedProductMarketMakers(
@@ -142,9 +157,17 @@ async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
       body: JSON.stringify({ query }),
     });
 
-    const json = await res.json();
-    const markets = json?.data?.fixedProductMarketMakers || [];
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
 
+    const json = await res.json();
+    const graphError = getGraphQLErrorMessage(json);
+    if (graphError) {
+      throw new Error(graphError);
+    }
+
+    const markets = json?.data?.fixedProductMarketMakers || [];
     const opportunities: MarketOpportunity[] = [];
 
     for (const market of markets) {
@@ -154,9 +177,6 @@ async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
       const yesPrice = parseFloat(prices[0]);
       const noPrice = parseFloat(prices[1]);
       const combined = yesPrice + noPrice;
-
-      // Sum-to-1: if combined < 1, buying both = guaranteed profit
-      // Sum-to-1 reverse: if combined > 1, splitting = guaranteed profit
       const spread = Math.abs(1 - combined);
 
       if (spread >= CONFIG.GNOSIS_MIN_SPREAD) {
@@ -194,23 +214,13 @@ async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
 
 async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
   const now = Math.floor(Date.now() / 1000);
-  const maxSettlement = now + 7 * 86400; // 7 days
+  const maxSettlement = now + 86400;
 
-  // Query Azuro subgraph for active conditions on Gnosis
   const query = `{
-    conditions(
-      first: 500,
-      where: {
-        isResolved: false,
-        game_: {
-          startsAt_gt: "${now}",
-          startsAt_lt: "${maxSettlement}"
-        }
-      }
-    ) {
+    conditions(first: 500) {
       id
       conditionId
-      outcomesCount
+      status
       outcomes {
         outcomeId
         currentOdds
@@ -233,33 +243,33 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
       body: JSON.stringify({ query }),
     });
 
-    const json = await res.json();
-    const conditions = json?.data?.conditions || [];
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
 
+    const json = await res.json();
+    const graphError = getGraphQLErrorMessage(json);
+    if (graphError) {
+      throw new Error(graphError);
+    }
+
+    const conditions = json?.data?.conditions || [];
     const opportunities: MarketOpportunity[] = [];
 
     for (const cond of conditions) {
-      if (!cond.outcomes || cond.outcomes.length < 2) continue;
-      // Only process 2-outcome markets for sum-to-1
-      if (cond.outcomes.length !== 2) continue;
+      const startsAt = cond.game?.startsAt ? parseInt(cond.game.startsAt) : null;
+      if (!startsAt || startsAt <= now || startsAt >= maxSettlement) continue;
+      if (!cond.outcomes || cond.outcomes.length !== 2) continue;
 
-      // Azuro odds are in decimal format (e.g. 1.5 means implied prob = 1/1.5 = 0.667)
       const odds1 = parseFloat(cond.outcomes[0].currentOdds || "0");
       const odds2 = parseFloat(cond.outcomes[1].currentOdds || "0");
-
       if (odds1 <= 1 || odds2 <= 1) continue;
 
-      // Convert decimal odds to implied probabilities
       const prob1 = 1 / odds1;
       const prob2 = 1 / odds2;
       const combined = prob1 + prob2;
-
-      // In efficient markets, combined ~= 1 + margin
-      // If combined < 1, there's guaranteed arb (rare but possible)
-      // If combined > 1, the overround is the house edge
       const spread = Math.abs(1 - combined);
 
-      // Only interested if combined < 1 (true arb) or margin is exploitable
       if (combined < 1 && spread >= CONFIG.GNOSIS_MIN_SPREAD) {
         const gameTitle = cond.game?.title || "Untitled";
         const sport = cond.game?.sport?.name || "Unknown";
@@ -273,9 +283,7 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
           combinedPrice: combined,
           spread,
           strategy: "sum_to_1",
-          settlingAt: cond.game?.startsAt
-            ? new Date(parseInt(cond.game.startsAt) * 1000)
-            : null,
+          settlingAt: new Date(startsAt * 1000),
         });
       }
     }
