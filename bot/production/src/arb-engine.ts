@@ -38,7 +38,7 @@ const WALLET = keypair.publicKey.toBase58();
 
 // Market cooldown — skip recently attempted markets
 const marketCooldowns = new Map<string, number>();
-const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+const COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes — faster retries
 const FAILSAFE_SCAN_ONLY = false; // Atomic via Jito bundles now
 
 // Jito bundle endpoints (mainnet)
