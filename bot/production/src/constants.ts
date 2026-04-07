@@ -83,22 +83,43 @@ export const ARB_INTERMEDIATE_TOKENS: { mint: string; symbol: string }[] = [
   { mint: "85VBFQZC9TZkfaptBWjvUw7YbZjy52A6mjtPGjstQAmQ", symbol: "W" },
 ];
 
+// ── Memecoin tokens (higher opportunity but need safety checks) ──
+// These have thinner liquidity = more mispricing = more arb opportunities
+// Safety: we only use small entry sizes and verify quotes before executing
+export const MEMECOIN_TOKENS: { mint: string; symbol: string }[] = [
+  { mint: "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr", symbol: "POPCAT" },
+  { mint: "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5", symbol: "MEW" },
+  { mint: "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82", symbol: "BOME" },
+  { mint: "3S8qX1MsMqRbiwKg2cQyx7nis1oHMgaCuc9c4VfvVdPN", symbol: "MOTHER" },
+  { mint: "ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY", symbol: "MOODENG" },
+  { mint: "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump", symbol: "PNUT" },
+  { mint: "A8C3xuqscfmyLrte3VVY3bSz1SARhS6kMqsJt4i1pump", symbol: "GIGA" },
+];
+
+// All tokens combined for scanning
+export const ALL_SCAN_TOKENS: { mint: string; symbol: string }[] = [
+  ...ARB_INTERMEDIATE_TOKENS,
+  ...MEMECOIN_TOKENS,
+];
+
 // ── Token pairs for continuous scanning ─────────────────
-// All unique (A, B) pairs from intermediate tokens for triangular arb
 export function generateScanPairs(): { tokenA: string; symbolA: string; tokenB: string; symbolB: string }[] {
   const pairs: { tokenA: string; symbolA: string; tokenB: string; symbolB: string }[] = [];
-  for (let i = 0; i < ARB_INTERMEDIATE_TOKENS.length; i++) {
-    for (let j = i + 1; j < ARB_INTERMEDIATE_TOKENS.length; j++) {
+  for (let i = 0; i < ALL_SCAN_TOKENS.length; i++) {
+    for (let j = i + 1; j < ALL_SCAN_TOKENS.length; j++) {
       pairs.push({
-        tokenA: ARB_INTERMEDIATE_TOKENS[i].mint,
-        symbolA: ARB_INTERMEDIATE_TOKENS[i].symbol,
-        tokenB: ARB_INTERMEDIATE_TOKENS[j].mint,
-        symbolB: ARB_INTERMEDIATE_TOKENS[j].symbol,
+        tokenA: ALL_SCAN_TOKENS[i].mint,
+        symbolA: ALL_SCAN_TOKENS[i].symbol,
+        tokenB: ALL_SCAN_TOKENS[j].mint,
+        symbolB: ALL_SCAN_TOKENS[j].symbol,
       });
     }
   }
   return pairs;
 }
+
+// Multiple entry sizes to find opportunities at different scales
+export const ENTRY_SIZES_USDC = [10_000_000, 25_000_000, 50_000_000, 100_000_000]; // $10, $25, $50, $100
 
 export const JITO_TIP_ACCOUNTS = [
   "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
