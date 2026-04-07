@@ -487,7 +487,7 @@ async function submitOrder(order: SignedOrder, negRisk: boolean, tickSize: strin
     const orderPayload = {
       order,
       owner: account.address,
-      orderType: "GTC", // Good-til-cancelled
+      orderType: "FOK", // Fill-or-Kill: fills instantly at price or auto-cancels ($0 cost)
     };
 
     const res = await clobFetch("POST", "/order", orderPayload);
