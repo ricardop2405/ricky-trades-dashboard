@@ -65,5 +65,18 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
+    {
+      name: "ricky-gnosis",
+      script: "./node_modules/.bin/ts-node",
+      args: "--transpile-only src/gnosis-engine.ts",
+      cwd: __dirname,
+      interpreter: "node",
+      restart_delay: 5000,
+      max_restarts: 50,
+      autorestart: true,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
   ],
 };
