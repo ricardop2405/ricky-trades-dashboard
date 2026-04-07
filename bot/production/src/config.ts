@@ -4,7 +4,6 @@ import "dotenv/config";
 const required = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
-  "BASE_PRIVATE_KEY",
 ];
 
 for (const key of required) {
@@ -18,6 +17,19 @@ export const CONFIG = {
   // ── Supabase ──────────────────────────────────────────
   SUPABASE_URL: process.env.SUPABASE_URL!,
   SUPABASE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+
+  // ── Solana / Jupiter Predict ──────────────────────────
+  PRIVATE_KEY: process.env.SOLANA_PRIVATE_KEY || process.env.PRIVATE_KEY || "",
+  HELIUS_HTTP: process.env.HELIUS_HTTP || process.env.HELIUS_RPC || "https://api.mainnet-beta.solana.com",
+  JUP_PREDICT_API: process.env.JUP_PREDICT_API || "https://prediction-market-api.jup.ag/api/v1",
+  JUP_PREDICT_API_KEY: process.env.JUP_PREDICT_API_KEY || "",
+  JUP_USD_MINT: process.env.JUP_USD_MINT || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+
+  // ── Arb Settings ──────────────────────────────────────
+  ARB_AMOUNT: parseFloat(process.env.ARB_AMOUNT || "5"),
+  MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.005"), // 0.5% — catch tighter arbs
+  SCAN_INTERVAL: parseInt(process.env.SCAN_INTERVAL || "2000"), // 2 seconds — faster scanning
+  SOL_PRICE_USD: parseFloat(process.env.SOL_PRICE_USD || "150"),
 
   // ── Limitless (Base Chain) ────────────────────────────
   LIMITLESS_OWNER_ID: Number(process.env.LIMITLESS_OWNER_ID || 0),
