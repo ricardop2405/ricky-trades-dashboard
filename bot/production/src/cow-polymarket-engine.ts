@@ -1,15 +1,17 @@
 /**
- * RICKY TRADES — Polymarket Hourly Arb Engine (Polygon)
+ * RICKY TRADES — Polymarket Atomic Arb Engine (Polygon)
  *
- * Strategy: Sum-to-One arbitrage
- *   1. Scan ALL active Polymarket markets settling within 60 min
+ * Strategy: Sum-to-One arbitrage on ANY active market
+ *   1. Scan ALL active Polymarket markets (no settlement filter — merge is instant)
  *   2. Find YES+NO best ask combined < $1.00 (minus fees)
- *   3. Buy both sides via Polymarket CLOB limit orders
+ *   3. Buy both sides via FOK (Fill-or-Kill) orders → fills instantly or $0 cost
  *   4. Merge YES+NO via CTF → guaranteed $1.00 USDC payout
  *
- * Execution: Polymarket CLOB (NOT CoW — ERC-1155 tokens aren't CoW-routable)
- *   ✅ Fast fills via CLOB liquidity
- *   ✅ CTF merge is atomic & guaranteed
+ * ATOMIC EXECUTION:
+ *   ✅ FOK orders: fills immediately at your price or auto-cancels (you pay nothing)
+ *   ✅ Sequential: Buy YES first (FOK), then NO (FOK)
+ *   ✅ If YES fills but NO fails → auto-sell YES at market bid (recover funds)
+ *   ✅ CTF merge is on-chain atomic & guaranteed
  *   ✅ Only gas cost is the merge tx (~$0.01 on Polygon)
  *
  * Usage:
