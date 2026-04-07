@@ -671,14 +671,15 @@ async function executePureCowMerge(
 ): Promise<void> {
   const { market, contracts } = opp;
 
-  // Submit CoW buy intents for both tokens
-  // Use the conditional token addresses (wrapped ERC-20)
-  const yesTokenAddr = market.yesTokenId as unknown as Address;
-  const noTokenAddr = market.noTokenId as unknown as Address;
+  if (!market.yesTokenAddress || !market.noTokenAddress) {
+    console.log(`[COW-LIM] ❌ Missing CoW-routable token addresses — cannot submit merge intents`);
+    await logExecution(opp, "unsupported-token-format", null, 0, "Missing ERC-20 token addresses for CoW routing");
+    return;
+  }
 
   const [yesQuote, noQuote] = await Promise.all([
-    getCowQuote(USDC_BASE, yesTokenAddr, yesAmountRaw, "buy"),
-    getCowQuote(USDC_BASE, noTokenAddr, noAmountRaw, "buy"),
+    getCowQuote(USDC_BASE, market.yesTokenAddress, yesAmountRaw, "buy"),
+    getCowQuote(USDC_BASE, market.noTokenAddress, noAmountRaw, "buy"),
   ]);
 
   if (!yesQuote || !noQuote) {
@@ -687,7 +688,6 @@ async function executePureCowMerge(
     return;
   }
 
-  // Verify combined CoW cost < payout
   const cowYesCost = Number(yesQuote.sellAmount) / 1e6;
   const cowNoCost = Number(noQuote.sellAmount) / 1e6;
   const cowTotal = cowYesCost + cowNoCost;
@@ -702,7 +702,6 @@ async function executePureCowMerge(
   const expectedProfit = contracts - cowTotal - 0.10;
   console.log(`[COW-LIM] 🐄 Expected profit: $${expectedProfit.toFixed(4)} (MEV protected + surplus capture)`);
 
-  // Submit both orders simultaneously
   const [yesOrderId, noOrderId] = await Promise.all([
     submitCowOrder(yesQuote),
     submitCowOrder(noQuote),
@@ -714,7 +713,6 @@ async function executePureCowMerge(
     return;
   }
 
-  // Poll for fills (max 2 min)
   console.log(`[COW-LIM] ⏳ Waiting for CoW solvers (max 2 min)...`);
   const deadline = Date.now() + 120_000;
   let yesFilled = false, noFilled = false;
@@ -743,9 +741,6 @@ async function executePureCowMerge(
     await logExecution(opp, "success", null, contracts - cowTotal - 0.10);
   } else {
     console.log(`[COW-LIM] ⏰ Expired (YES=${yesFilled} NO=${noFilled}) — $0 gas lost`);
-    if (yesFilled !== noFilled) {
-      console.log(`[COW-LIM] ℹ️ One side filled — holding tokens for later merge/sale`);
-    }
     await logExecution(opp, "expired", null, 0, `Expired (YES=${yesFilled} NO=${noFilled})`);
   }
 }
