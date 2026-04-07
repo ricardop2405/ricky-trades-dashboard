@@ -343,17 +343,35 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
   if (CONFIG.LIMITLESS_API_KEY) headers["x-api-key"] = CONFIG.LIMITLESS_API_KEY;
 
   try {
-    const res = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/active?limit=50&page=1`, { headers });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      console.error(`[LIM] Markets fetch failed: ${res.status} ${body.slice(0, 200)}`);
-      return [];
+    const pageLimit = 25;
+    const maxPages = 6;
+    const pageResponses = await Promise.all(
+      Array.from({ length: maxPages }, (_, index) =>
+        fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/active?limit=${pageLimit}&page=${index + 1}`, { headers })
+      )
+    );
+
+    const rawMarkets: any[] = [];
+    for (const [index, res] of pageResponses.entries()) {
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        console.error(`[LIM] Markets page ${index + 1} fetch failed: ${res.status} ${body.slice(0, 200)}`);
+        continue;
+      }
+
+      const data = await res.json();
+      const pageMarkets = Array.isArray(data) ? data : data.data || data.markets || [];
+      rawMarkets.push(...pageMarkets);
     }
 
-    const data = await res.json();
-    const rawMarkets = Array.isArray(data) ? data : data.data || data.markets || [];
+    const dedupedRawMarkets = Array.from(
+      new Map(rawMarkets.map((m: any) => [String(m.slug || m.id), m])).values()
+    );
+
     const markets: LimitlessMarket[] = [];
     const now = Date.now();
+    const MAX_EXPIRY_MS = 20 * 60 * 1000;
+    const MIN_EXPIRY_MS = 60 * 1000;
 
     const getExpiryMs = (m: any): number | null => {
       const numericCandidates = [
@@ -380,10 +398,13 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
       return null;
     };
 
-    const filtered = rawMarkets
+    const filtered = dedupedRawMarkets
       .filter((m: any) => {
         const expiryMs = getExpiryMs(m);
-        if (expiryMs !== null && expiryMs <= now + 60_000) return false;
+        if (expiryMs === null) return false;
+
+        const timeLeft = expiryMs - now;
+        if (timeLeft < MIN_EXPIRY_MS || timeLeft > MAX_EXPIRY_MS) return false;
 
         const text = [
           m.title,
@@ -397,22 +418,18 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
           .join(" ")
           .toLowerCase();
 
-        const explicit15m = /\b(15\s*min|15m|15-minute|quarter[ -]?hour)\b/.test(text);
-        const expiryMinute = expiryMs !== null ? new Date(expiryMs).getUTCMinutes() : null;
-        const quarterHourExpiry = expiryMinute !== null && [0, 15, 30, 45].includes(expiryMinute);
+        const explicit15m = /\b(15\s*(min|minute|m)|15-minute|quarter[ -]?hour)\b/.test(text);
+        const expiryMinute = new Date(expiryMs).getUTCMinutes();
+        const quarterHourExpiry = [0, 15, 30, 45].includes(expiryMinute);
 
         return explicit15m || quarterHourExpiry;
       })
-      .sort((a: any, b: any) => {
-        const aExpiry = getExpiryMs(a) ?? Number.MAX_SAFE_INTEGER;
-        const bExpiry = getExpiryMs(b) ?? Number.MAX_SAFE_INTEGER;
-        return aExpiry - bExpiry;
-      })
+      .sort((a: any, b: any) => (getExpiryMs(a) ?? Number.MAX_SAFE_INTEGER) - (getExpiryMs(b) ?? Number.MAX_SAFE_INTEGER))
       .slice(0, 25);
 
-    console.log(`[LIM] Filtered to ${filtered.length}/${rawMarkets.length} 15-min / quarter-hour markets`);
+    console.log(`[LIM] Filtered to ${filtered.length}/${dedupedRawMarkets.length} 15-min markets`);
     if (filtered.length === 0) {
-      const sample = rawMarkets.slice(0, 5).map((m: any) => {
+      const sample = dedupedRawMarkets.slice(0, 5).map((m: any) => {
         const expiryMs = getExpiryMs(m);
         return `${m.slug || m.id}:${expiryMs ? new Date(expiryMs).toISOString() : "no-expiry"}`;
       });
