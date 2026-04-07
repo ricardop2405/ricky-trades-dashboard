@@ -46,6 +46,12 @@ export const CONFIG = {
   LIMITLESS_USDC: process.env.LIMITLESS_USDC || "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 
   // ── Gnosis Chain (Omen + Azuro) ──────────────────────
+  GRAPH_API_KEY: process.env.GRAPH_API_KEY || "",
+  GNOSIS_OMEN_SUBGRAPH_URL:
+    process.env.GNOSIS_OMEN_SUBGRAPH_URL ||
+    (process.env.GRAPH_API_KEY
+      ? `https://gateway.thegraph.com/api/${process.env.GRAPH_API_KEY}/subgraphs/id/9fUVQpFwzpdWS9bq5WkAnmKbNNcoBwatMR4yZq81pbbz`
+      : ""),
   GNOSIS_PRIVATE_KEY: process.env.GNOSIS_PRIVATE_KEY || process.env.BASE_PRIVATE_KEY || "",
   GNOSIS_RPC_URL: process.env.GNOSIS_RPC_URL || "https://rpc.gnosischain.com",
   GNOSIS_MIN_SPREAD: parseFloat(process.env.GNOSIS_MIN_SPREAD || "0.01"),
