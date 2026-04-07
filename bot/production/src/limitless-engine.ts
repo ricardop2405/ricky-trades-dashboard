@@ -134,8 +134,11 @@ interface LimitlessMarket {
 interface ArbOpportunity {
   market: LimitlessMarket;
   direction: "merge" | "split";
+  contracts: number;
   yesPrice: number;
   noPrice: number;
+  yesLimitPrice: number;
+  noLimitPrice: number;
   totalCost: number;
   payout: number;
   spread: number;
@@ -161,20 +164,22 @@ function normalizeBookSide(levels: any[], descending = false): OrderbookLevel[] 
     .sort((a, b) => descending ? b.price - a.price : a.price - b.price);
 }
 
-function getDepthFill(levels: OrderbookLevel[], targetContracts: number): { avgPrice: number; totalCost: number } | null {
+function getDepthFill(levels: OrderbookLevel[], targetContracts: number): { avgPrice: number; totalCost: number; worstPrice: number } | null {
   if (targetContracts <= 0) return null;
   let remaining = targetContracts;
   let totalCost = 0;
+  let worstPrice = 0;
 
   for (const level of levels) {
     if (remaining <= 0) break;
     const take = Math.min(remaining, level.size);
     totalCost += take * level.price;
+    worstPrice = level.price;
     remaining -= take;
   }
 
   if (remaining > 1e-9) return null;
-  return { avgPrice: totalCost / targetContracts, totalCost };
+  return { avgPrice: totalCost / targetContracts, totalCost, worstPrice };
 }
 
 function getExecutionContracts(result: any): number {
@@ -189,6 +194,7 @@ function getExecutionCostUSD(result: any, fallbackContracts: number, fallbackPri
   const raw = result?.execution?.totalsRaw ?? result?.execution?.totals ?? {};
   // Try every possible field the API might return for cost
   const candidates = [
+    raw.usdNet, raw.usdGross,
     raw.makerAmountNet, raw.makerAmountGross, raw.totalCost,
     raw.collateralAmount, raw.cost, raw.amount,
   ];
@@ -202,6 +208,73 @@ function getExecutionCostUSD(result: any, fallbackContracts: number, fallbackPri
   const cost = contracts * fallbackPrice;
   console.log(`[LIM] ⚠️ Cost fallback used: ${contracts.toFixed(6)} × $${fallbackPrice.toFixed(4)} = $${cost.toFixed(4)}`);
   return cost;
+}
+
+function getOrderId(result: any): string | null {
+  const orderId = result?.order?.id ?? result?.id ?? null;
+  return typeof orderId === "string" && orderId.length > 0 ? orderId : null;
+}
+
+async function cancelOrder(orderId: string): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (CONFIG.LIMITLESS_API_KEY) headers["X-API-Key"] = CONFIG.LIMITLESS_API_KEY;
+
+  const res = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/orders/${orderId}`, {
+    method: "DELETE",
+    headers,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.log(`[LIM] ⚠️ Cancel order failed (${res.status}): ${body.slice(0, 180)}`);
+  }
+}
+
+async function placeExactBuyShares(
+  market: LimitlessMarket,
+  tokenId: string,
+  limitPrice: number,
+  shares: number,
+  label: string,
+): Promise<{ filled: number; costUSD: number }> {
+  const result = await placeSignedOrder(market, 0, tokenId, limitPrice, shares, "GTC");
+  const filled = getExecutionContracts(result);
+  const costUSD = getExecutionCostUSD(result, filled || shares, limitPrice);
+  const orderId = getOrderId(result);
+  const remaining = Math.max(0, shares - filled);
+
+  console.log(`[LIM]   ${label} order filled ${filled.toFixed(6)}/${shares.toFixed(6)} shares at limit $${limitPrice.toFixed(4)}`);
+
+  if (orderId && remaining > 0.000001) {
+    console.log(`[LIM]   Cancelling unfilled ${label} remainder: ${remaining.toFixed(6)} shares`);
+    await cancelOrder(orderId);
+  }
+
+  return { filled, costUSD };
+}
+
+async function unwindFilledShares(
+  market: LimitlessMarket,
+  yesFilled: number,
+  noFilled: number,
+  yesFallbackPrice: number,
+  noFallbackPrice: number,
+): Promise<void> {
+  const unwindOrders: Promise<any>[] = [];
+
+  if (yesFilled > 0.000001) {
+    const yesBidPrice = market.yesBid > 0 ? market.yesBid : yesFallbackPrice * 0.95;
+    unwindOrders.push(placeSignedOrder(market, 1, market.yesTokenId, yesBidPrice, yesFilled, "FOK"));
+  }
+
+  if (noFilled > 0.000001) {
+    const noBidPrice = market.noBid > 0 ? market.noBid : noFallbackPrice * 0.95;
+    unwindOrders.push(placeSignedOrder(market, 1, market.noTokenId, noBidPrice, noFilled, "FOK"));
+  }
+
+  if (unwindOrders.length > 0) {
+    await Promise.allSettled(unwindOrders);
+  }
 }
 
 // ── Sign & Submit an EIP-712 Order ──────────────────────
@@ -526,8 +599,11 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
         opps.push({
           market,
           direction: 'merge',
+          contracts: equalContracts,
           yesPrice: yesAskFill.avgPrice,
           noPrice: noAskFill.avgPrice,
+          yesLimitPrice: yesAskFill.worstPrice,
+          noLimitPrice: noAskFill.worstPrice,
           totalCost,
           payout,
           spread,
@@ -554,8 +630,11 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
           opps.push({
             market,
             direction: 'split',
+            contracts,
             yesPrice: yesBidFill.avgPrice,
             noPrice: noBidFill.avgPrice,
+            yesLimitPrice: yesBidFill.worstPrice,
+            noLimitPrice: noBidFill.worstPrice,
             totalCost,
             payout,
             spread,
@@ -603,8 +682,7 @@ async function ensureApproval(token: Address, spender: Address): Promise<void> {
 
 // ── Execute Merge Arb ───────────────────────────────────
 async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
-  const { market, yesPrice, noPrice, netProfit } = opp;
-  const tradeSize = CONFIG.LIMITLESS_TRADE_SIZE_USD;
+  const { market, contracts, yesPrice, noPrice, yesLimitPrice, noLimitPrice, netProfit } = opp;
 
   console.log(`\n[LIM] 🎯 MERGE ARB: "${market.title.slice(0, 50)}"`);
   console.log(`[LIM]   YES ask=$${yesPrice.toFixed(4)} + NO ask=$${noPrice.toFixed(4)} = $${(yesPrice + noPrice).toFixed(4)}`);
@@ -613,12 +691,8 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
   marketCooldowns.set(market.slug, Date.now());
 
   try {
-    // ── Determine exact contract count we can afford on BOTH sides ──
-    // Key insight: we must buy EQUAL contracts on each side.
-    // Budget = tradeSize USDC. Split so contracts = budget / (yesPrice + noPrice)
-    const maxContracts = Math.floor(tradeSize / (yesPrice + noPrice));
-    if (maxContracts <= 0) {
-      console.log(`[LIM] ⚠️ Can't afford even 1 contract at YES=$${yesPrice} + NO=$${noPrice}`);
+    if (contracts <= 0) {
+      console.log(`[LIM] ⚠️ Can't afford even 1 exact contract pair at YES=$${yesPrice} + NO=$${noPrice}`);
       return;
     }
 
@@ -628,83 +702,67 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
       ensureApproval(market.collateralToken, CONFIG.CTF_ADDRESS as Address),
     ]);
 
-    // ── LEG 1: Buy YES ────────────────────────────────
-    console.log(`[LIM] Buying YES: target ${maxContracts} contracts @ avg $${yesPrice.toFixed(4)}`);
-    const yesResult = await placeSignedOrder(market, 0, market.yesTokenId, yesPrice, maxContracts, "FOK");
-    if (!yesResult?.execution?.matched) {
-      throw new Error("YES buy was not matched — aborting");
-    }
-    const yesFilled = getExecutionContracts(yesResult);
-    let yesCostUSD = getExecutionCostUSD(yesResult, maxContracts, yesPrice);
+    // ── LEG 1: Buy exact YES shares ─────────────────────
+    console.log(`[LIM] Buying YES: exact ${contracts.toFixed(6)} shares with limit $${yesLimitPrice.toFixed(4)}`);
+    const { filled: yesFilled, costUSD: yesCostUSD } = await placeExactBuyShares(
+      market,
+      market.yesTokenId,
+      yesLimitPrice,
+      contracts,
+      "YES",
+    );
     if (yesFilled <= 0) {
-      throw new Error("YES buy returned 0 filled contracts");
+      throw new Error("YES buy returned 0 filled shares");
     }
     console.log(`[LIM]   YES filled: ${yesFilled.toFixed(6)} contracts, cost: $${yesCostUSD.toFixed(4)}`);
 
-    // ── LEG 2: Buy EXACTLY yesFilled NO contracts ─────
-    // Pass yesFilled as size so makerAmount = noPrice * yesFilled (matching contract count)
-    console.log(`[LIM] Buying NO to match: ${yesFilled.toFixed(6)} contracts @ avg $${noPrice.toFixed(4)}`);
-    const noResult = await placeSignedOrder(market, 0, market.noTokenId, noPrice, yesFilled, "FOK");
-    if (!noResult?.execution?.matched) {
-      console.log(`[LIM] ⚠️ NO not matched — selling YES back to unwind`);
-      const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
-      await placeSignedOrder(market, 1, market.yesTokenId, unwindPrice, yesFilled, "FOK");
-      throw new Error("NO buy not matched — unwound YES position");
-    }
-    const noFilled = getExecutionContracts(noResult);
-    let noCostUSD = getExecutionCostUSD(noResult, yesFilled, noPrice);
+    // ── LEG 2: Buy exact matching NO shares ────────────
+    console.log(`[LIM] Buying NO: exact ${yesFilled.toFixed(6)} shares with limit $${noLimitPrice.toFixed(4)}`);
+    const { filled: noFilled, costUSD: noCostUSD } = await placeExactBuyShares(
+      market,
+      market.noTokenId,
+      noLimitPrice,
+      yesFilled,
+      "NO",
+    );
     if (noFilled <= 0) {
-      console.log(`[LIM] ⚠️ NO fill=0 — selling YES back`);
-      const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
-      await placeSignedOrder(market, 1, market.yesTokenId, unwindPrice, yesFilled, "FOK");
+      console.log(`[LIM] ⚠️ NO fill=0 — unwinding YES`);
+      await unwindFilledShares(market, yesFilled, 0, yesPrice, noPrice);
       throw new Error("NO buy returned 0 filled — unwound YES");
     }
     console.log(`[LIM]   NO filled: ${noFilled.toFixed(6)} contracts, cost: $${noCostUSD.toFixed(4)}`);
 
-    // ── SAFETY CHECK: verify profit before merging ──
-    const matchedContracts = Math.min(yesFilled, noFilled);
-    const unmatchedYes = Math.max(0, yesFilled - matchedContracts);
-    const unmatchedNo = Math.max(0, noFilled - matchedContracts);
+    // ── SAFETY CHECK: exact 1:1 pair count required ────
+    const fillMismatch = Math.abs(yesFilled - noFilled);
+    if (fillMismatch > 0.000001) {
+      console.log(`[LIM] ❌ Unequal fills (YES=${yesFilled.toFixed(6)}, NO=${noFilled.toFixed(6)}) — unwinding both sides`);
+      await unwindFilledShares(market, yesFilled, noFilled, yesPrice, noPrice);
+      throw new Error(`Unequal YES/NO fills; no guaranteed merge payout for larger leg`);
+    }
+
+    const matchedContracts = yesFilled;
 
     if (matchedContracts <= 0) {
       throw new Error("No matched YES/NO overlap to merge");
     }
 
-    // If cost came back as 0, recalculate from fills × prices
-    if (yesCostUSD < 0.001) {
-      console.log(`[LIM] ⚠️ YES cost was $0 — recalculating: ${yesFilled} × $${yesPrice}`);
-      yesCostUSD = yesFilled * yesPrice;
-    }
-    if (noCostUSD < 0.001) {
-      console.log(`[LIM] ⚠️ NO cost was $0 — recalculating: ${noFilled} × $${noPrice}`);
-      noCostUSD = noFilled * noPrice;
-    }
-
-    const matchedYesCost = yesCostUSD * (matchedContracts / yesFilled);
-    const matchedNoCost = noCostUSD * (matchedContracts / noFilled);
-    const totalMatchedCost = matchedYesCost + matchedNoCost;
+    const totalActualCost = yesCostUSD + noCostUSD;
     const mergePayout = matchedContracts; // $1 per matched contract only
     const estimatedGasCost = 0.15;
-    const actualProfit = mergePayout - totalMatchedCost - estimatedGasCost;
-    const costPerMatchedContract = totalMatchedCost / matchedContracts;
+    const actualProfit = mergePayout - totalActualCost - estimatedGasCost;
+    const costPerMatchedContract = totalActualCost / matchedContracts;
 
     console.log(`[LIM] ── PROFIT CHECK ──`);
     console.log(`[LIM]   Matched: ${matchedContracts.toFixed(6)} contracts`);
-    console.log(`[LIM]   Unmatched YES: ${unmatchedYes.toFixed(6)} | Unmatched NO: ${unmatchedNo.toFixed(6)}`);
-    console.log(`[LIM]   Matched cost: $${totalMatchedCost.toFixed(4)} (YES: $${matchedYesCost.toFixed(4)} + NO: $${matchedNoCost.toFixed(4)})`);
+    console.log(`[LIM]   Exact pair cost: $${totalActualCost.toFixed(4)} (YES: $${yesCostUSD.toFixed(4)} + NO: $${noCostUSD.toFixed(4)})`);
     console.log(`[LIM]   Cost per matched contract: $${costPerMatchedContract.toFixed(4)} (must be < $1.00)`);
     console.log(`[LIM]   Merge payout: $${mergePayout.toFixed(4)}`);
     console.log(`[LIM]   Est. profit after gas: $${actualProfit.toFixed(4)}`);
 
-    if (totalMatchedCost >= mergePayout || costPerMatchedContract >= 1.0 || actualProfit <= 0) {
-      console.log(`[LIM] ❌ ABORT: matched cost $${totalMatchedCost.toFixed(4)} >= payout $${mergePayout.toFixed(4)} — selling both back`);
-      const yesBidPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
-      const noBidPrice = market.noBid > 0 ? market.noBid : noPrice * 0.95;
-      await Promise.all([
-        placeSignedOrder(market, 1, market.yesTokenId, yesBidPrice, yesFilled, "FOK"),
-        placeSignedOrder(market, 1, market.noTokenId, noBidPrice, noFilled, "FOK"),
-      ]);
-      throw new Error(`Aborted: matched cost $${totalMatchedCost.toFixed(4)} >= merge payout $${mergePayout.toFixed(4)}`);
+    if (totalActualCost >= mergePayout || costPerMatchedContract >= 1.0 || actualProfit <= 0) {
+      console.log(`[LIM] ❌ ABORT: exact pair cost $${totalActualCost.toFixed(4)} >= payout $${mergePayout.toFixed(4)} — selling both back`);
+      await unwindFilledShares(market, yesFilled, noFilled, yesPrice, noPrice);
+      throw new Error(`Aborted: exact pair cost $${totalActualCost.toFixed(4)} >= merge payout $${mergePayout.toFixed(4)}`);
     }
 
     // ── MERGE: guaranteed profitable ────────────────
@@ -722,20 +780,6 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
         mergeAmount,
       ],
     });
-
-    // Sell any leftover unmatched contracts
-    const leftoverYes = Math.max(0, yesFilled - matchedContracts);
-    const leftoverNo = Math.max(0, noFilled - matchedContracts);
-    if (leftoverYes > 0.00001) {
-      const p = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
-      console.log(`[LIM] Selling leftover YES: ${leftoverYes.toFixed(6)} @ $${p.toFixed(4)}`);
-      await placeSignedOrder(market, 1, market.yesTokenId, p, leftoverYes, "FOK");
-    }
-    if (leftoverNo > 0.00001) {
-      const p = market.noBid > 0 ? market.noBid : noPrice * 0.95;
-      console.log(`[LIM] Selling leftover NO: ${leftoverNo.toFixed(6)} @ $${p.toFixed(4)}`);
-      await placeSignedOrder(market, 1, market.noTokenId, p, leftoverNo, "FOK");
-    }
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash: mergeHash });
     const gasUsed = Number(receipt.gasUsed) * Number(receipt.effectiveGasPrice || 0n);
