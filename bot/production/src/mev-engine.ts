@@ -36,21 +36,20 @@ const TOKEN_PROGRAM_ID = new PublicKey(
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
   "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 );
-const HELIUS_WS =
-  (CONFIG as any).HELIUS_WS ||
-  CONFIG.HELIUS_HTTP.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://");
-const MAX_PENDING_SIGNATURES = (CONFIG as any).MAX_PENDING_SIGNATURES ?? 200;
-const RATE_LIMIT_BACKOFF_MS = (CONFIG as any).RATE_LIMIT_BACKOFF_MS ?? 2000;
-const MAX_GET_TX_RETRIES = (CONFIG as any).MAX_GET_TX_RETRIES ?? 3;
-const MEV_ENTRY_USDC = (CONFIG as any).MEV_ENTRY_USDC ?? 50_000_000;
-const JITO_TIP = (CONFIG as any).JITO_TIP ?? 10_000;
-const MIN_PROFIT = (CONFIG as any).MIN_PROFIT ?? 0.1;
-const WHALE_THRESHOLD = (CONFIG as any).WHALE_THRESHOLD ?? 5_000;
-const PARSED_TX_MIN_INTERVAL_MS =
-  (CONFIG as any).PARSED_TX_MIN_INTERVAL_MS ?? 250;
-const JITO_BLOCK_ENGINE_URL =
-  (CONFIG as any).JITO_BLOCK_ENGINE_URL || "https://mainnet.block-engine.jito.wtf";
-const MEV_DRY_RUN = (CONFIG as any).MEV_DRY_RUN ?? true;
+// ── MEV config (all fields defined in config.ts) ────────
+const {
+  HELIUS_WS,
+  MAX_PENDING_SIGNATURES,
+  RATE_LIMIT_BACKOFF_MS,
+  MAX_GET_TX_RETRIES,
+  MEV_ENTRY_USDC,
+  JITO_TIP,
+  MIN_PROFIT,
+  WHALE_THRESHOLD,
+  PARSED_TX_MIN_INTERVAL_MS,
+  JITO_BLOCK_ENGINE_URL,
+  MEV_DRY_RUN,
+} = CONFIG;
 
 // ── Types ───────────────────────────────────────────────
 interface PendingSignature {
