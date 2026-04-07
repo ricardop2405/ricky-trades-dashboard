@@ -74,6 +74,7 @@ const keypair = Keypair.fromSecretKey(bs58.decode(CONFIG.PRIVATE_KEY));
 const connection = new Connection(CONFIG.HELIUS_HTTP, {
   wsEndpoint: HELIUS_WS,
   commitment: "confirmed",
+  disableRetryOnRateLimit: true,
 });
 const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
 
@@ -110,11 +111,11 @@ function enqueueSignature(signature: string, dex: string) {
   if (queuedSignatures.has(signature)) return;
 
   if (pendingSignatures.length >= CONFIG.MAX_PENDING_SIGNATURES) {
-    const dropped = pendingSignatures.shift();
+    const dropped = pendingSignatures.pop();
     if (dropped) queuedSignatures.delete(dropped.signature);
   }
 
-  pendingSignatures.push({ signature, dex });
+  pendingSignatures.unshift({ signature, dex });
   queuedSignatures.add(signature);
 }
 
