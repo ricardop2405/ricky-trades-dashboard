@@ -1,0 +1,1 @@
+ALTER TABLE public.gnosis_arb_opportunities ENABLE ROW LEVEL SECURITY;
