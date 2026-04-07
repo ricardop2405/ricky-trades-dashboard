@@ -856,10 +856,7 @@ async function executeSplitArb(opp: ArbOpportunity): Promise<void> {
 
   try {
     // ── Step 1: Approve USDC for CTF + CoW ──────────────
-    await Promise.all([
-      ensureERC20Approval(market.collateralToken, CTF_ADDRESS, "USDC→CTF"),
-      ensureERC1155Approval(CTF_ADDRESS, COW_SETTLEMENT, "CTF→CoW"),
-    ]);
+    await ensureERC20Approval(market.collateralToken, CTF_ADDRESS, "USDC→CTF");
 
     // ── Step 2: Split USDC → YES + NO via CTF ───────────
     const splitAmount = parseUnits(contracts.toString(), 6);
