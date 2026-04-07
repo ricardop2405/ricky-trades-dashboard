@@ -4,12 +4,13 @@
   "description": "Ricky Trades — Solana MEV + Prediction Market Arbitrage Bot",
   "scripts": {
     "mev": "ts-node --transpile-only src/mev-engine.ts",
+    "scanner": "ts-node --transpile-only src/scanner-engine.ts",
     "arb": "ts-node src/arb-engine.ts",
     "limitless": "ts-node --transpile-only src/limitless-engine.ts",
     "cow": "ts-node --transpile-only src/cow-polymarket-engine.ts",
     "cow-limitless": "ts-node --transpile-only src/cow-limitless-engine.ts",
-    "both": "concurrently \"npm run mev\" \"npm run arb\"",
-    "all": "concurrently \"npm run mev\" \"npm run arb\" \"npm run limitless\" \"npm run cow\" \"npm run cow-limitless\"",
+    "both": "concurrently \"npm run mev\" \"npm run scanner\"",
+    "all": "concurrently \"npm run mev\" \"npm run scanner\" \"npm run arb\" \"npm run limitless\" \"npm run cow\" \"npm run cow-limitless\"",
     "start": "npm run both"
   },
   "dependencies": {
