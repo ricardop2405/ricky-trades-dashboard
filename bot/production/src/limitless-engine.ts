@@ -353,18 +353,18 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
     const rawMarkets = Array.isArray(data) ? data : data.data || data.markets || [];
     const markets: LimitlessMarket[] = [];
 
-    // ── 15-MINUTE MARKETS ONLY ──────────────────────────
+    // ── SHORT-DURATION MARKETS ONLY (up to 1 hour) ─────
     const now = Date.now();
-    const MAX_EXPIRY_MS = 20 * 60 * 1000; // 20 min window (covers 15-min markets with buffer)
+    const MAX_EXPIRY_MS = 60 * 60 * 1000; // 1 hour window
+    const MIN_EXPIRY_MS = 60 * 1000;       // at least 1 min left
     const filtered = rawMarkets.filter((m: any) => {
-      const expiry = m.expirationDate || m.expiresAt;
+      const expiry = m.expirationDate || m.expiresAt || m.endDate;
       if (!expiry) return false;
       const expiryMs = new Date(expiry).getTime();
       const timeLeft = expiryMs - now;
-      // Only markets expiring within 20 minutes AND not already expired
-      return timeLeft > 0 && timeLeft <= MAX_EXPIRY_MS;
+      return timeLeft >= MIN_EXPIRY_MS && timeLeft <= MAX_EXPIRY_MS;
     });
-    console.log(`[LIM] Filtered to ${filtered.length}/${rawMarkets.length} 15-min markets`);
+    console.log(`[LIM] Filtered to ${filtered.length}/${rawMarkets.length} short-duration markets`);
 
     const batchSize = 10;
     for (let i = 0; i < filtered.length; i += batchSize) {
