@@ -487,20 +487,25 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
 // ── Find Arb Opportunities ──────────────────────────────
 function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
-  const contracts = Math.floor(CONFIG.LIMITLESS_TRADE_SIZE_USD);
   const feeMultiplier = 1 + (cachedFeeRateBps ?? 0) / 10000; // e.g. 1.03 for 300 bps
 
   for (const market of markets) {
     const lastAttempt = marketCooldowns.get(market.slug);
     if (lastAttempt && Date.now() - lastAttempt < COOLDOWN_MS) continue;
 
-    const yesAskFill = getDepthFill(market.yesAsks, contracts);
-    const noAskFill = getDepthFill(market.noAsks, contracts);
+    // Calculate max equal contracts we can buy on both sides within budget
+    const combinedAskPrice = market.yesAsk + market.noAsk;
+    if (combinedAskPrice <= 0) continue;
+    const equalContracts = Math.floor(CONFIG.LIMITLESS_TRADE_SIZE_USD / combinedAskPrice);
+    if (equalContracts <= 0) continue;
+
+    const yesAskFill = getDepthFill(market.yesAsks, equalContracts);
+    const noAskFill = getDepthFill(market.noAsks, equalContracts);
 
     if (yesAskFill && noAskFill) {
       // Total cost INCLUDING exchange fees on both buy legs
       const totalCost = (yesAskFill.totalCost + noAskFill.totalCost) * feeMultiplier;
-      const payout = contracts; // merge gives $1 per contract
+      const payout = equalContracts; // merge gives $1 per EQUAL contract pair
       const estimatedGas = 0.15; // be conservative on gas
 
       // ── GUARANTEED PROFIT RULE ────────────────────────
