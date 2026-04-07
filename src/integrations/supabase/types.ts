@@ -166,6 +166,63 @@ export type Database = {
         }
         Relationships: []
       }
+      gnosis_arb_opportunities: {
+        Row: {
+          combined_price: number
+          cow_order_id: string | null
+          created_at: string
+          error_message: string | null
+          id: string
+          market_id: string
+          market_question: string
+          no_price: number
+          platform: string
+          profit_usd: number
+          settling_at: string | null
+          spread: number
+          status: string
+          strategy: string
+          tx_hash: string | null
+          yes_price: number
+        }
+        Insert: {
+          combined_price?: number
+          cow_order_id?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          market_id: string
+          market_question: string
+          no_price?: number
+          platform: string
+          profit_usd?: number
+          settling_at?: string | null
+          spread?: number
+          status?: string
+          strategy?: string
+          tx_hash?: string | null
+          yes_price?: number
+        }
+        Update: {
+          combined_price?: number
+          cow_order_id?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          market_id?: string
+          market_question?: string
+          no_price?: number
+          platform?: string
+          profit_usd?: number
+          settling_at?: string | null
+          spread?: number
+          status?: string
+          strategy?: string
+          tx_hash?: string | null
+          yes_price?: number
+        }
+        Relationships: []
+      }
       prediction_markets: {
         Row: {
           category: string | null
