@@ -1,22 +1,19 @@
 /**
  * RICKY TRADES — CoW + Polymarket Arb Engine (Polygon)
  *
- * FULLY CoW-native execution:
+ * 100% CoW Protocol execution — NO CLOB fallback:
  *   1. Scan Polymarket for short-term crypto markets (5-15 min)
  *   2. Find YES+NO combined price < $1.00
  *   3. Submit CoW Protocol intent orders (off-chain, zero gas if unfilled)
  *   4. CoW solvers fill the order through best available route
- *   5. Post-hook merges YES+NO via CTF → guaranteed $1.00
+ *   5. Merge YES+NO via CTF → guaranteed $1.00
  *
  * CoW Perks:
  *   ✅ Zero gas on failure   — intents are off-chain until matched
  *   ✅ MEV protection        — solvers can't front-run you
  *   ✅ Surplus capture       — if price drops below target, you keep extra
- *   ✅ Atomic via hooks      — merge happens in same tx as buy
  *   ✅ No FOK needed         — solvers handle fill-or-nothing
- *
- * Fallback: If CoW can't route (no DEX liquidity for wrapped tokens),
- * uses Polymarket CLOB directly (still zero gas on failure since CLOB is off-chain too).
+ *   ✅ No partial fills      — order either fully fills or expires for free
  *
  * Usage: npm run cow
  */
@@ -30,9 +27,6 @@ import {
   parseAbi,
   formatUnits,
   parseUnits,
-  encodeFunctionData,
-  keccak256,
-  encodePacked,
   type Address,
   type Hex,
 } from "viem";
@@ -58,13 +52,11 @@ const DRY_RUN = process.env.COW_DRY_RUN === "true";
 // ── Contracts ───────────────────────────────────────────
 const POLYMARKET_CTF = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as Address;
 const USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as Address;
-const CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as Address;
-const NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a" as Address;
 const COW_SETTLEMENT = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41" as Address;
 
 // ── APIs ────────────────────────────────────────────────
 const GAMMA_API = "https://gamma-api.polymarket.com";
-const CLOB_API = "https://clob.polymarket.com";
+const CLOB_API = "https://clob.polymarket.com"; // only for orderbook reads
 const COW_API = "https://api.cow.fi/polygon/api/v1";
 
 // ── Validate ────────────────────────────────────────────
@@ -81,7 +73,8 @@ const walletClient = createWalletClient({ account, chain: polygon, transport: ht
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log("═══════════════════════════════════════════════════════");
-console.log("  RICKY TRADES — CoW + Polymarket Arb (Polygon)");
+console.log("  RICKY TRADES — CoW Polymarket Arb (Polygon)");
+console.log("  100% CoW Protocol — NO CLOB execution");
 console.log("═══════════════════════════════════════════════════════");
 console.log(`[COW] Mode: ${DRY_RUN ? "🔍 DRY RUN (scan only)" : "⚡ LIVE TRADING"}`);
 console.log(`[COW] Wallet: ${account.address}`);
@@ -104,11 +97,6 @@ const ERC20_ABI = parseAbi([
   "function approve(address spender, uint256 amount) external returns (bool)",
   "function balanceOf(address owner) view returns (uint256)",
   "function allowance(address owner, address spender) view returns (uint256)",
-]);
-
-const ERC1155_ABI = parseAbi([
-  "function setApprovalForAll(address operator, bool approved) external",
-  "function isApprovedForAll(address account, address operator) view returns (bool)",
 ]);
 
 // ══════════════════════════════════════════════════════════
@@ -187,25 +175,6 @@ async function ensureApproval(token: Address, spender: Address, label: string): 
   approvedSet.add(key);
 }
 
-async function ensureERC1155Approval(operator: Address): Promise<void> {
-  const key = `1155-${operator}`;
-  if (approvedSet.has(key)) return;
-  const ok = await publicClient.readContract({
-    address: POLYMARKET_CTF, abi: ERC1155_ABI, functionName: "isApprovedForAll",
-    args: [account.address, operator],
-  });
-  if (!ok) {
-    console.log(`[COW] Setting ERC1155 approval...`);
-    const hash = await walletClient.writeContract({
-      address: POLYMARKET_CTF, abi: ERC1155_ABI, functionName: "setApprovalForAll",
-      args: [operator, true],
-    });
-    await publicClient.waitForTransactionReceipt({ hash });
-    console.log(`[COW] ✅ ERC1155 approved`);
-  }
-  approvedSet.add(key);
-}
-
 // Market cooldowns
 const cooldowns = new Map<string, number>();
 const COOLDOWN_MS = 3 * 60 * 1000;
@@ -214,7 +183,6 @@ const COOLDOWN_MS = 3 * 60 * 1000;
 //  COW PROTOCOL — INTENT-BASED ORDERS
 // ══════════════════════════════════════════════════════════
 
-// CoW EIP-712 order types
 const COW_ORDER_TYPES = {
   Order: [
     { name: "sellToken", type: "address" },
@@ -251,8 +219,8 @@ interface CowQuote {
 }
 
 /**
- * Try to get a CoW Protocol quote for a token swap.
- * Returns null if CoW can't route this pair (e.g., no DEX liquidity).
+ * Get a CoW Protocol quote for a token swap.
+ * Returns null if CoW can't route this pair.
  */
 async function getCowQuote(
   sellToken: Address,
@@ -275,12 +243,12 @@ async function getCowQuote(
         sellTokenBalance: "erc20",
         buyTokenBalance: "erc20",
       }),
-    }, 1); // single try, don't retry quotes
+    }, 1);
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       if (res.status === 400 && body.includes("NoLiquidity")) {
-        return null; // No DEX liquidity — expected for wrapped conditional tokens
+        return null;
       }
       console.log(`[COW] Quote failed (${res.status}): ${body.slice(0, 120)}`);
       return null;
@@ -365,102 +333,6 @@ async function checkCowOrderStatus(orderUid: string): Promise<"open" | "filled" 
 }
 
 // ══════════════════════════════════════════════════════════
-//  POLYMARKET CLOB — FALLBACK EXECUTION
-// ══════════════════════════════════════════════════════════
-
-let apiCreds: { apiKey: string; secret: string; passphrase: string } | null = null;
-
-async function deriveApiCreds(): Promise<void> {
-  if (apiCreds) return;
-  const nonce = Date.now().toString();
-  const msg = `Login to Polymarket CLOB as ${account.address} at timestamp ${nonce}`;
-  const signature = await walletClient.signMessage({ message: msg });
-  const res = await fetchWithRetry(`${CLOB_API}/auth/derive-api-key`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ address: account.address, signature, timestamp: nonce, nonce }),
-  });
-  if (!res.ok) throw new Error(`CLOB auth failed: ${res.status}`);
-  apiCreds = await res.json();
-  console.log(`[COW] ✅ Polymarket CLOB credentials ready (fallback)`);
-}
-
-// Polymarket CLOB EIP-712 order types
-const PM_ORDER_TYPES = {
-  Order: [
-    { name: "salt", type: "uint256" },
-    { name: "maker", type: "address" },
-    { name: "signer", type: "address" },
-    { name: "taker", type: "address" },
-    { name: "tokenId", type: "uint256" },
-    { name: "makerAmount", type: "uint256" },
-    { name: "takerAmount", type: "uint256" },
-    { name: "expiration", type: "uint256" },
-    { name: "nonce", type: "uint256" },
-    { name: "feeRateBps", type: "uint256" },
-    { name: "side", type: "uint8" },
-    { name: "signatureType", type: "uint8" },
-  ],
-} as const;
-
-async function placeCLOBOrder(
-  tokenId: string,
-  side: "BUY" | "SELL",
-  price: number,
-  size: number,
-  negRisk: boolean,
-): Promise<{ filled: number; costUSD: number }> {
-  if (!apiCreds) await deriveApiCreds();
-  const exchange = negRisk ? NEG_RISK_EXCHANGE : CTF_EXCHANGE;
-  const salt = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
-  const sideInt = side === "BUY" ? 0 : 1;
-  const makerAmount = BigInt(Math.floor(price * size * 1e6));
-  const takerAmount = BigInt(Math.floor(size * 1e6));
-
-  const orderData = {
-    salt, maker: account.address as Address, signer: account.address as Address,
-    taker: "0x0000000000000000000000000000000000000000" as Address,
-    tokenId: BigInt(tokenId), makerAmount, takerAmount,
-    expiration: 0n, nonce: 0n, feeRateBps: 0n, side: sideInt, signatureType: 0,
-  };
-
-  const signature = await walletClient.signTypedData({
-    domain: { name: "Polymarket CTF Exchange", version: "1", chainId: 137, verifyingContract: exchange },
-    types: PM_ORDER_TYPES, primaryType: "Order", message: orderData,
-  });
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiCreds) {
-    headers["POLY_API_KEY"] = apiCreds.apiKey;
-    headers["POLY_API_SECRET"] = apiCreds.secret;
-    headers["POLY_PASSPHRASE"] = apiCreds.passphrase;
-  }
-
-  const res = await fetchWithRetry(`${CLOB_API}/order`, {
-    method: "POST", headers,
-    body: JSON.stringify({
-      order: {
-        salt: salt.toString(), maker: account.address, signer: account.address,
-        taker: "0x0000000000000000000000000000000000000000",
-        tokenID: tokenId, makerAmount: makerAmount.toString(), takerAmount: takerAmount.toString(),
-        expiration: "0", nonce: "0", feeRateBps: "0", side: sideInt, signatureType: 0, signature,
-      },
-      orderType: "FOK",
-      ...(negRisk ? { negRisk: true } : {}),
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`CLOB ${side} failed (${res.status}): ${body.slice(0, 200)}`);
-  }
-
-  const result = await res.json();
-  const filled = Number(result?.matchedAmount || result?.filled || 0) / 1e6;
-  return { filled, costUSD: filled * price };
-}
-
-// ══════════════════════════════════════════════════════════
 //  MARKET SCANNER
 // ══════════════════════════════════════════════════════════
 
@@ -491,16 +363,12 @@ async function fetchMarkets(): Promise<PolyMarket[]> {
         const timeLeft = new Date(endDate).getTime() - now;
         if (timeLeft < 30000 || timeLeft > maxDurationMs) continue;
 
-        // Only crypto markets
         const text = `${m.question || ""} ${m.slug || ""}`.toLowerCase();
         if (!/\b(btc|bitcoin|eth|ethereum|sol|solana|xrp|link|doge|ada|avax|matic|bnb|crypto|above|below)\b/.test(text)) continue;
 
         let tokenIds: string[];
         try { tokenIds = typeof m.clobTokenIds === "string" ? JSON.parse(m.clobTokenIds) : m.clobTokenIds; } catch { continue; }
         if (!tokenIds || tokenIds.length < 2) continue;
-
-        let tokens: any[];
-        try { tokens = typeof m.tokens === "string" ? JSON.parse(m.tokens) : m.tokens || []; } catch { tokens = []; }
 
         markets.push({
           id: String(m.id), slug: m.slug || m.id, question: m.question || "",
@@ -517,7 +385,7 @@ async function fetchMarkets(): Promise<PolyMarket[]> {
 
     console.log(`[COW] Scanned ${totalFetched} markets → ${markets.length} short-term crypto`);
 
-    // Fetch orderbooks in batches
+    // Fetch orderbooks (read-only from CLOB — used for price discovery only)
     const withBooks: PolyMarket[] = [];
     for (let i = 0; i < markets.length; i += 5) {
       const batch = markets.slice(i, i + 5);
@@ -576,7 +444,7 @@ function findArbs(markets: PolyMarket[]): ArbOpportunity[] {
     const noCost = contracts * market.noBestAsk;
     const totalCost = yesCost + noCost;
     const payout = contracts;
-    const estimatedGas = 0.05; // Polygon is cheap
+    const estimatedGas = 0.05;
     const netProfit = payout - totalCost - estimatedGas;
     const spread = (payout - totalCost) / payout;
 
@@ -590,7 +458,7 @@ function findArbs(markets: PolyMarket[]): ArbOpportunity[] {
 }
 
 // ══════════════════════════════════════════════════════════
-//  EXECUTION — CoW-FIRST, CLOB FALLBACK
+//  EXECUTION — 100% CoW PROTOCOL
 // ══════════════════════════════════════════════════════════
 
 async function executeArb(opp: ArbOpportunity): Promise<void> {
@@ -607,130 +475,94 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
 
   cooldowns.set(market.id, Date.now());
 
-  // ── Step 1: Try CoW Protocol (preferred — zero gas on failure) ──
-  let usedCow = false;
+  // ── Submit CoW intent orders (zero gas if unfilled) ──
   const yesAmountRaw = parseUnits(contracts.toString(), 6).toString();
   const noAmountRaw = parseUnits(contracts.toString(), 6).toString();
 
-  console.log(`[COW] 📡 Trying CoW Protocol (zero-gas intent)...`);
+  console.log(`[COW] 📡 Submitting CoW Protocol intents...`);
 
   // Ensure USDC.e approved for CoW settlement
   await ensureApproval(USDC_E, COW_SETTLEMENT, "USDC.e→CoW");
 
-  // Try to get CoW quotes for the conditional token positions
-  // CoW solvers route through available DEX liquidity
+  // Get CoW quotes for both sides
   const [yesQuote, noQuote] = await Promise.all([
     getCowQuote(USDC_E, market.yesTokenId as Address, yesAmountRaw),
     getCowQuote(USDC_E, market.noTokenId as Address, noAmountRaw),
   ]);
 
-  if (yesQuote && noQuote) {
-    // Both sides have CoW liquidity — full CoW execution!
-    const cowYesCost = Number(yesQuote.sellAmount) / 1e6;
-    const cowNoCost = Number(noQuote.sellAmount) / 1e6;
-    const cowTotal = cowYesCost + cowNoCost;
-
-    console.log(`[COW] ✅ CoW quotes: YES=$${cowYesCost.toFixed(4)} NO=$${cowNoCost.toFixed(4)} total=$${cowTotal.toFixed(4)}`);
-
-    if (cowTotal < contracts) { // still profitable
-      console.log(`[COW] 🐄 Using CoW Protocol — MEV protected, surplus capture enabled`);
-
-      const yesOrderId = await submitCowOrder(yesQuote);
-      const noOrderId = await submitCowOrder(noQuote);
-
-      if (yesOrderId && noOrderId) {
-        usedCow = true;
-        console.log(`[COW] ⏳ Waiting for CoW solvers to fill...`);
-
-        // Poll for fills (max 2 minutes)
-        const deadline = Date.now() + 120_000;
-        let yesFilled = false, noFilled = false;
-
-        while (Date.now() < deadline && (!yesFilled || !noFilled)) {
-          await sleep(5000);
-          if (!yesFilled) {
-            const s = await checkCowOrderStatus(yesOrderId);
-            if (s === "filled") { yesFilled = true; console.log(`[COW] ✅ YES order filled by solver`); }
-            else if (s === "cancelled" || s === "expired") { console.log(`[COW] ❌ YES order ${s}`); break; }
-          }
-          if (!noFilled) {
-            const s = await checkCowOrderStatus(noOrderId);
-            if (s === "filled") { noFilled = true; console.log(`[COW] ✅ NO order filled by solver`); }
-            else if (s === "cancelled" || s === "expired") { console.log(`[COW] ❌ NO order ${s}`); break; }
-          }
-        }
-
-        if (yesFilled && noFilled) {
-          console.log(`[COW] 🎉 Both sides filled via CoW! Merging...`);
-          await mergeCTF(market, contracts, cowTotal);
-          await logExecution(opp, "success-cow", null, 0.05, contracts - cowTotal - 0.05);
-          return;
-        } else {
-          console.log(`[COW] ⚠️ CoW partial/no fill (YES=${yesFilled}, NO=${noFilled}) — zero gas lost`);
-          // CoW orders that didn't fill cost NOTHING — this is the key perk
-        }
-      }
-    } else {
-      console.log(`[COW] CoW quote total $${cowTotal.toFixed(4)} >= payout $${contracts} — skipping`);
-    }
-  } else {
-    console.log(`[COW] No CoW liquidity for these tokens (expected for short-term markets)`);
+  if (!yesQuote || !noQuote) {
+    console.log(`[COW] ❌ No CoW liquidity for this market — skipping (cost: $0)`);
+    await logExecution(opp, "no-liquidity", null, 0, 0, "No CoW liquidity available");
+    return;
   }
 
-  // ── Step 2: Fallback to CLOB ──────────────────────────
-  if (!usedCow) {
-    console.log(`[COW] 📡 Using CLOB fallback (still zero gas on unfilled orders)...`);
+  // Verify combined cost is still profitable
+  const cowYesCost = Number(yesQuote.sellAmount) / 1e6;
+  const cowNoCost = Number(noQuote.sellAmount) / 1e6;
+  const cowTotal = cowYesCost + cowNoCost;
 
-    const exchange = market.negRisk ? NEG_RISK_EXCHANGE : CTF_EXCHANGE;
-    await Promise.all([
-      ensureApproval(USDC_E, exchange, "USDC.e→Exchange"),
-      ensureApproval(USDC_E, POLYMARKET_CTF, "USDC.e→CTF"),
-      ensureERC1155Approval(exchange),
-    ]);
-    await deriveApiCreds();
+  console.log(`[COW] 💰 CoW quotes: YES=$${cowYesCost.toFixed(4)} NO=$${cowNoCost.toFixed(4)} total=$${cowTotal.toFixed(4)}`);
 
-    // LEG 1: Buy YES
-    console.log(`[COW] Buying YES: ${contracts} @ $${market.yesBestAsk.toFixed(4)}`);
-    const { filled: yF, costUSD: yC } = await placeCLOBOrder(
-      market.yesTokenId, "BUY", market.yesBestAsk, contracts, market.negRisk
-    );
-    if (yF <= 0) { console.log(`[COW] ❌ YES unfilled — $0 lost`); return; }
+  if (cowTotal >= contracts) {
+    console.log(`[COW] ❌ CoW total $${cowTotal.toFixed(4)} >= payout $${contracts} — not profitable, skipping (cost: $0)`);
+    return;
+  }
 
-    // LEG 2: Buy matching NO
-    console.log(`[COW] Buying NO: ${yF} @ $${market.noBestAsk.toFixed(4)}`);
-    const { filled: nF, costUSD: nC } = await placeCLOBOrder(
-      market.noTokenId, "BUY", market.noBestAsk, yF, market.negRisk
-    );
-    if (nF <= 0) {
-      console.log(`[COW] ⚠️ NO unfilled — unwinding YES`);
-      if (market.yesBestBid > 0) {
-        await placeCLOBOrder(market.yesTokenId, "SELL", market.yesBestBid, yF, market.negRisk).catch(() => {});
-      }
-      return;
+  const expectedProfit = contracts - cowTotal - 0.05;
+  console.log(`[COW] 🐄 CoW Protocol — MEV protected | surplus capture | expected profit: $${expectedProfit.toFixed(4)}`);
+
+  // Submit both orders
+  const [yesOrderId, noOrderId] = await Promise.all([
+    submitCowOrder(yesQuote),
+    submitCowOrder(noQuote),
+  ]);
+
+  if (!yesOrderId || !noOrderId) {
+    console.log(`[COW] ❌ Order submission failed — cost: $0`);
+    await logExecution(opp, "submit-failed", null, 0, 0, "CoW order submission failed");
+    return;
+  }
+
+  // Poll for fills (max 2 minutes)
+  console.log(`[COW] ⏳ Waiting for CoW solvers to fill (max 2 min)...`);
+  const deadline = Date.now() + 120_000;
+  let yesFilled = false, noFilled = false;
+  let yesExpired = false, noExpired = false;
+
+  while (Date.now() < deadline) {
+    await sleep(5000);
+
+    if (!yesFilled && !yesExpired) {
+      const s = await checkCowOrderStatus(yesOrderId);
+      if (s === "filled") { yesFilled = true; console.log(`[COW] ✅ YES filled by solver`); }
+      else if (s === "cancelled" || s === "expired") { yesExpired = true; console.log(`[COW] ⏰ YES ${s}`); }
     }
 
-    const matched = Math.min(yF, nF);
-    const totalActual = yC + nC;
-
-    // Unwind excess
-    if (yF > nF + 0.000001) {
-      await placeCLOBOrder(market.yesTokenId, "SELL", market.yesBestBid, yF - nF, market.negRisk).catch(() => {});
-    } else if (nF > yF + 0.000001) {
-      await placeCLOBOrder(market.noTokenId, "SELL", market.noBestBid, nF - yF, market.negRisk).catch(() => {});
+    if (!noFilled && !noExpired) {
+      const s = await checkCowOrderStatus(noOrderId);
+      if (s === "filled") { noFilled = true; console.log(`[COW] ✅ NO filled by solver`); }
+      else if (s === "cancelled" || s === "expired") { noExpired = true; console.log(`[COW] ⏰ NO ${s}`); }
     }
 
-    if (totalActual >= matched) {
-      console.log(`[COW] ❌ ABORT: cost $${totalActual.toFixed(4)} >= payout $${matched} — selling back`);
-      await Promise.allSettled([
-        placeCLOBOrder(market.yesTokenId, "SELL", market.yesBestBid, yF, market.negRisk),
-        placeCLOBOrder(market.noTokenId, "SELL", market.noBestBid, nF, market.negRisk),
-      ]);
-      return;
-    }
+    // Both filled → merge
+    if (yesFilled && noFilled) break;
+    // Either expired/cancelled → done (zero gas lost)
+    if (yesExpired || noExpired) break;
+  }
 
-    // MERGE
-    await mergeCTF(market, matched, totalActual);
-    await logExecution(opp, "success-clob", null, 0.05, matched - totalActual - 0.05);
+  if (yesFilled && noFilled) {
+    console.log(`[COW] 🎉 Both sides filled via CoW! Merging for guaranteed $1...`);
+    await mergeCTF(market, contracts, cowTotal);
+    await logExecution(opp, "success", null, 0.05, contracts - cowTotal - 0.05);
+  } else {
+    console.log(`[COW] ⏰ Orders expired/unfilled (YES=${yesFilled}, NO=${noFilled}) — $0 gas lost`);
+    // If one side filled but other didn't, we hold the tokens — they can still be sold later
+    if (yesFilled && !noFilled) {
+      console.log(`[COW] ℹ️ YES tokens held in wallet — can sell later or wait for NO liquidity`);
+    } else if (noFilled && !yesFilled) {
+      console.log(`[COW] ℹ️ NO tokens held in wallet — can sell later or wait for YES liquidity`);
+    }
+    await logExecution(opp, "expired", null, 0, 0, `CoW orders expired (YES=${yesFilled}, NO=${noFilled})`);
   }
 }
 
@@ -827,12 +659,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Test CoW API availability
+  // Test CoW API
   try {
     const r = await fetchWithRetry(`${COW_API}/version`, {}, 1);
     if (r.ok) console.log(`[COW] ✅ CoW Protocol API reachable on Polygon`);
-    else console.log(`[COW] ⚠️ CoW API returned ${r.status} — will use CLOB fallback`);
-  } catch { console.log(`[COW] ⚠️ CoW API unreachable — will use CLOB fallback`); }
+    else {
+      console.error(`[COW] ❌ CoW API returned ${r.status} — cannot proceed without CoW`);
+      return;
+    }
+  } catch {
+    console.error(`[COW] ❌ CoW API unreachable — cannot proceed without CoW`);
+    return;
+  }
 
   let scanCount = 0;
   while (true) {
