@@ -44,4 +44,12 @@ export const CONFIG = {
   // Gnosis CTF on Base
   CTF_ADDRESS: process.env.CTF_ADDRESS || "0x7fFa3c445876EAC20215D109e42413e6a0b0D842",
   LIMITLESS_USDC: process.env.LIMITLESS_USDC || "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+
+  // ── Gnosis Chain (Omen + Azuro) ──────────────────────
+  GNOSIS_PRIVATE_KEY: process.env.GNOSIS_PRIVATE_KEY || process.env.BASE_PRIVATE_KEY || "",
+  GNOSIS_RPC_URL: process.env.GNOSIS_RPC_URL || "https://rpc.gnosischain.com",
+  GNOSIS_MIN_SPREAD: parseFloat(process.env.GNOSIS_MIN_SPREAD || "0.01"),
+  GNOSIS_TRADE_SIZE_USD: parseFloat(process.env.GNOSIS_TRADE_SIZE_USD || "10"),
+  GNOSIS_SCAN_INTERVAL_MS: parseInt(process.env.GNOSIS_SCAN_INTERVAL_MS || "5000"),
+  GNOSIS_DRY_RUN: process.env.GNOSIS_DRY_RUN !== "false",
 } as const;
