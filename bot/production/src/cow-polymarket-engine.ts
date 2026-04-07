@@ -688,76 +688,105 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
     const exchange = market.negRisk ? POLYMARKET_NEG_RISK_EXCHANGE : POLYMARKET_EXCHANGE;
     await ensureERC20Approval(USDC_E, exchange, "USDC.e→Exchange");
 
-    // Sign and submit both BUY orders simultaneously
-    console.log(`[POLY] 📡 Submitting CLOB BUY orders...`);
+    // ═══════════════════════════════════════════════════
+    // ATOMIC EXECUTION: FOK (Fill-or-Kill) Sequential
+    //   Step 1: Buy YES (FOK) — fills instantly or $0
+    //   Step 2: Buy NO (FOK) — fills instantly or $0
+    //   Step 3: If only one side filled → sell it back
+    //   Step 4: If both filled → merge via CTF for $1
+    // ═══════════════════════════════════════════════════
 
-    const [yesOrder, noOrder] = await Promise.all([
-      createSignedOrder(market.yesTokenId, market.yesBestAsk, contracts, 0, market.negRisk, market.tickSize),
-      createSignedOrder(market.noTokenId, market.noBestAsk, contracts, 0, market.negRisk, market.tickSize),
-    ]);
+    // Step 1: Buy YES (FOK)
+    console.log(`[POLY] 📡 Step 1: Buying YES (FOK @ $${market.yesBestAsk.toFixed(4)})...`);
+    const yesOrder = await createSignedOrder(
+      market.yesTokenId, market.yesBestAsk, contracts, 0, market.negRisk, market.tickSize
+    );
+    const yesOrderId = await submitOrder(yesOrder, market.negRisk, market.tickSize);
 
-    const [yesOrderId, noOrderId] = await Promise.all([
-      submitOrder(yesOrder, market.negRisk, market.tickSize),
-      submitOrder(noOrder, market.negRisk, market.tickSize),
-    ]);
-
-    if (!yesOrderId || !noOrderId) {
-      // Cancel whichever succeeded
-      if (yesOrderId) await cancelOrder(yesOrderId);
-      if (noOrderId) await cancelOrder(noOrderId);
-      console.log(`[POLY] ❌ Order submission failed — cancelling`);
-      await logExecution(opp, "submit-failed", null, 0, 0, "CLOB order submission failed");
+    if (!yesOrderId) {
+      console.log(`[POLY] ❌ YES order rejected — $0 cost, moving on`);
+      await logExecution(opp, "yes-rejected", null, 0, 0, "YES FOK order rejected");
       return;
     }
 
-    // Poll for fills (max 60 seconds)
-    console.log(`[POLY] ⏳ Waiting for fills (max 60s)...`);
-    const deadline = Date.now() + 60_000;
-    let yesFilled = false, noFilled = false;
+    // FOK should fill instantly — brief check
+    await sleep(1000);
+    const yesStatus = await checkOrderFilled(yesOrderId);
+    if (yesStatus !== "filled") {
+      console.log(`[POLY] ❌ YES FOK not filled (status: ${yesStatus}) — $0 cost`);
+      if (yesStatus === "live") await cancelOrder(yesOrderId);
+      await logExecution(opp, "yes-not-filled", null, 0, 0, `YES FOK status: ${yesStatus}`);
+      return;
+    }
+    console.log(`[POLY] ✅ YES filled!`);
 
-    while (Date.now() < deadline) {
-      await sleep(2000);
+    // Step 2: Buy NO (FOK)
+    console.log(`[POLY] 📡 Step 2: Buying NO (FOK @ $${market.noBestAsk.toFixed(4)})...`);
+    const noOrder = await createSignedOrder(
+      market.noTokenId, market.noBestAsk, contracts, 0, market.negRisk, market.tickSize
+    );
+    const noOrderId = await submitOrder(noOrder, market.negRisk, market.tickSize);
 
-      if (!yesFilled) {
-        const s = await checkOrderFilled(yesOrderId);
-        if (s === "filled") { yesFilled = true; console.log(`[POLY] ✅ YES filled`); }
-        else if (s === "cancelled") { console.log(`[POLY] ❌ YES cancelled`); break; }
-      }
-
-      if (!noFilled) {
-        const s = await checkOrderFilled(noOrderId);
-        if (s === "filled") { noFilled = true; console.log(`[POLY] ✅ NO filled`); }
-        else if (s === "cancelled") { console.log(`[POLY] ❌ NO cancelled`); break; }
-      }
-
-      if (yesFilled && noFilled) break;
+    if (!noOrderId) {
+      // YES filled but NO rejected → sell YES back at market bid
+      console.log(`[POLY] ⚠️ NO rejected — selling YES back at bid $${market.yesBestBid.toFixed(4)}`);
+      await sellBackPosition(market.yesTokenId, contracts, market.yesBestBid, market.negRisk, market.tickSize);
+      const loss = (market.yesBestAsk - market.yesBestBid) * contracts;
+      await logExecution(opp, "no-rejected-sold-yes", null, 0, -loss, "NO rejected, sold YES at bid");
+      return;
     }
 
-    if (yesFilled && noFilled) {
-      // Both filled → merge for guaranteed $1
-      console.log(`[POLY] 🎉 Both sides filled! Merging via CTF...`);
-      const ctfAddress = market.negRisk ? POLYMARKET_NEG_RISK_CTF : POLYMARKET_CTF;
-      await mergeCTF(ctfAddress, market, contracts, opp.totalCost);
-      await logExecution(opp, "success", null, 0.01, contracts - opp.totalCost - 0.01);
-    } else {
-      // Cancel unfilled orders
-      if (!yesFilled && yesOrderId) await cancelOrder(yesOrderId);
-      if (!noFilled && noOrderId) await cancelOrder(noOrderId);
-
-      if (yesFilled && !noFilled) {
-        console.log(`[POLY] ⚠️ Only YES filled — holding tokens, will try to sell or wait for NO`);
-        await logExecution(opp, "partial-yes", null, 0, 0, "Only YES side filled");
-      } else if (noFilled && !yesFilled) {
-        console.log(`[POLY] ⚠️ Only NO filled — holding tokens, will try to sell or wait for YES`);
-        await logExecution(opp, "partial-no", null, 0, 0, "Only NO side filled");
-      } else {
-        console.log(`[POLY] ⏰ Neither side filled — $0 cost`);
-        await logExecution(opp, "expired", null, 0, 0, "Orders expired unfilled");
-      }
+    await sleep(1000);
+    const noStatus = await checkOrderFilled(noOrderId);
+    if (noStatus !== "filled") {
+      console.log(`[POLY] ⚠️ NO FOK not filled — selling YES back at bid`);
+      if (noStatus === "live") await cancelOrder(noOrderId);
+      await sellBackPosition(market.yesTokenId, contracts, market.yesBestBid, market.negRisk, market.tickSize);
+      const loss = (market.yesBestAsk - market.yesBestBid) * contracts;
+      await logExecution(opp, "no-not-filled-sold-yes", null, 0, -loss, `NO status: ${noStatus}, sold YES`);
+      return;
     }
+    console.log(`[POLY] ✅ NO filled!`);
+
+    // Step 3: Both filled → MERGE for guaranteed $1!
+    console.log(`[POLY] 🎉 BOTH SIDES FILLED! Merging via CTF...`);
+    const ctfAddress = market.negRisk ? POLYMARKET_NEG_RISK_CTF : POLYMARKET_CTF;
+    await mergeCTF(ctfAddress, market, contracts, opp.totalCost);
+    await logExecution(opp, "success", null, 0.01, contracts - opp.totalCost - 0.01);
   } catch (err) {
     console.error(`[POLY] ❌ Execution error:`, err);
     await logExecution(opp, "error", null, 0, 0, err instanceof Error ? err.message : "Unknown error");
+  }
+}
+
+/**
+ * Emergency sell-back: if one side filled but the other didn't,
+ * sell the filled position at best bid to recover funds.
+ */
+async function sellBackPosition(
+  tokenId: string, size: number, bidPrice: number,
+  negRisk: boolean, tickSize: string,
+): Promise<void> {
+  try {
+    if (bidPrice <= 0) {
+      console.log(`[POLY] ⚠️ No bid to sell back to — holding position`);
+      return;
+    }
+    console.log(`[POLY] 📡 Selling ${size} tokens @ $${bidPrice.toFixed(4)} (FOK)...`);
+    const sellOrder = await createSignedOrder(tokenId, bidPrice, size, 1, negRisk, tickSize);
+    const sellId = await submitOrder(sellOrder, negRisk, tickSize);
+    if (sellId) {
+      await sleep(1000);
+      const status = await checkOrderFilled(sellId);
+      if (status === "filled") {
+        console.log(`[POLY] ✅ Sell-back filled — funds recovered`);
+      } else {
+        console.log(`[POLY] ⚠️ Sell-back not filled (${status}) — holding position`);
+        if (status === "live") await cancelOrder(sellId);
+      }
+    }
+  } catch (err) {
+    console.error(`[POLY] Sell-back error:`, err);
   }
 }
 
