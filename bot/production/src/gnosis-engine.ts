@@ -108,18 +108,17 @@ async function fetchWithRetry(
 
 async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
   const now = Math.floor(Date.now() / 1000);
-  const maxSettlement = now + 86400; // Within 24 hours
+  const maxSettlement = now + 7 * 86400; // Within 7 days (wider net)
 
   const query = `{
     fixedProductMarketMakers(
-      first: 100,
+      first: 200,
       where: {
         answerFinalizedTimestamp: null,
         openingTimestamp_gt: "${now}",
-        openingTimestamp_lt: "${maxSettlement}",
-        scaledLiquidityParameter_gt: "10000000000000000"
+        openingTimestamp_lt: "${maxSettlement}"
       }
-      orderBy: scaledLiquidityParameter,
+      orderBy: collateralVolume,
       orderDirection: desc
     ) {
       id
@@ -129,6 +128,7 @@ async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
       collateralToken
       collateralVolume
       openingTimestamp
+      scaledLiquidityParameter
       condition {
         id
       }
@@ -194,24 +194,23 @@ async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
 
 async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
   const now = Math.floor(Date.now() / 1000);
-  const maxSettlement = now + 86400;
+  const maxSettlement = now + 7 * 86400; // 7 days
 
   // Query Azuro subgraph for active conditions on Gnosis
   const query = `{
     conditions(
-      first: 200,
+      first: 500,
       where: {
         isResolved: false,
         game_: {
           startsAt_gt: "${now}",
-          startsAt_lt: "${maxSettlement}",
-          status_in: [Created, Paused]
-        },
-        outcomesCount: 2
+          startsAt_lt: "${maxSettlement}"
+        }
       }
     ) {
       id
       conditionId
+      outcomesCount
       outcomes {
         outcomeId
         currentOdds
@@ -241,6 +240,8 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
 
     for (const cond of conditions) {
       if (!cond.outcomes || cond.outcomes.length < 2) continue;
+      // Only process 2-outcome markets for sum-to-1
+      if (cond.outcomes.length !== 2) continue;
 
       // Azuro odds are in decimal format (e.g. 1.5 means implied prob = 1/1.5 = 0.667)
       const odds1 = parseFloat(cond.outcomes[0].currentOdds || "0");
