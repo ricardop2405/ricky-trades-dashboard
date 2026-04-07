@@ -588,17 +588,22 @@ async function startQueueWorker() {
   }
 }
 
-// ── WebSocket monitoring ────────────────────────────────
-function startMonitoring() {
-  console.log("[MEV] Starting WebSocket monitoring...");
-  void startQueueWorker();
+// ── WebSocket monitoring with auto-reconnect ────────────
+let subscriptionIds: number[] = [];
+let lastLogReceived = Date.now();
+const WS_HEALTH_CHECK_INTERVAL = 60_000; // check every 60s
+const WS_STALE_THRESHOLD = 120_000; // reconnect if no logs for 2 min
+
+function subscribeAllDexes() {
+  subscriptionIds = [];
 
   for (const [dexName, dex] of Object.entries(DEX_PROGRAMS)) {
     try {
-      connection.onLogs(
+      const subId = connection.onLogs(
         new PublicKey(dex.id),
         (logInfo) => {
           try {
+            lastLogReceived = Date.now();
             const { signature, logs } = logInfo;
             const isSwap = logs.some((log) =>
               dex.swapInstructions.some((instr) => log.includes(instr))
@@ -609,6 +614,7 @@ function startMonitoring() {
         },
         "confirmed"
       );
+      subscriptionIds.push(subId);
       console.log(
         `[MEV] ✓ Subscribed to ${dexName} (${dex.id.slice(0, 8)}...)`
       );
@@ -616,6 +622,34 @@ function startMonitoring() {
       console.error(`[MEV] ✗ Failed to subscribe to ${dexName}:`, error);
     }
   }
+}
+
+async function reconnectWebSockets() {
+  console.warn("[MEV] 🔄 WebSocket stale — reconnecting all subscriptions...");
+  // Remove old subscriptions
+  for (const id of subscriptionIds) {
+    try {
+      await connection.removeOnLogsListener(id);
+    } catch (_) {}
+  }
+  // Re-subscribe
+  subscribeAllDexes();
+  lastLogReceived = Date.now();
+  console.log("[MEV] ✓ Reconnected all WebSocket subscriptions");
+}
+
+function startMonitoring() {
+  console.log("[MEV] Starting WebSocket monitoring...");
+  void startQueueWorker();
+  subscribeAllDexes();
+
+  // Health check — reconnect if WebSocket goes silent
+  setInterval(async () => {
+    const silentMs = Date.now() - lastLogReceived;
+    if (silentMs > WS_STALE_THRESHOLD) {
+      await reconnectWebSockets();
+    }
+  }, WS_HEALTH_CHECK_INTERVAL);
 }
 
 // ── Start ───────────────────────────────────────────────
