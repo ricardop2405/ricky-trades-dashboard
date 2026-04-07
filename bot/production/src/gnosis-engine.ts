@@ -108,18 +108,17 @@ async function fetchWithRetry(
 
 async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
   const now = Math.floor(Date.now() / 1000);
-  const maxSettlement = now + 86400; // Within 24 hours
+  const maxSettlement = now + 7 * 86400; // Within 7 days (wider net)
 
   const query = `{
     fixedProductMarketMakers(
-      first: 100,
+      first: 200,
       where: {
         answerFinalizedTimestamp: null,
         openingTimestamp_gt: "${now}",
-        openingTimestamp_lt: "${maxSettlement}",
-        scaledLiquidityParameter_gt: "10000000000000000"
+        openingTimestamp_lt: "${maxSettlement}"
       }
-      orderBy: scaledLiquidityParameter,
+      orderBy: collateralVolume,
       orderDirection: desc
     ) {
       id
@@ -129,6 +128,7 @@ async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
       collateralToken
       collateralVolume
       openingTimestamp
+      scaledLiquidityParameter
       condition {
         id
       }
