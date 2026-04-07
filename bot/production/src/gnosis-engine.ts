@@ -50,20 +50,32 @@ const walletClient = account
   : null;
 
 // ── Constants ───────────────────────────────────────────
-const WXDAI = "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"; // Wrapped xDAI (native stablecoin)
+const WXDAI = "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d" as Address;
 
-// Omen subgraph on Gnosis (requires Graph gateway key unless custom URL is provided)
-const OMEN_SUBGRAPH = CONFIG.GNOSIS_OMEN_SUBGRAPH_URL;
+// Omen Factory and ConditionalTokens on Gnosis
+const OMEN_FACTORY = "0x9083A2B699c0a4AD06F63580BDE2635d26a3eeF0" as Address;
+const CONDITIONAL_TOKENS = "0xCeAfDD6bc0bEF976fdCd1112955828E00543c0Ce" as Address;
 
-// Azuro Backend API
-const AZURO_API = "https://api.azuro.org/api/v1";
+// Azuro subgraph
 const AZURO_SUBGRAPH =
   "https://thegraph.azuro.org/subgraphs/name/azuro-protocol/azuro-api-gnosis-v3";
 
 // CoW Swap on Gnosis
 const COW_API = "https://api.cow.fi/xdai/api/v1";
 
-let omenWarningShown = false;
+// ABIs for direct contract reads
+const FPMM_ABI = parseAbi([
+  "function calcBuyAmount(uint256 investmentAmount, uint256 outcomeIndex) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+  "function fee() view returns (uint256)",
+  "function collateralToken() view returns (address)",
+]);
+
+const CT_ABI = parseAbi([
+  "function getOutcomeSlotCount(bytes32 conditionId) view returns (uint256)",
+  "function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet) view returns (bytes32)",
+  "function balanceOf(address account, uint256 id) view returns (uint256)",
+]);
 
 function getGraphQLErrorMessage(payload: any): string | null {
   const firstError = payload?.errors?.[0];
