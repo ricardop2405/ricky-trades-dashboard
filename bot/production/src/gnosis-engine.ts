@@ -123,7 +123,8 @@ async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
   }
 
   const now = Math.floor(Date.now() / 1000);
-  const maxSettlement = now + 86400; // Within 24 hours
+  const maxSettlement = now + 7 * 86400; // Within 7 days (wider net)
+  console.log(`[OMEN] Querying: openingTimestamp ${now} to ${maxSettlement} | URL: ${OMEN_SUBGRAPH.slice(0, 60)}...`);
 
   const query = `{
     fixedProductMarketMakers(
@@ -254,6 +255,7 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
     }
 
     const conditions = json?.data?.conditions || [];
+    console.log(`[AZURO] Raw conditions returned: ${conditions.length}`);
     const opportunities: MarketOpportunity[] = [];
 
     for (const cond of conditions) {
