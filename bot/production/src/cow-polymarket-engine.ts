@@ -907,12 +907,13 @@ async function main(): Promise<void> {
       } else {
         console.log(`[POLY] 🔥 Found ${opps.length} opportunities:`);
         for (const o of opps) {
-          const mins = Math.round((new Date(o.market.endDate).getTime() - Date.now()) / 60000);
+          const endMs = new Date(o.market.endDate).getTime() - Date.now();
+          const timeStr = endMs < 3600000 ? `${Math.round(endMs / 60000)}m` : `${Math.round(endMs / 3600000)}h`;
           console.log(
             `  "${o.market.question.slice(0, 55)}" ` +
             `spread=${(o.spread * 100).toFixed(2)}% net=$${o.netProfit.toFixed(4)} ` +
             `depth=Y:${o.market.yesAskDepth}/N:${o.market.noAskDepth} ` +
-            `ends=${mins}m`
+            `ends=${timeStr}`
           );
         }
         // Execute the best opportunity
