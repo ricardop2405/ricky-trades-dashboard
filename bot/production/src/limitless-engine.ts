@@ -370,8 +370,8 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
 
     const markets: LimitlessMarket[] = [];
     const now = Date.now();
-    const MAX_EXPIRY_MS = 20 * 60 * 1000;
-    const MIN_EXPIRY_MS = 60 * 1000;
+    const MAX_EXPIRY_MS = 65 * 60 * 1000; // 65 min — catches hourly markets (shortest on Limitless)
+    const MIN_EXPIRY_MS = 60 * 1000;       // at least 1 min left
 
     const getExpiryMs = (m: any): number | null => {
       const numericCandidates = [
@@ -404,30 +404,12 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
         if (expiryMs === null) return false;
 
         const timeLeft = expiryMs - now;
-        if (timeLeft < MIN_EXPIRY_MS || timeLeft > MAX_EXPIRY_MS) return false;
-
-        const text = [
-          m.title,
-          m.question,
-          m.description,
-          ...(Array.isArray(m.categories) ? m.categories : []),
-          ...(Array.isArray(m.tags) ? m.tags : []),
-          m.category,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-
-        const explicit15m = /\b(15\s*(min|minute|m)|15-minute|quarter[ -]?hour)\b/.test(text);
-        const expiryMinute = new Date(expiryMs).getUTCMinutes();
-        const quarterHourExpiry = [0, 15, 30, 45].includes(expiryMinute);
-
-        return explicit15m || quarterHourExpiry;
+        return timeLeft >= MIN_EXPIRY_MS && timeLeft <= MAX_EXPIRY_MS;
       })
       .sort((a: any, b: any) => (getExpiryMs(a) ?? Number.MAX_SAFE_INTEGER) - (getExpiryMs(b) ?? Number.MAX_SAFE_INTEGER))
       .slice(0, 25);
 
-    console.log(`[LIM] Filtered to ${filtered.length}/${dedupedRawMarkets.length} 15-min markets`);
+    console.log(`[LIM] Filtered to ${filtered.length}/${dedupedRawMarkets.length} short-term markets`);
     if (filtered.length === 0) {
       const sample = dedupedRawMarkets.slice(0, 5).map((m: any) => {
         const expiryMs = getExpiryMs(m);
