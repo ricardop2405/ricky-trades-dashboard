@@ -508,9 +508,11 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
   for (const market of markets) {
     if (cooldowns.has(market.slug) && Date.now() - cooldowns.get(market.slug)! < COOLDOWN_MS) continue;
 
-    // ── MERGE ARB: YES_ask + NO_ask < $1.00 ─────────────
+    const hasCowRoutableTokens = Boolean(market.yesTokenAddress && market.noTokenAddress);
+
+    // ── MERGE ARB: only valid if both sides are CoW-routable ERC-20s ──
     const combinedAsk = market.yesAsk + market.noAsk;
-    if (combinedAsk > 0 && combinedAsk < 1) {
+    if (hasCowRoutableTokens && combinedAsk > 0 && combinedAsk < 1) {
       const contracts = Math.floor(TRADE_SIZE_USD / combinedAsk);
       if (contracts > 0) {
         const yesFill = getDepthFill(market.yesAsks, contracts);
@@ -533,16 +535,16 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
       }
     }
 
-    // ── SPLIT ARB: YES_bid + NO_bid > $1.00 ─────────────
+    // ── SPLIT ARB: only valid if both sides are CoW-routable ERC-20s ──
     const combinedBid = market.yesBid + market.noBid;
-    if (combinedBid > 1) {
+    if (hasCowRoutableTokens && combinedBid > 1) {
       const contracts = Math.floor(TRADE_SIZE_USD);
       if (contracts > 0) {
         const yesBidFill = getDepthFill(market.yesBids, contracts);
         const noBidFill = getDepthFill(market.noBids, contracts);
         if (yesBidFill && noBidFill) {
-          const payout = yesBidFill.totalCost + noBidFill.totalCost; // sell proceeds
-          const totalCost = contracts; // $1 per split
+          const payout = yesBidFill.totalCost + noBidFill.totalCost;
+          const totalCost = contracts;
           const estimatedGas = 0.10;
           const spread = (payout - totalCost) / totalCost;
           const netProfit = payout - totalCost - estimatedGas;
