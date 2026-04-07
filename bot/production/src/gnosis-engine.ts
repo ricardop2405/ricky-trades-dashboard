@@ -194,24 +194,23 @@ async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
 
 async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
   const now = Math.floor(Date.now() / 1000);
-  const maxSettlement = now + 86400;
+  const maxSettlement = now + 7 * 86400; // 7 days
 
   // Query Azuro subgraph for active conditions on Gnosis
   const query = `{
     conditions(
-      first: 200,
+      first: 500,
       where: {
         isResolved: false,
         game_: {
           startsAt_gt: "${now}",
-          startsAt_lt: "${maxSettlement}",
-          status_in: [Created, Paused]
-        },
-        outcomesCount: 2
+          startsAt_lt: "${maxSettlement}"
+        }
       }
     ) {
       id
       conditionId
+      outcomesCount
       outcomes {
         outcomeId
         currentOdds
