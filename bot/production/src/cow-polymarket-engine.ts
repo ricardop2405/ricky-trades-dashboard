@@ -540,8 +540,6 @@ async function cancelOrder(orderId: string): Promise<void> {
 
 async function fetchMarkets(): Promise<PolyMarket[]> {
   const markets: PolyMarket[] = [];
-  const now = Date.now();
-  const maxDurationMs = MAX_MARKET_DURATION_MIN * 60 * 1000;
 
   try {
     let totalFetched = 0;
@@ -562,9 +560,9 @@ async function fetchMarkets(): Promise<PolyMarket[]> {
         const endDate = m.endDate || m.end_date_iso;
         if (!endDate) continue;
 
-        const timeLeft = new Date(endDate).getTime() - now;
-        // Must settle within 60 min but not in next 60 seconds (too risky)
-        if (timeLeft < 60_000 || timeLeft > maxDurationMs) continue;
+        // Only skip already-ended markets
+        const timeLeft = new Date(endDate).getTime() - Date.now();
+        if (timeLeft < 60_000) continue; // Skip if ending in < 1 min (too risky)
 
         let tokenIds: string[];
         try { tokenIds = typeof m.clobTokenIds === "string" ? JSON.parse(m.clobTokenIds) : m.clobTokenIds; } catch { continue; }
@@ -590,7 +588,7 @@ async function fetchMarkets(): Promise<PolyMarket[]> {
       if (batch.length < 100) break;
     }
 
-    console.log(`[POLY] Scanned ${totalFetched} markets → ${markets.length} settling within ${MAX_MARKET_DURATION_MIN} min`);
+    console.log(`[POLY] Scanned ${totalFetched} markets → ${markets.length} active`);
 
     // Fetch orderbooks in batches
     const withBooks: PolyMarket[] = [];
