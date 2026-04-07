@@ -339,13 +339,14 @@ async function placeSignedOrder(
 
 // ── Fetch Limitless Orderbooks ──────────────────────────
 async function fetchMarkets(): Promise<LimitlessMarket[]> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {};
   if (CONFIG.LIMITLESS_API_KEY) headers["x-api-key"] = CONFIG.LIMITLESS_API_KEY;
 
   try {
-    const res = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/active?limit=100`, { headers });
+    const res = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/active?limit=50&page=1`, { headers });
     if (!res.ok) {
-      console.error(`[LIM] Markets fetch failed: ${res.status}`);
+      const body = await res.text().catch(() => "");
+      console.error(`[LIM] Markets fetch failed: ${res.status} ${body.slice(0, 200)}`);
       return [];
     }
 
