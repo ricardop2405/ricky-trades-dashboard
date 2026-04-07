@@ -367,8 +367,8 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
     console.log(`[LIM] Filtered to ${filtered.length}/${rawMarkets.length} 15-min markets`);
 
     const batchSize = 10;
-    for (let i = 0; i < rawMarkets.length; i += batchSize) {
-      const batch = rawMarkets.slice(i, i + batchSize);
+    for (let i = 0; i < filtered.length; i += batchSize) {
+      const batch = filtered.slice(i, i + batchSize);
       const bookPromises = batch.map(async (m: any) => {
         try {
           const slug = m.slug || m.id;
