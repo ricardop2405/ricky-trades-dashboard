@@ -465,6 +465,9 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
           const noBook = await noBookRes.json();
           const expiryMs = getExpiryMs(m);
 
+          const yesTokenAddress = m.tokens?.yesAddress || m.tokens?.yesContract || m.tokens?.yesTokenAddress || null;
+          const noTokenAddress = m.tokens?.noAddress || m.tokens?.noContract || m.tokens?.noTokenAddress || null;
+
           return {
             slug,
             title: m.title || m.question || slug,
@@ -483,6 +486,8 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
             volume: Number(m.volume || 0),
             yesTokenId,
             noTokenId,
+            yesTokenAddress: yesTokenAddress as Address | null,
+            noTokenAddress: noTokenAddress as Address | null,
           } as LimitlessMarket;
         } catch { return null; }
       }));
