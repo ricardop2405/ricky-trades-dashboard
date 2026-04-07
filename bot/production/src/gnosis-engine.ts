@@ -217,18 +217,10 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
   const maxSettlement = now + 86400;
 
   const query = `{
-    conditions(
-      first: 500,
-      where: {
-        isResolved: false,
-        game_: {
-          startsAt_gt: "${now}",
-          startsAt_lt: "${maxSettlement}"
-        }
-      }
-    ) {
+    conditions(first: 500) {
       id
       conditionId
+      status
       outcomes {
         outcomeId
         currentOdds
@@ -265,6 +257,8 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
     const opportunities: MarketOpportunity[] = [];
 
     for (const cond of conditions) {
+      const startsAt = cond.game?.startsAt ? parseInt(cond.game.startsAt) : null;
+      if (!startsAt || startsAt <= now || startsAt >= maxSettlement) continue;
       if (!cond.outcomes || cond.outcomes.length !== 2) continue;
 
       const odds1 = parseFloat(cond.outcomes[0].currentOdds || "0");
@@ -289,9 +283,7 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
           combinedPrice: combined,
           spread,
           strategy: "sum_to_1",
-          settlingAt: cond.game?.startsAt
-            ? new Date(parseInt(cond.game.startsAt) * 1000)
-            : null,
+          settlingAt: new Date(startsAt * 1000),
         });
       }
     }
