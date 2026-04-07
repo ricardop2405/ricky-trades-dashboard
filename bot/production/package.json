@@ -13,6 +13,7 @@
     "start": "npm run both"
   },
   "dependencies": {
+    "@solana/spl-token": "^0.4.6",
     "@solana/web3.js": "^1.95.0",
     "@supabase/supabase-js": "^2.49.1",
     "bs58": "^5.0.0",
