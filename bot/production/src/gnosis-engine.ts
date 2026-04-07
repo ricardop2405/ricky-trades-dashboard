@@ -19,6 +19,9 @@ import {
   createWalletClient,
   http,
   type Address,
+  parseAbi,
+  keccak256,
+  encodePacked,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { gnosis } from "viem/chains";
@@ -47,20 +50,32 @@ const walletClient = account
   : null;
 
 // ── Constants ───────────────────────────────────────────
-const WXDAI = "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"; // Wrapped xDAI (native stablecoin)
+const WXDAI = "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d" as Address;
 
-// Omen subgraph on Gnosis (requires Graph gateway key unless custom URL is provided)
-const OMEN_SUBGRAPH = CONFIG.GNOSIS_OMEN_SUBGRAPH_URL;
+// Omen Factory and ConditionalTokens on Gnosis
+const OMEN_FACTORY = "0x9083A2B699c0a4AD06F63580BDE2635d26a3eeF0" as Address;
+const CONDITIONAL_TOKENS = "0xCeAfDD6bc0bEF976fdCd1112955828E00543c0Ce" as Address;
 
-// Azuro Backend API
-const AZURO_API = "https://api.azuro.org/api/v1";
+// Azuro subgraph
 const AZURO_SUBGRAPH =
   "https://thegraph.azuro.org/subgraphs/name/azuro-protocol/azuro-api-gnosis-v3";
 
 // CoW Swap on Gnosis
 const COW_API = "https://api.cow.fi/xdai/api/v1";
 
-let omenWarningShown = false;
+// ABIs for direct contract reads
+const FPMM_ABI = parseAbi([
+  "function calcBuyAmount(uint256 investmentAmount, uint256 outcomeIndex) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+  "function fee() view returns (uint256)",
+  "function collateralToken() view returns (address)",
+]);
+
+const CT_ABI = parseAbi([
+  "function getOutcomeSlotCount(bytes32 conditionId) view returns (uint256)",
+  "function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet) view returns (bytes32)",
+  "function balanceOf(address account, uint256 id) view returns (uint256)",
+]);
 
 function getGraphQLErrorMessage(payload: any): string | null {
   const firstError = payload?.errors?.[0];
@@ -110,97 +125,106 @@ async function fetchWithRetry(
 }
 
 // ═══════════════════════════════════════════════════════
-//  OMEN SCANNER
+//  OMEN SCANNER (Direct RPC — no subgraph needed)
 // ═══════════════════════════════════════════════════════
 
+// Factory event: FixedProductMarketMakerCreation(address indexed creator, ...)
+const FPMM_CREATION_TOPIC = "0x92e0912d3d7f3192cad5c7ae3b47fb97f9c465c1dd12a5c24fd901ddb3905f43";
+
 async function scanOmenMarkets(): Promise<MarketOpportunity[]> {
-  if (!OMEN_SUBGRAPH) {
-    if (!omenWarningShown) {
-      console.warn("[OMEN] Skipping — set GRAPH_API_KEY or GNOSIS_OMEN_SUBGRAPH_URL in .env");
-      omenWarningShown = true;
-    }
-    return [];
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  const maxSettlement = now + 7 * 86400; // Within 7 days (wider net)
-  console.log(`[OMEN] Querying: openingTimestamp ${now} to ${maxSettlement} | URL: ${OMEN_SUBGRAPH.slice(0, 60)}...`);
-
-  const query = `{
-    fixedProductMarketMakers(
-      first: 200,
-      where: {
-        answerFinalizedTimestamp: null,
-        openingTimestamp_gt: "${now}",
-        openingTimestamp_lt: "${maxSettlement}"
-      }
-      orderBy: collateralVolume,
-      orderDirection: desc
-    ) {
-      id
-      title
-      outcomeTokenAmounts
-      outcomeTokenMarginalPrices
-      collateralToken
-      collateralVolume
-      openingTimestamp
-      scaledLiquidityParameter
-      condition {
-        id
-      }
-    }
-  }`;
-
   try {
-    const res = await fetchWithRetry(OMEN_SUBGRAPH, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query }),
+    const currentBlock = await publicClient.getBlockNumber();
+    // Scan last ~3 days of blocks (~20k blocks on Gnosis at 5s/block)
+    const fromBlock = currentBlock - 50000n;
+
+    // 1. Get recent FPMM creation events from factory
+    const logs = await publicClient.getLogs({
+      address: OMEN_FACTORY,
+      fromBlock,
+      toBlock: currentBlock,
     });
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+    if (logs.length === 0) {
+      console.log("[OMEN] No recent markets found in last ~3 days");
+      return [];
     }
 
-    const json = await res.json();
-    const graphError = getGraphQLErrorMessage(json);
-    if (graphError) {
-      throw new Error(graphError);
+    // 2. Parse FPMM addresses and conditionIds from event data
+    const markets: { fpmm: Address; conditionId: `0x${string}`; collateral: Address }[] = [];
+    for (const log of logs) {
+      const data = log.data.slice(2); // remove 0x
+      const fpmm = ("0x" + data.slice(24, 64)) as Address;
+      const collateral = ("0x" + data.slice(64 + 24, 128)) as Address; // word 1 = CT, word 2 = collateral
+      // word 2 is collateral
+      const collateralAddr = ("0x" + data.slice(128 + 24, 192)) as Address;
+      // conditionId is in the dynamic array at the end
+      // word 3 = offset (0xa0 = 160), word 4 = fee, word 5 = array length, word 6 = conditionId
+      const conditionId = ("0x" + data.slice(384, 448)) as `0x${string}`;
+      markets.push({ fpmm, conditionId, collateral: collateralAddr });
     }
 
-    const markets = json?.data?.fixedProductMarketMakers || [];
+    // 3. For each market, read prices via calcBuyAmount
+    const ONE_WXDAI = 1000000000000000000n; // 1e18
     const opportunities: MarketOpportunity[] = [];
+    const batchSize = 20; // Process in batches to avoid RPC rate limits
+    const marketsToCheck = markets.slice(-batchSize); // Check most recent
 
-    for (const market of markets) {
-      const prices = market.outcomeTokenMarginalPrices;
-      if (!prices || prices.length < 2) continue;
-
-      const yesPrice = parseFloat(prices[0]);
-      const noPrice = parseFloat(prices[1]);
-      const combined = yesPrice + noPrice;
-      const spread = Math.abs(1 - combined);
-
-      if (spread >= CONFIG.GNOSIS_MIN_SPREAD) {
-        opportunities.push({
-          platform: "omen",
-          marketId: market.id,
-          question: market.title || "Untitled Omen Market",
-          yesPrice,
-          noPrice,
-          combinedPrice: combined,
-          spread,
-          strategy: "sum_to_1",
-          settlingAt: market.openingTimestamp
-            ? new Date(parseInt(market.openingTimestamp) * 1000)
-            : null,
-          conditionId: market.condition?.id,
-          collateralToken: market.collateralToken,
+    for (const market of marketsToCheck) {
+      try {
+        // Check liquidity first
+        const supply = await publicClient.readContract({
+          address: market.fpmm,
+          abi: FPMM_ABI,
+          functionName: "totalSupply",
         });
+
+        if (supply === 0n) continue; // No liquidity
+
+        // Get buy amounts for both outcomes
+        const [buyYes, buyNo] = await Promise.all([
+          publicClient.readContract({
+            address: market.fpmm,
+            abi: FPMM_ABI,
+            functionName: "calcBuyAmount",
+            args: [ONE_WXDAI, 0n],
+          }),
+          publicClient.readContract({
+            address: market.fpmm,
+            abi: FPMM_ABI,
+            functionName: "calcBuyAmount",
+            args: [ONE_WXDAI, 1n],
+          }),
+        ]);
+
+        // Price = 1 / buyAmount (how much 1 xDAI gets you)
+        const yesPrice = Number(ONE_WXDAI) / Number(buyYes);
+        const noPrice = Number(ONE_WXDAI) / Number(buyNo);
+        const combined = yesPrice + noPrice;
+        const spread = Math.abs(1 - combined);
+
+        if (spread >= CONFIG.GNOSIS_MIN_SPREAD) {
+          opportunities.push({
+            platform: "omen",
+            marketId: market.fpmm,
+            question: `Omen Market ${market.fpmm.slice(0, 10)}...`,
+            yesPrice,
+            noPrice,
+            combinedPrice: combined,
+            spread,
+            strategy: "sum_to_1",
+            settlingAt: null,
+            conditionId: market.conditionId,
+            collateralToken: market.collateral,
+          });
+        }
+      } catch {
+        // Skip markets that revert (resolved, no liquidity, etc.)
+        continue;
       }
     }
 
     console.log(
-      `[OMEN] Scanned ${markets.length} markets → ${opportunities.length} opportunities (spread ≥ ${(CONFIG.GNOSIS_MIN_SPREAD * 100).toFixed(1)}%)`
+      `[OMEN] Scanned ${marketsToCheck.length}/${markets.length} markets → ${opportunities.length} opportunities (spread ≥ ${(CONFIG.GNOSIS_MIN_SPREAD * 100).toFixed(1)}%)`
     );
     return opportunities;
   } catch (err: any) {
