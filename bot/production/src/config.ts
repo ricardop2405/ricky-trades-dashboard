@@ -21,7 +21,13 @@ export const CONFIG = {
   // ── Solana / Jupiter Predict ──────────────────────────
   PRIVATE_KEY: process.env.SOLANA_PRIVATE_KEY || process.env.PRIVATE_KEY || "",
   HELIUS_HTTP: process.env.HELIUS_HTTP || process.env.HELIUS_RPC || "https://api.mainnet-beta.solana.com",
-  HELIUS_WS: process.env.HELIUS_WS || process.env.HELIUS_HTTP?.replace("https://", "wss://") || "wss://api.mainnet-beta.solana.com",
+  HELIUS_WS:
+    process.env.HELIUS_WS ||
+    (process.env.HELIUS_HTTP
+      ? process.env.HELIUS_HTTP.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
+      : process.env.HELIUS_RPC
+        ? process.env.HELIUS_RPC.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
+        : "wss://api.mainnet-beta.solana.com"),
   JUP_PREDICT_API: process.env.JUP_PREDICT_API || "https://prediction-market-api.jup.ag/api/v1",
   JUP_PREDICT_API_KEY: process.env.JUP_PREDICT_API_KEY || "",
   JUP_USD_MINT: process.env.JUP_USD_MINT || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC

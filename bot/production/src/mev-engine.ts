@@ -14,14 +14,9 @@ import {
   PublicKey,
   VersionedTransaction,
   TransactionMessage,
-  TransactionInstruction,
   SystemProgram,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
-import {
-  getAssociatedTokenAddress,
-  getAccount,
-} from "@solana/spl-token";
 import { createClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
 import { CONFIG } from "./config";
@@ -34,6 +29,13 @@ import {
   ARB_INTERMEDIATE_TOKENS,
 } from "./constants";
 import { sleep, isRateLimitError, getTokenName } from "./utils";
+
+const TOKEN_PROGRAM_ID = new PublicKey(
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+);
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+);
 
 // ── Types ───────────────────────────────────────────────
 interface PendingSignature {
@@ -70,13 +72,20 @@ let totalWhales = 0;
 let totalBundlesSent = 0;
 let totalProfit = 0;
 
+function getAssociatedTokenAddressSync(mint: PublicKey, owner: PublicKey) {
+  return PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  )[0];
+}
+
 // ── USDC balance check ─────────────────────────────────
 async function getUsdcBalance(): Promise<number> {
   try {
     const usdcMint = new PublicKey(USDC_MINT);
-    const ata = await getAssociatedTokenAddress(usdcMint, keypair.publicKey);
-    const account = await getAccount(connection, ata);
-    return Number(account.amount);
+    const ata = getAssociatedTokenAddressSync(usdcMint, keypair.publicKey);
+    const balance = await connection.getTokenAccountBalance(ata);
+    return Number(balance.value.amount || 0);
   } catch {
     return 0;
   }
