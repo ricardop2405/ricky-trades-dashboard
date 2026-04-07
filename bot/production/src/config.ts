@@ -50,6 +50,12 @@ export const CONFIG = {
   MAX_GET_TX_RETRIES: parseInt(process.env.MAX_GET_TX_RETRIES || "3"),
   RATE_LIMIT_BACKOFF_MS: parseInt(process.env.RATE_LIMIT_BACKOFF_MS || "2000"),
 
+  // ── Continuous Scanner ─────────────────────────────────
+  SCANNER_ENABLED: process.env.SCANNER_ENABLED !== "false", // default true
+  SCANNER_INTERVAL_MS: parseInt(process.env.SCANNER_INTERVAL_MS || "4000"),
+  SCANNER_BATCH_SIZE: parseInt(process.env.SCANNER_BATCH_SIZE || "5"), // pairs per batch
+  SCANNER_ENTRY_USDC: parseInt(process.env.SCANNER_ENTRY_USDC || "50000000"), // 50 USDC
+
   // ── Limitless (Base Chain) ────────────────────────────
   LIMITLESS_OWNER_ID: Number(process.env.LIMITLESS_OWNER_ID || 0),
   LIMITLESS_API: process.env.LIMITLESS_API || "https://api.limitless.exchange",

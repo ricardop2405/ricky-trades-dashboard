@@ -74,7 +74,31 @@ export const ARB_INTERMEDIATE_TOKENS: { mint: string; symbol: string }[] = [
   { mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", symbol: "BONK" },
   { mint: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", symbol: "WIF" },
   { mint: "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", symbol: "jitoSOL" },
+  { mint: "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", symbol: "mSOL" },
+  { mint: "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1", symbol: "bSOL" },
+  { mint: "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj", symbol: "stSOL" },
+  { mint: "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof", symbol: "RENDER" },
+  { mint: "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3", symbol: "PYTH" },
+  { mint: "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE", symbol: "ORCA" },
+  { mint: "85VBFQZC9TZkfaptBWjvUw7YbZjy52A6mjtPGjstQAmQ", symbol: "W" },
 ];
+
+// ── Token pairs for continuous scanning ─────────────────
+// All unique (A, B) pairs from intermediate tokens for triangular arb
+export function generateScanPairs(): { tokenA: string; symbolA: string; tokenB: string; symbolB: string }[] {
+  const pairs: { tokenA: string; symbolA: string; tokenB: string; symbolB: string }[] = [];
+  for (let i = 0; i < ARB_INTERMEDIATE_TOKENS.length; i++) {
+    for (let j = i + 1; j < ARB_INTERMEDIATE_TOKENS.length; j++) {
+      pairs.push({
+        tokenA: ARB_INTERMEDIATE_TOKENS[i].mint,
+        symbolA: ARB_INTERMEDIATE_TOKENS[i].symbol,
+        tokenB: ARB_INTERMEDIATE_TOKENS[j].mint,
+        symbolB: ARB_INTERMEDIATE_TOKENS[j].symbol,
+      });
+    }
+  }
+  return pairs;
+}
 
 export const JITO_TIP_ACCOUNTS = [
   "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
