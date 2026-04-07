@@ -255,6 +255,7 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
     }
 
     const conditions = json?.data?.conditions || [];
+    console.log(`[AZURO] Raw conditions returned: ${conditions.length}`);
     const opportunities: MarketOpportunity[] = [];
 
     for (const cond of conditions) {
