@@ -19,6 +19,9 @@ import {
   createWalletClient,
   http,
   type Address,
+  parseAbi,
+  keccak256,
+  encodePacked,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { gnosis } from "viem/chains";
