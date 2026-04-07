@@ -240,6 +240,8 @@ async function scanAzuroMarkets(): Promise<MarketOpportunity[]> {
 
     for (const cond of conditions) {
       if (!cond.outcomes || cond.outcomes.length < 2) continue;
+      // Only process 2-outcome markets for sum-to-1
+      if (cond.outcomes.length !== 2) continue;
 
       // Azuro odds are in decimal format (e.g. 1.5 means implied prob = 1/1.5 = 0.667)
       const odds1 = parseFloat(cond.outcomes[0].currentOdds || "0");
