@@ -353,9 +353,22 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
     const rawMarkets = Array.isArray(data) ? data : data.data || data.markets || [];
     const markets: LimitlessMarket[] = [];
 
+    // ── 15-MINUTE MARKETS ONLY ──────────────────────────
+    const now = Date.now();
+    const MAX_EXPIRY_MS = 20 * 60 * 1000; // 20 min window (covers 15-min markets with buffer)
+    const filtered = rawMarkets.filter((m: any) => {
+      const expiry = m.expirationDate || m.expiresAt;
+      if (!expiry) return false;
+      const expiryMs = new Date(expiry).getTime();
+      const timeLeft = expiryMs - now;
+      // Only markets expiring within 20 minutes AND not already expired
+      return timeLeft > 0 && timeLeft <= MAX_EXPIRY_MS;
+    });
+    console.log(`[LIM] Filtered to ${filtered.length}/${rawMarkets.length} 15-min markets`);
+
     const batchSize = 10;
-    for (let i = 0; i < rawMarkets.length; i += batchSize) {
-      const batch = rawMarkets.slice(i, i + batchSize);
+    for (let i = 0; i < filtered.length; i += batchSize) {
+      const batch = filtered.slice(i, i + batchSize);
       const bookPromises = batch.map(async (m: any) => {
         try {
           const slug = m.slug || m.id;
@@ -435,17 +448,21 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
       // Total cost INCLUDING exchange fees on both buy legs
       const totalCost = (yesAskFill.totalCost + noAskFill.totalCost) * feeMultiplier;
       const payout = contracts; // merge gives $1 per contract
-      const grossProfit = payout - totalCost;
-      const spread = payout > 0 ? grossProfit / payout : 0;
       const estimatedGas = 0.15; // be conservative on gas
-      const netProfit = grossProfit - estimatedGas;
 
-      // HARD RULE: combined price per contract MUST be < $1 (investment < payout)
-      const combinedPricePerContract = totalCost / contracts;
-      if (combinedPricePerContract >= 0.97) {
-        // Skip: too close to $1, no guaranteed profit after fees/gas
+      // ── GUARANTEED PROFIT RULE ────────────────────────
+      // Total investment MUST be less than the LOWEST possible payout.
+      // In a merge arb, payout = $1 × matchedContracts (guaranteed).
+      // So: totalCost + gas < payout (= contracts × $1)
+      // We require at least 3% margin to be safe.
+      if (totalCost + estimatedGas >= payout * 0.97) {
+        // Skip: investment too close to or exceeds payout
         continue;
       }
+
+      const grossProfit = payout - totalCost;
+      const spread = payout > 0 ? grossProfit / payout : 0;
+      const netProfit = grossProfit - estimatedGas;
 
       if (spread > CONFIG.LIMITLESS_MIN_SPREAD && netProfit > 0) {
         opps.push({
