@@ -49,14 +49,14 @@ const walletClient = account
 // ── Constants ───────────────────────────────────────────
 const WXDAI = "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"; // Wrapped xDAI (native stablecoin)
 
-// Omen subgraph on Gnosis
+// Omen subgraph on Gnosis (decentralized network)
 const OMEN_SUBGRAPH =
-  "https://api.thegraph.com/subgraphs/name/protofire/omen-xdai";
+  "https://gateway.thegraph.com/api/subgraphs/id/9fUVQpFwzpdWS9bq5WkAnmKbNNcoBwatMR4yZq81pbbz";
 
 // Azuro Backend API
 const AZURO_API = "https://api.azuro.org/api/v1";
 const AZURO_SUBGRAPH =
-  "https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-gnosis-v3";
+  "https://thegraph.azuro.org/subgraphs/name/azuro-protocol/azuro-api-gnosis-v3";
 
 // CoW Swap on Gnosis
 const COW_API = "https://api.cow.fi/xdai/api/v1";
