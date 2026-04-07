@@ -630,11 +630,10 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
   cooldowns.set(market.slug, Date.now());
 
   try {
-    // ── Step 1: Ensure approvals ────────────────────────
+    // ── Step 1: Ensure USDC approvals ─────────────────
     await Promise.all([
       ensureERC20Approval(market.collateralToken, CTF_ADDRESS, "USDC→CTF"),
       ensureERC20Approval(market.collateralToken, COW_SETTLEMENT, "USDC→CoW"),
-      ensureERC1155Approval(CTF_ADDRESS, COW_SETTLEMENT, "CTF→CoW"),
     ]);
 
     // ── Step 2: Use CoW to get a price-protected quote ──
@@ -857,10 +856,7 @@ async function executeSplitArb(opp: ArbOpportunity): Promise<void> {
 
   try {
     // ── Step 1: Approve USDC for CTF + CoW ──────────────
-    await Promise.all([
-      ensureERC20Approval(market.collateralToken, CTF_ADDRESS, "USDC→CTF"),
-      ensureERC1155Approval(CTF_ADDRESS, COW_SETTLEMENT, "CTF→CoW"),
-    ]);
+    await ensureERC20Approval(market.collateralToken, CTF_ADDRESS, "USDC→CTF");
 
     // ── Step 2: Split USDC → YES + NO via CTF ───────────
     const splitAmount = parseUnits(contracts.toString(), 6);
