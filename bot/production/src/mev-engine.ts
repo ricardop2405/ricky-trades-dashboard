@@ -627,6 +627,16 @@ console.log(`[MEV] Whale threshold: $${CONFIG.WHALE_THRESHOLD}`);
 console.log(`[MEV] Min profit: $${CONFIG.MIN_PROFIT}`);
 console.log(`[MEV] Jito tip: ${CONFIG.JITO_TIP} lamports`);
 console.log(`[MEV] Dry run: ${CONFIG.MEV_DRY_RUN}`);
+// Show which endpoints are being used (mask the API key)
+const maskUrl = (url: string) => url.replace(/api-key=[^&]+/, "api-key=****");
+console.log(`[MEV] HTTP RPC: ${maskUrl(CONFIG.HELIUS_HTTP)}`);
+console.log(`[MEV] WS RPC:   ${maskUrl(CONFIG.HELIUS_WS)}`);
+if (CONFIG.HELIUS_HTTP.includes("api.mainnet-beta.solana.com")) {
+  console.warn("[MEV] ⚠️  WARNING: Using public Solana RPC — set HELIUS_HTTP in .env!");
+}
+if (CONFIG.HELIUS_WS.includes("api.mainnet-beta.solana.com")) {
+  console.warn("[MEV] ⚠️  WARNING: Using public Solana WS — set HELIUS_WS in .env!");
+}
 console.log(`[MEV] Intermediate tokens: ${ARB_INTERMEDIATE_TOKENS.map((t) => t.symbol).join(", ")}`);
 console.log(`[MEV] Monitoring ${Object.keys(DEX_PROGRAMS).length} DEX programs`);
 console.log("═══════════════════════════════════════════════════");
