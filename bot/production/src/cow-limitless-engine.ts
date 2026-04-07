@@ -638,108 +638,22 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
 
   cooldowns.set(market.slug, Date.now());
 
+  if (!market.yesTokenAddress || !market.noTokenAddress) {
+    console.log(`[COW-LIM] ⚠️ Skipping merge arb — Limitless returned token IDs only, no CoW-routable token addresses.`);
+    await logExecution(opp, "unsupported-token-format", null, 0, "Limitless market exposes numeric token IDs, not CoW-routable ERC-20 token addresses");
+    return;
+  }
+
   try {
-    // ── Step 1: Ensure USDC approvals ─────────────────
     await Promise.all([
       ensureERC20Approval(market.collateralToken, CTF_ADDRESS, "USDC→CTF"),
       ensureERC20Approval(market.collateralToken, COW_SETTLEMENT, "USDC→CoW"),
     ]);
 
-    // ── Step 2: Use CoW to get a price-protected quote ──
-    // We sell USDC to buy the total cost worth of "execution rights"
-    // CoW ensures we don't overpay (surplus capture)
-    const totalUsdcNeeded = parseUnits(
-      Math.ceil(opp.totalCost * 1.005 * 1e6).toString(), // 0.5% buffer
-      0
-    ).toString();
-
-    // Try to get a CoW quote for USDC → USDC (self-route for hooks)
-    // This validates CoW is live and gives us fee info
-    const cowQuote = await getCowQuote(
-      USDC_BASE,
-      USDC_BASE,
-      totalUsdcNeeded,
-      "sell",
-    );
-
-    // If CoW can't self-route, we still use CoW's hooks mechanism
-    // by doing the CTF operations directly with CoW's MEV protection
-    if (!cowQuote) {
-      console.log(`[COW-LIM] Using direct CTF execution with CoW-style protection...`);
-    }
-
-    // ── Step 3: Split USDC → YES + NO via CTF ───────────
-    // This is the CoW-compatible approach:
-    // Instead of buying from orderbook (CLOB), we split USDC into
-    // equal YES+NO tokens via the CTF, paying exactly $1 per pair.
-    // 
-    // Wait — that's always $1, so there's no profit in splitting!
-    // The profit comes from the ORDERBOOK showing < $1.
-    //
-    // The correct flow for merge arb WITHOUT CLOB:
-    // We need on-chain liquidity for YES and NO tokens.
-    // Let's check if there are Uniswap/DEX pools for these tokens.
-
-    // ── Step 3 (actual): Atomic split-and-sell approach ──
-    // For merge arbs where orderbook < $1, but no DEX liquidity,
-    // we use a REVERSE strategy:
-    //
-    // Instead of "buy cheap YES+NO → merge for $1",
-    // we check if anyone is SELLING YES+NO on-chain for < $1 combined.
-    //
-    // On Limitless, the canonical way to get tokens is:
-    // a) Buy from CLOB (we don't want this)
-    // b) Split via CTF ($1 each, no profit for merge)
-    // c) Buy from DEX pools (may not exist)
-    //
-    // So for this CoW-only engine, we focus on:
-    // 1. SPLIT ARBS (CTF split → sell YES+NO when bids > $1)
-    // 2. CoW-routed merge arbs (when DEX liquidity exists)
-
-    // Try CoW route for YES token
     const yesAmountRaw = parseUnits(contracts.toString(), 6).toString();
     const noAmountRaw = parseUnits(contracts.toString(), 6).toString();
 
-    // Try to find on-chain liquidity for conditional tokens via CoW
-    console.log(`[COW-LIM] 📡 Checking CoW liquidity for conditional tokens on Base DEXes...`);
-
-    // The conditional token IDs are ERC-1155 positions
-    // CoW Protocol on Base supports ERC-1155 via wrapped tokens
-    // We need to check if wrapped ERC-20 versions exist
-    const yesPositionId = BigInt(market.yesTokenId);
-    const noPositionId = BigInt(market.noTokenId);
-
-    // Check on-chain balances to see if anyone has liquidity
-    const [yesLiquidity, noLiquidity] = await Promise.all([
-      publicClient.readContract({
-        address: CTF_ADDRESS, abi: CTF_ABI,
-        functionName: "balanceOf",
-        args: [COW_SETTLEMENT, yesPositionId],
-      }).catch(() => 0n),
-      publicClient.readContract({
-        address: CTF_ADDRESS, abi: CTF_ABI,
-        functionName: "balanceOf",
-        args: [COW_SETTLEMENT, noPositionId],
-      }).catch(() => 0n),
-    ]);
-
-    const yesLiqUsd = Number(formatUnits(yesLiquidity, 6));
-    const noLiqUsd = Number(formatUnits(noLiquidity, 6));
-    console.log(`[COW-LIM] On-chain liquidity: YES=$${yesLiqUsd.toFixed(2)} NO=$${noLiqUsd.toFixed(2)}`);
-
-    if (yesLiqUsd >= contracts && noLiqUsd >= contracts) {
-      // There IS on-chain liquidity — use pure CoW intents
-      console.log(`[COW-LIM] ✅ Sufficient on-chain liquidity — submitting CoW intents`);
-      await executePureCowMerge(opp, yesAmountRaw, noAmountRaw);
-    } else {
-      // No on-chain DEX liquidity for these tokens
-      // Use the CTF split approach as a "reverse arb"
-      // Or just log the opportunity for awareness
-      console.log(`[COW-LIM] ⚠️ Insufficient on-chain DEX liquidity for merge arb`);
-      console.log(`[COW-LIM]   Need ${contracts} each, have YES=$${yesLiqUsd.toFixed(2)} NO=$${noLiqUsd.toFixed(2)}`);
-      console.log(`[COW-LIM]   Opportunity logged — $0 cost (CoW intent not submitted)`);
-      await logExecution(opp, "no-dex-liquidity", null, 0, "No on-chain liquidity for conditional tokens");
-    }
+    await executePureCowMerge(opp, yesAmountRaw, noAmountRaw);
   } catch (err) {
     console.error(`[COW-LIM] ❌ Merge arb failed:`, err);
     await logExecution(opp, "failed", null, 0, String(err));
