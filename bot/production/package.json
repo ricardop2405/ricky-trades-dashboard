@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Ricky Trades — Solana MEV + Prediction Market Arbitrage Bot",
   "scripts": {
-    "mev": "ts-node src/mev-engine.ts",
+    "mev": "ts-node --transpile-only src/mev-engine.ts",
     "arb": "ts-node src/arb-engine.ts",
     "limitless": "ts-node --transpile-only src/limitless-engine.ts",
     "cow": "ts-node --transpile-only src/cow-polymarket-engine.ts",
