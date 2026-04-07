@@ -615,6 +615,8 @@ function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
     }
 
     if (ENABLE_SPLIT_ARBS) {
+      const contracts = Math.floor(CONFIG.LIMITLESS_TRADE_SIZE_USD);
+      if (contracts <= 0) continue;
       const yesBidFill = getDepthFill(market.yesBids, contracts);
       const noBidFill = getDepthFill(market.noBids, contracts);
 
