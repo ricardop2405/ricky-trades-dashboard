@@ -21,15 +21,28 @@ export const CONFIG = {
   // ── Solana / Jupiter Predict ──────────────────────────
   PRIVATE_KEY: process.env.SOLANA_PRIVATE_KEY || process.env.PRIVATE_KEY || "",
   HELIUS_HTTP: process.env.HELIUS_HTTP || process.env.HELIUS_RPC || "https://api.mainnet-beta.solana.com",
+  HELIUS_WS: process.env.HELIUS_WS || process.env.HELIUS_HTTP?.replace("https://", "wss://") || "wss://api.mainnet-beta.solana.com",
   JUP_PREDICT_API: process.env.JUP_PREDICT_API || "https://prediction-market-api.jup.ag/api/v1",
   JUP_PREDICT_API_KEY: process.env.JUP_PREDICT_API_KEY || "",
   JUP_USD_MINT: process.env.JUP_USD_MINT || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
 
   // ── Arb Settings ──────────────────────────────────────
   ARB_AMOUNT: parseFloat(process.env.ARB_AMOUNT || "5"),
-  MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.005"), // 0.5% — catch tighter arbs
-  SCAN_INTERVAL: parseInt(process.env.SCAN_INTERVAL || "2000"), // 2 seconds — faster scanning
+  MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.005"),
+  SCAN_INTERVAL: parseInt(process.env.SCAN_INTERVAL || "2000"),
   SOL_PRICE_USD: parseFloat(process.env.SOL_PRICE_USD || "150"),
+
+  // ── MEV / Jito Atomic Arb ─────────────────────────────
+  MEV_DRY_RUN: process.env.MEV_DRY_RUN !== "false", // default true
+  MEV_ENTRY_USDC: parseInt(process.env.MEV_ENTRY_USDC || "50000000"), // 50 USDC in raw (6 decimals)
+  WHALE_THRESHOLD: parseFloat(process.env.WHALE_THRESHOLD || "5000"),
+  JITO_TIP: parseInt(process.env.JITO_TIP || "10000"), // lamports
+  MIN_PROFIT: parseFloat(process.env.MIN_PROFIT || "0.10"), // USD
+  JITO_BLOCK_ENGINE_URL: process.env.JITO_BLOCK_ENGINE_URL || "https://mainnet.block-engine.jito.wtf",
+  MAX_PENDING_SIGNATURES: parseInt(process.env.MAX_PENDING_SIGNATURES || "200"),
+  PARSED_TX_MIN_INTERVAL_MS: parseInt(process.env.PARSED_TX_MIN_INTERVAL_MS || "250"),
+  MAX_GET_TX_RETRIES: parseInt(process.env.MAX_GET_TX_RETRIES || "3"),
+  RATE_LIMIT_BACKOFF_MS: parseInt(process.env.RATE_LIMIT_BACKOFF_MS || "2000"),
 
   // ── Limitless (Base Chain) ────────────────────────────
   LIMITLESS_OWNER_ID: Number(process.env.LIMITLESS_OWNER_ID || 0),
