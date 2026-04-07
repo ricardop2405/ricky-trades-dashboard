@@ -143,6 +143,8 @@ interface LimitlessMarket {
   volume: number;
   yesTokenId: string;
   noTokenId: string;
+  yesTokenAddress: Address | null;
+  noTokenAddress: Address | null;
 }
 
 interface ArbOpportunity {
