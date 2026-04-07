@@ -487,20 +487,25 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
 // ── Find Arb Opportunities ──────────────────────────────
 function findArbs(markets: LimitlessMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
-  const contracts = Math.floor(CONFIG.LIMITLESS_TRADE_SIZE_USD);
   const feeMultiplier = 1 + (cachedFeeRateBps ?? 0) / 10000; // e.g. 1.03 for 300 bps
 
   for (const market of markets) {
     const lastAttempt = marketCooldowns.get(market.slug);
     if (lastAttempt && Date.now() - lastAttempt < COOLDOWN_MS) continue;
 
-    const yesAskFill = getDepthFill(market.yesAsks, contracts);
-    const noAskFill = getDepthFill(market.noAsks, contracts);
+    // Calculate max equal contracts we can buy on both sides within budget
+    const combinedAskPrice = market.yesAsk + market.noAsk;
+    if (combinedAskPrice <= 0) continue;
+    const equalContracts = Math.floor(CONFIG.LIMITLESS_TRADE_SIZE_USD / combinedAskPrice);
+    if (equalContracts <= 0) continue;
+
+    const yesAskFill = getDepthFill(market.yesAsks, equalContracts);
+    const noAskFill = getDepthFill(market.noAsks, equalContracts);
 
     if (yesAskFill && noAskFill) {
       // Total cost INCLUDING exchange fees on both buy legs
       const totalCost = (yesAskFill.totalCost + noAskFill.totalCost) * feeMultiplier;
-      const payout = contracts; // merge gives $1 per contract
+      const payout = equalContracts; // merge gives $1 per EQUAL contract pair
       const estimatedGas = 0.15; // be conservative on gas
 
       // ── GUARANTEED PROFIT RULE ────────────────────────
@@ -608,7 +613,14 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
   marketCooldowns.set(market.slug, Date.now());
 
   try {
-    const contracts = Math.floor(tradeSize);
+    // ── Determine exact contract count we can afford on BOTH sides ──
+    // Key insight: we must buy EQUAL contracts on each side.
+    // Budget = tradeSize USDC. Split so contracts = budget / (yesPrice + noPrice)
+    const maxContracts = Math.floor(tradeSize / (yesPrice + noPrice));
+    if (maxContracts <= 0) {
+      console.log(`[LIM] ⚠️ Can't afford even 1 contract at YES=$${yesPrice} + NO=$${noPrice}`);
+      return;
+    }
 
     // ── Approve USDC for exchange + CTF ────────────────
     await Promise.all([
@@ -617,23 +629,23 @@ async function executeMergeArb(opp: ArbOpportunity): Promise<void> {
     ]);
 
     // ── LEG 1: Buy YES ────────────────────────────────
-    console.log(`[LIM] Buying YES: target ${contracts} contracts @ avg $${yesPrice.toFixed(4)}`);
-    const yesResult = await placeSignedOrder(market, 0, market.yesTokenId, yesPrice, contracts, "FOK");
+    console.log(`[LIM] Buying YES: target ${maxContracts} contracts @ avg $${yesPrice.toFixed(4)}`);
+    const yesResult = await placeSignedOrder(market, 0, market.yesTokenId, yesPrice, maxContracts, "FOK");
     if (!yesResult?.execution?.matched) {
       throw new Error("YES buy was not matched — aborting");
     }
     const yesFilled = getExecutionContracts(yesResult);
-    let yesCostUSD = getExecutionCostUSD(yesResult, contracts, yesPrice);
+    let yesCostUSD = getExecutionCostUSD(yesResult, maxContracts, yesPrice);
     if (yesFilled <= 0) {
       throw new Error("YES buy returned 0 filled contracts");
     }
     console.log(`[LIM]   YES filled: ${yesFilled.toFixed(6)} contracts, cost: $${yesCostUSD.toFixed(4)}`);
 
-    // ── LEG 2: Buy NO (match YES fill exactly) ──────
+    // ── LEG 2: Buy EXACTLY yesFilled NO contracts ─────
+    // Pass yesFilled as size so makerAmount = noPrice * yesFilled (matching contract count)
     console.log(`[LIM] Buying NO to match: ${yesFilled.toFixed(6)} contracts @ avg $${noPrice.toFixed(4)}`);
     const noResult = await placeSignedOrder(market, 0, market.noTokenId, noPrice, yesFilled, "FOK");
     if (!noResult?.execution?.matched) {
-      // YES is unhedged — immediately sell it back
       console.log(`[LIM] ⚠️ NO not matched — selling YES back to unwind`);
       const unwindPrice = market.yesBid > 0 ? market.yesBid : yesPrice * 0.95;
       await placeSignedOrder(market, 1, market.yesTokenId, unwindPrice, yesFilled, "FOK");
