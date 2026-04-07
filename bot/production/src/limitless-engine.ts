@@ -343,7 +343,7 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
   if (CONFIG.LIMITLESS_API_KEY) headers["x-api-key"] = CONFIG.LIMITLESS_API_KEY;
 
   try {
-    const res = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/active?limit=25`, { headers });
+    const res = await fetchWithRetry(`${CONFIG.LIMITLESS_API}/markets/active?limit=100`, { headers });
     if (!res.ok) {
       console.error(`[LIM] Markets fetch failed: ${res.status}`);
       return [];
@@ -352,19 +352,71 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
     const data = await res.json();
     const rawMarkets = Array.isArray(data) ? data : data.data || data.markets || [];
     const markets: LimitlessMarket[] = [];
-
-    // ── SHORT-DURATION MARKETS ONLY (up to 1 hour) ─────
     const now = Date.now();
-    const MAX_EXPIRY_MS = 60 * 60 * 1000; // 1 hour window
-    const MIN_EXPIRY_MS = 60 * 1000;       // at least 1 min left
-    const filtered = rawMarkets.filter((m: any) => {
-      const expiry = m.expirationDate || m.expiresAt || m.endDate;
-      if (!expiry) return false;
-      const expiryMs = new Date(expiry).getTime();
-      const timeLeft = expiryMs - now;
-      return timeLeft >= MIN_EXPIRY_MS && timeLeft <= MAX_EXPIRY_MS;
-    });
-    console.log(`[LIM] Filtered to ${filtered.length}/${rawMarkets.length} short-duration markets`);
+
+    const getExpiryMs = (m: any): number | null => {
+      const numericCandidates = [
+        m.expirationTimestamp,
+        m.expiryTimestamp,
+        m.closeTime,
+        m.endTime,
+      ];
+
+      for (const candidate of numericCandidates) {
+        const value = Number(candidate ?? 0);
+        if (Number.isFinite(value) && value > 0) {
+          return value > 10_000_000_000 ? value : value * 1000;
+        }
+      }
+
+      const stringCandidates = [m.expirationDate, m.expiresAt, m.endDate];
+      for (const candidate of stringCandidates) {
+        if (!candidate) continue;
+        const parsed = new Date(candidate).getTime();
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      }
+
+      return null;
+    };
+
+    const filtered = rawMarkets
+      .filter((m: any) => {
+        const expiryMs = getExpiryMs(m);
+        if (expiryMs !== null && expiryMs <= now + 60_000) return false;
+
+        const text = [
+          m.title,
+          m.question,
+          m.description,
+          ...(Array.isArray(m.categories) ? m.categories : []),
+          ...(Array.isArray(m.tags) ? m.tags : []),
+          m.category,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        const explicit15m = /\b(15\s*min|15m|15-minute|quarter[ -]?hour)\b/.test(text);
+        const expiryMinute = expiryMs !== null ? new Date(expiryMs).getUTCMinutes() : null;
+        const quarterHourExpiry = expiryMinute !== null && [0, 15, 30, 45].includes(expiryMinute);
+
+        return explicit15m || quarterHourExpiry;
+      })
+      .sort((a: any, b: any) => {
+        const aExpiry = getExpiryMs(a) ?? Number.MAX_SAFE_INTEGER;
+        const bExpiry = getExpiryMs(b) ?? Number.MAX_SAFE_INTEGER;
+        return aExpiry - bExpiry;
+      })
+      .slice(0, 25);
+
+    console.log(`[LIM] Filtered to ${filtered.length}/${rawMarkets.length} 15-min / quarter-hour markets`);
+    if (filtered.length === 0) {
+      const sample = rawMarkets.slice(0, 5).map((m: any) => {
+        const expiryMs = getExpiryMs(m);
+        return `${m.slug || m.id}:${expiryMs ? new Date(expiryMs).toISOString() : "no-expiry"}`;
+      });
+      console.log(`[LIM] Sample market expiries: ${sample.join(" | ")}`);
+    }
 
     const batchSize = 10;
     for (let i = 0; i < filtered.length; i += batchSize) {
@@ -390,6 +442,7 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
           const yesBids = normalizeBookSide(yesBook.bids || [], true);
           const noAsks = normalizeBookSide(noBook.asks || [], false);
           const noBids = normalizeBookSide(noBook.bids || [], true);
+          const expiryMs = getExpiryMs(m);
 
           return {
             slug,
@@ -405,7 +458,7 @@ async function fetchMarkets(): Promise<LimitlessMarket[]> {
             noBids,
             conditionId: m.conditionId || "",
             collateralToken: (m.collateralToken?.address || CONFIG.LIMITLESS_USDC) as Address,
-            expiresAt: m.expirationDate || m.expiresAt || null,
+            expiresAt: expiryMs ? new Date(expiryMs).toISOString() : m.expirationDate || m.expiresAt || m.endDate || null,
             category: Array.isArray(m.categories) ? m.categories[0] || null : m.category || null,
             volume: Number(m.volume || 0),
             yesTokenId,
