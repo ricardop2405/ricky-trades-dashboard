@@ -204,8 +204,24 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
         timestamp: Date.now(),
       });
 
-      // Now immediately scan at production sizes — DON'T re-signal, just build results
+      // USE THE PROBE QUOTES DIRECTLY if already profitable at $10
+      const probeProfitUsd = estimateProfitUsd(probeAmount, probeExit);
+      if (probeProfitUsd >= CONFIG.MIN_PROFIT) {
+        results.push({
+          route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
+          legs: 2,
+          quotes: [buyProbe, sellProbe],
+          entryAmount: probeAmount / 1_000_000,
+          exitAmount: probeExit / 1_000_000,
+          estimatedProfit: probeProfitUsd,
+          entryRaw: probeAmount,
+          strategy: "spread",
+        });
+      }
+
+      // Also try larger sizes for bigger absolute profit
       for (const size of prodSizes) {
+        if (size === probeAmount) continue; // Already handled above
         try {
           const buyQ = await getJupiterQuote(USDC_MINT, token.mint, size, 30);
           if (!buyQ) continue;
@@ -215,7 +231,7 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
 
           const exitAmount = Number(sellQ.outAmount);
           const ratio = exitAmount / size;
-          if (ratio > 2 || ratio < 0.7) continue; // Safety check
+          if (ratio > 2 || ratio < 0.7) continue;
 
           const profitUsd = estimateProfitUsd(size, exitAmount);
           if (profitUsd >= CONFIG.MIN_PROFIT) {
@@ -233,6 +249,10 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
         } catch {
           continue;
         }
+      }
+    } catch {
+      continue;
+    }
       }
     } catch {
       continue;
