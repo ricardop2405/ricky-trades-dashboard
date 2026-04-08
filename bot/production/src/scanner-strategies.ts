@@ -66,22 +66,41 @@ async function fetchQuoteWithFallbacks(urlSuffix: string): Promise<{ data: any |
   let lastReason = "unknown";
 
   for (const endpoint of JUPITER_QUOTE_ENDPOINTS) {
-    try {
-      const res = await fetch(`${endpoint}?${urlSuffix}`);
-      if (!res.ok) {
-        lastReason = `HTTP ${res.status}`;
-        continue;
-      }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2500);
+        const res = await fetch(`${endpoint}?${urlSuffix}`, {
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "ricky-trades-scanner/1.0",
+          },
+        });
+        clearTimeout(timeoutId);
 
-      const data = await res.json();
-      if (data?.error) {
-        lastReason = String(data.error);
-        continue;
-      }
+        if (!res.ok) {
+          lastReason = `HTTP ${res.status}`;
+          if ((res.status === 429 || res.status >= 500) && attempt === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            continue;
+          }
+          break;
+        }
 
-      return { data, endpoint };
-    } catch (error) {
-      lastReason = error instanceof Error ? error.message : String(error);
+        const data = await res.json();
+        if (data?.error) {
+          lastReason = String(data.error);
+          break;
+        }
+
+        return { data, endpoint };
+      } catch (error) {
+        lastReason = error instanceof Error ? error.message : String(error);
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          continue;
+        }
+      }
     }
   }
 

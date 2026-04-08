@@ -43,7 +43,7 @@ export const CONFIG = {
   MEV_ENTRY_USDC: parseInt(process.env.MEV_ENTRY_USDC || "50000000"), // 50 USDC in raw (6 decimals)
   WHALE_THRESHOLD: parseFloat(process.env.WHALE_THRESHOLD || "5000"),
   JITO_TIP: parseInt(process.env.JITO_TIP || "10000"), // lamports
-  MIN_PROFIT: parseFloat(process.env.MIN_PROFIT || "0.005"), // USD — bundles revert free, so even tiny profit is worth it
+  MIN_PROFIT: parseFloat(process.env.MIN_PROFIT || "0.05"), // USD — align with the atomic profit safety guardrail
   JITO_BLOCK_ENGINE_URL: process.env.JITO_BLOCK_ENGINE_URL || "https://mainnet.block-engine.jito.wtf",
   MAX_PENDING_SIGNATURES: parseInt(process.env.MAX_PENDING_SIGNATURES || "200"),
   PARSED_TX_MIN_INTERVAL_MS: parseInt(process.env.PARSED_TX_MIN_INTERVAL_MS || "250"),
