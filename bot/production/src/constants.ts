@@ -62,6 +62,12 @@ export const TOKEN_NAMES: Record<string, string> = {
   "TNSRxcUxoT9xBG3de7PiJyTDYu7kskLqcpddxnEJAS6": "TNSR",
   "WENWENvqqNya429ubCdR81ZmD69brwQaaBYY6p3LCpk": "WEN",
   "85VBFQZC9TZkfaptBWjvUw7YbZjy52A6mjtPGjstQAmQ": "W",
+  "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN": "TRUMP",
+  "HeLp6NuQkmYB4pYWo2zYs22mESHXPQYzXbB8n4V98jwC": "AI16Z",
+  "Grass7B4RdKfBCjTKgSqnXkqjwiGvQyFbuSCUJr3XXjs": "GRASS",
+  "FUAfBo2jgks6gB4Z4LfZkqSZgzNucisEHqnNebaRxM1P": "FARTCOIN",
+  "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh": "WBTC",
+  "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4": "JLP",
 };
 
 // ── Safe intermediate tokens for triangular arb ─────────
@@ -84,8 +90,6 @@ export const ARB_INTERMEDIATE_TOKENS: { mint: string; symbol: string }[] = [
 ];
 
 // ── Memecoin tokens (higher opportunity but need safety checks) ──
-// These have thinner liquidity = more mispricing = more arb opportunities
-// Safety: we only use small entry sizes and verify quotes before executing
 export const MEMECOIN_TOKENS: { mint: string; symbol: string }[] = [
   { mint: "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr", symbol: "POPCAT" },
   { mint: "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5", symbol: "MEW" },
@@ -94,6 +98,12 @@ export const MEMECOIN_TOKENS: { mint: string; symbol: string }[] = [
   { mint: "ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY", symbol: "MOODENG" },
   { mint: "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump", symbol: "PNUT" },
   { mint: "A8C3xuqscfmyLrte3VVY3bSz1SARhS6kMqsJt4i1pump", symbol: "GIGA" },
+  { mint: "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN", symbol: "TRUMP" },
+  { mint: "HeLp6NuQkmYB4pYWo2zYs22mESHXPQYzXbB8n4V98jwC", symbol: "AI16Z" },
+  { mint: "Grass7B4RdKfBCjTKgSqnXkqjwiGvQyFbuSCUJr3XXjs", symbol: "GRASS" },
+  { mint: "FUAfBo2jgks6gB4Z4LfZkqSZgzNucisEHqnNebaRxM1P", symbol: "FARTCOIN" },
+  { mint: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", symbol: "WBTC" },
+  { mint: "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4", symbol: "JLP" },
 ];
 
 // All tokens combined for scanning
@@ -119,7 +129,7 @@ export function generateScanPairs(): { tokenA: string; symbolA: string; tokenB: 
 }
 
 // Multiple entry sizes to find opportunities at different scales
-export const ENTRY_SIZES_USDC = [1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]; // $1, $2, $5, $10, $25, $50, $100
+export const ENTRY_SIZES_USDC = [1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
 
 export const JITO_TIP_ACCOUNTS = [
   "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
