@@ -269,6 +269,9 @@ async function executeOpportunity(result: ScanResult) {
   const startTime = Date.now();
   totalOpportunities++;
 
+  // Pause to let Jupiter rate limits recover from scanning
+  await sleep(1500);
+
   console.log(
     `[SCANNER] 🎯 ${result.strategy} | ${result.route} | $${result.entryAmount} → $${result.exitAmount.toFixed(4)} | profit: $${result.estimatedProfit.toFixed(4)}`
   );
