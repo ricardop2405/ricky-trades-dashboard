@@ -1,13 +1,13 @@
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { CONFIG } from "./config";
-import {
-  MEMECOIN_TOKENS,
-  SOL_MINT,
-  USDC_MINT,
-  USDT_MINT,
-} from "./constants";
+import { MEMECOIN_TOKENS, SOL_MINT, USDC_MINT, USDT_MINT } from "./constants";
 
 const MEMECOIN_MINTS = new Set(MEMECOIN_TOKENS.map((token) => token.mint));
+const JUPITER_QUOTE_ENDPOINTS = [
+  "https://lite-api.jup.ag/swap/v1/quote",
+  "https://api.jup.ag/swap/v1/quote",
+  "https://quote-api.jup.ag/v6/quote",
+] as const;
 
 export interface ScanResult {
   route: string;
@@ -20,18 +20,6 @@ export interface ScanResult {
   strategy: string;
 }
 
-// ── Jupiter program IDs → labels (used for dexes param) ─
-const PROGRAM_ID_TO_LABEL: Record<string, string> = {
-  "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "Raydium",
-  "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK": "Raydium CLMM",
-  "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C": "Raydium CP",
-  "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "Orca Whirlpool",
-  "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP": "Orca V2",
-  "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "Meteora DLMM",
-  "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB": "Meteora",
-};
-
-// These are the labels Jupiter accepts in the `dexes` query param
 export const SCANNER_DEX_LABELS = [
   "Raydium",
   "Raydium CLMM",
@@ -49,31 +37,57 @@ export interface DexPair {
   sellDex: DexLabel;
 }
 
-// All cross-venue pairs to probe for price differences
+export interface ProbeResult {
+  supported: boolean;
+  endpoint?: string;
+  reason?: string;
+}
+
 export const DEX_ARB_PAIRS: DexPair[] = [
-  // Raydium variants vs Orca
   { buyDex: "Raydium CLMM", sellDex: "Orca Whirlpool" },
   { buyDex: "Orca Whirlpool", sellDex: "Raydium CLMM" },
   { buyDex: "Raydium", sellDex: "Orca Whirlpool" },
   { buyDex: "Orca Whirlpool", sellDex: "Raydium" },
   { buyDex: "Raydium CP", sellDex: "Orca Whirlpool" },
   { buyDex: "Orca Whirlpool", sellDex: "Raydium CP" },
-  // Raydium vs Meteora
   { buyDex: "Raydium", sellDex: "Meteora DLMM" },
   { buyDex: "Meteora DLMM", sellDex: "Raydium" },
   { buyDex: "Raydium CLMM", sellDex: "Meteora DLMM" },
   { buyDex: "Meteora DLMM", sellDex: "Raydium CLMM" },
-  // Orca vs Meteora
   { buyDex: "Orca Whirlpool", sellDex: "Meteora DLMM" },
   { buyDex: "Meteora DLMM", sellDex: "Orca Whirlpool" },
-  // Raydium internal
   { buyDex: "Raydium", sellDex: "Raydium CLMM" },
   { buyDex: "Raydium CLMM", sellDex: "Raydium" },
   { buyDex: "Raydium CP", sellDex: "Raydium CLMM" },
   { buyDex: "Raydium CLMM", sellDex: "Raydium CP" },
 ];
 
-// ── Jupiter quote helper ────────────────────────────────
+async function fetchQuoteWithFallbacks(urlSuffix: string): Promise<{ data: any | null; endpoint?: string; reason?: string }> {
+  let lastReason = "unknown";
+
+  for (const endpoint of JUPITER_QUOTE_ENDPOINTS) {
+    try {
+      const res = await fetch(`${endpoint}?${urlSuffix}`);
+      if (!res.ok) {
+        lastReason = `HTTP ${res.status}`;
+        continue;
+      }
+
+      const data = await res.json();
+      if (data?.error) {
+        lastReason = String(data.error);
+        continue;
+      }
+
+      return { data, endpoint };
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  return { data: null, reason: lastReason };
+}
+
 export async function getJupiterQuote(
   inputMint: string,
   outputMint: string,
@@ -86,31 +100,22 @@ export async function getJupiterQuote(
     restrictIntermediateTokens?: boolean;
   } = {}
 ): Promise<any | null> {
-  try {
-    const params = new URLSearchParams({
-      inputMint,
-      outputMint,
-      amount: String(amount),
-      slippageBps: String(slippageBps),
-    });
+  const params = new URLSearchParams({
+    inputMint,
+    outputMint,
+    amount: String(amount),
+    slippageBps: String(slippageBps),
+  });
 
-    if (options.onlyDirectRoutes) params.set("onlyDirectRoutes", "true");
-    if (options.restrictIntermediateTokens) params.set("restrictIntermediateTokens", "true");
-    if (options.dexes?.length) params.set("dexes", options.dexes.join(","));
-    if (options.excludeDexes?.length) params.set("excludeDexes", options.excludeDexes.join(","));
+  if (options.onlyDirectRoutes) params.set("onlyDirectRoutes", "true");
+  if (options.restrictIntermediateTokens) params.set("restrictIntermediateTokens", "true");
+  if (options.dexes?.length) params.set("dexes", options.dexes.join(","));
+  if (options.excludeDexes?.length) params.set("excludeDexes", options.excludeDexes.join(","));
 
-    const res = await fetch(`https://quote-api.jup.ag/v6/quote?${params.toString()}`);
-    if (!res.ok) return null;
-
-    const data = await res.json();
-    if (data?.error) return null;
-    return data;
-  } catch {
-    return null;
-  }
+  const { data } = await fetchQuoteWithFallbacks(params.toString());
+  return data;
 }
 
-// ── Safety helpers ──────────────────────────────────────
 function getMaxEntry(mint: string): number {
   return MEMECOIN_MINTS.has(mint) ? 25_000_000 : 100_000_000;
 }
@@ -128,21 +133,35 @@ function estimateProfitUsd(entryAmount: number, exitAmount: number): number {
   return (exitAmount - entryAmount) / 1_000_000 - tipUsd;
 }
 
-// ── Probe: verify a DEX label works ─────────────────────
-export async function probeDexSupport(dexLabel: string): Promise<boolean> {
-  const quote = await getJupiterQuote(USDC_MINT, SOL_MINT, 1_000_000, 300, {
-    onlyDirectRoutes: true,
-    dexes: [dexLabel],
+export async function probeDexSupport(dexLabel: string): Promise<ProbeResult> {
+  const params = new URLSearchParams({
+    inputMint: USDC_MINT,
+    outputMint: SOL_MINT,
+    amount: "10000000",
+    slippageBps: "300",
+    onlyDirectRoutes: "true",
+    dexes: dexLabel,
   });
-  return quote !== null && Number(quote.outAmount || 0) > 0;
+
+  const { data, endpoint, reason } = await fetchQuoteWithFallbacks(params.toString());
+  if (!data || Number(data.outAmount || 0) <= 0) {
+    return {
+      supported: false,
+      endpoint,
+      reason: reason || "no quote returned",
+    };
+  }
+
+  return {
+    supported: true,
+    endpoint,
+  };
 }
 
 export function getDexPair(index: number): DexPair {
   return DEX_ARB_PAIRS[index % DEX_ARB_PAIRS.length];
 }
 
-// ── Strategy 1: DEX-vs-DEX price differential ───────────
-// Buy on one DEX, sell on another — real venue arbitrage
 export async function scanDexDifferential(
   tokenMint: string,
   tokenSymbol: string,
@@ -154,15 +173,12 @@ export async function scanDexDifferential(
     if (entryAmount > getMaxEntry(tokenMint)) return null;
 
     const slippage = isMemecoin ? 100 : 50;
-
-    // Buy on DEX A
     const buyQuote = await getJupiterQuote(USDC_MINT, tokenMint, entryAmount, slippage, {
       onlyDirectRoutes: true,
       dexes: [dexPair.buyDex],
     });
     if (!buyQuote) return null;
 
-    // Sell on DEX B
     const sellQuote = await getJupiterQuote(tokenMint, USDC_MINT, Number(buyQuote.outAmount), slippage, {
       onlyDirectRoutes: true,
       dexes: [dexPair.sellDex],
@@ -190,7 +206,6 @@ export async function scanDexDifferential(
   }
 }
 
-// ── Strategy 2: Cross-stablecoin ────────────────────────
 export async function scanCrossStable(
   tokenMint: string,
   tokenSymbol: string,
@@ -201,7 +216,6 @@ export async function scanCrossStable(
     if (isMemecoin && entryAmount > 25_000_000) return null;
 
     const slippage = isMemecoin ? 100 : 30;
-
     const q1 = await getJupiterQuote(USDC_MINT, tokenMint, entryAmount, slippage);
     if (!q1) return null;
 
@@ -232,7 +246,6 @@ export async function scanCrossStable(
   }
 }
 
-// ── Strategy 3: Triangular ──────────────────────────────
 export async function scan3Leg(
   tokenA: string,
   symbolA: string,
@@ -245,7 +258,6 @@ export async function scan3Leg(
     if (hasMemecoin && entryAmount > 25_000_000) return null;
 
     const slippage = hasMemecoin ? 100 : 30;
-
     const q1 = await getJupiterQuote(USDC_MINT, tokenA, entryAmount, slippage);
     if (!q1) return null;
 

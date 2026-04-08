@@ -240,14 +240,14 @@ async function executeOpportunity(result: ScanResult) {
 
 async function logDexSupport() {
   const results = await Promise.all(
-    SCANNER_DEX_LABELS.map(async (dex) => ({ dex, supported: await probeDexSupport(dex) }))
+    SCANNER_DEX_LABELS.map(async (dex) => ({ dex, probe: await probeDexSupport(dex) }))
   );
 
   for (const result of results) {
     console.log(
-      result.supported
-        ? `[SCANNER] ✓ DEX OK: ${result.dex}`
-        : `[SCANNER] ✗ DEX unavailable: ${result.dex} (no pool for USDC→SOL)`
+      result.probe.supported
+        ? `[SCANNER] ✓ DEX OK: ${result.dex} via ${result.probe.endpoint}`
+        : `[SCANNER] ✗ DEX unavailable: ${result.dex}${result.probe.endpoint ? ` via ${result.probe.endpoint}` : ""}${result.probe.reason ? ` | ${result.probe.reason}` : ""}`
     );
   }
 }
