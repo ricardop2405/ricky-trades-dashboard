@@ -62,23 +62,41 @@ async function getUsdcBalance(): Promise<number> {
   }
 
   try {
-    const ata = getAssociatedTokenAddressSync(new PublicKey(USDC_MINT), keypair.publicKey);
-    console.log(`[BALANCE] Checking ATA: ${ata.toBase58()} for wallet ${keypair.publicKey.toBase58()}`);
-    const balance = await connection.getTokenAccountBalance(ata);
-    usdcBalanceCache = Number(balance.value.amount || 0);
+    const mint = new PublicKey(USDC_MINT);
+    const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey);
+    console.log(`[BALANCE] Checking wallet ${keypair.publicKey.toBase58()} for USDC mint ${USDC_MINT}`);
+    console.log(`[BALANCE] Expected ATA: ${ata.toBase58()}`);
+
+    const parsedAccounts = await connection.getParsedTokenAccountsByOwner(keypair.publicKey, {
+      mint,
+    });
+
+    const balances = parsedAccounts.value.map(({ pubkey, account }) => {
+      const parsedInfo = account.data.parsed.info;
+      const rawAmount = Number(parsedInfo.tokenAmount.amount || 0);
+      return {
+        pubkey: pubkey.toBase58(),
+        rawAmount,
+      };
+    });
+
+    usdcBalanceCache = balances.reduce((sum, account) => sum + account.rawAmount, 0);
     lastBalanceCheck = Date.now();
-    console.log(`[BALANCE] USDC balance: ${usdcBalanceCache / 1e6} (raw: ${usdcBalanceCache})`);
+
+    if (balances.length === 0) {
+      console.error(`[BALANCE] No USDC token accounts found for wallet ${keypair.publicKey.toBase58()}`);
+    } else {
+      console.log(
+        `[BALANCE] Found ${balances.length} USDC account(s): ${balances
+          .map((account) => `${account.pubkey}=${account.rawAmount / 1e6}`)
+          .join(", ")}`
+      );
+    }
+
+    console.log(`[BALANCE] Total USDC balance: ${usdcBalanceCache / 1e6} (raw: ${usdcBalanceCache})`);
     return usdcBalanceCache;
   } catch (error) {
     console.error(`[BALANCE] Failed to fetch USDC balance: ${error instanceof Error ? error.message : String(error)}`);
-    // Try alternative: direct RPC call
-    try {
-      const ata = getAssociatedTokenAddressSync(new PublicKey(USDC_MINT), keypair.publicKey);
-      const accountInfo = await connection.getAccountInfo(ata);
-      if (!accountInfo) {
-        console.error(`[BALANCE] USDC token account does NOT exist at ${ata.toBase58()}. You need to create it by sending USDC to the wallet.`);
-      }
-    } catch {}
     return usdcBalanceCache;
   }
 }
