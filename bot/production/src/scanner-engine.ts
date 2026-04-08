@@ -203,6 +203,7 @@ async function submitJitoBundle(result: ScanResult): Promise<{
   try {
     const freshQuotes: any[] = [];
     let nextAmount = result.entryRaw;
+    let requoteSucceeded = true;
 
     for (const quote of result.quotes) {
       const freshQuote = await getJupiterQuote(
@@ -213,7 +214,9 @@ async function submitJitoBundle(result: ScanResult): Promise<{
       );
 
       if (!freshQuote) {
-        return { success: false, error: "Fresh re-quote failed before protected execution" };
+        requoteSucceeded = false;
+        console.warn("[BUNDLE] Fresh re-quote failed, falling back to original protected quote");
+        break;
       }
 
       freshQuotes.push(freshQuote);
@@ -221,19 +224,25 @@ async function submitJitoBundle(result: ScanResult): Promise<{
       await sleep(100);
     }
 
-    const refreshedExit = Number(freshQuotes[freshQuotes.length - 1]?.outAmount || 0);
-    const refreshedProfit = (refreshedExit - result.entryRaw) / 1_000_000 - (CONFIG.JITO_TIP / LAMPORTS_PER_SOL) * CONFIG.SOL_PRICE_USD;
-    const executionFloorUsd = getScannerExecutionFloorUsd();
+    const bundleQuotes = requoteSucceeded && freshQuotes.length === result.quotes.length
+      ? freshQuotes
+      : result.quotes;
 
-    if (refreshedProfit < executionFloorUsd) {
-      return {
-        success: false,
-        error: `Fresh protected quote dropped to $${refreshedProfit.toFixed(4)} below execution floor $${executionFloorUsd.toFixed(4)}`,
-      };
+    if (bundleQuotes === freshQuotes) {
+      const refreshedExit = Number(freshQuotes[freshQuotes.length - 1]?.outAmount || 0);
+      const refreshedProfit = (refreshedExit - result.entryRaw) / 1_000_000 - (CONFIG.JITO_TIP / LAMPORTS_PER_SOL) * CONFIG.SOL_PRICE_USD;
+      const executionFloorUsd = getScannerExecutionFloorUsd();
+
+      if (refreshedProfit < executionFloorUsd) {
+        return {
+          success: false,
+          error: `Fresh protected quote dropped to $${refreshedProfit.toFixed(4)} below execution floor $${executionFloorUsd.toFixed(4)}`,
+        };
+      }
     }
 
     const swapBuffers: Buffer[] = [];
-    for (const quote of freshQuotes) {
+    for (const quote of bundleQuotes) {
       const swapBuffer = await getJupiterSwapTx(quote);
       if (!swapBuffer) {
         return { success: false, error: "Failed to get swap transactions" };
