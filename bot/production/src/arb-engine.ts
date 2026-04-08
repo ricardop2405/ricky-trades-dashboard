@@ -458,10 +458,42 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
 
   for (const market of markets) {
-    const { yesPrice, noPrice, spread } = market;
-    // Skip markets on cooldown (recently attempted)
     const lastAttempt = marketCooldowns.get(market.marketId);
     if (lastAttempt && (Date.now() - lastAttempt) < COOLDOWN_MS) continue;
+
+    // ── Split & Sell: sellYes + sellNo > 1 + fees ──
+    if (market.splitSpread > 0) {
+      const amount = CONFIG.ARB_AMOUNT;
+      const sellYesRevenue = market.sellYesPrice * amount;
+      const sellNoRevenue = market.sellNoPrice * amount;
+      const totalRevenue = sellYesRevenue + sellNoRevenue;
+      const collateral = amount; // $1 per pair to split
+
+      const platformFee = totalRevenue * 0.005;
+      const txFeeUsd = 0.002 * CONFIG.SOL_PRICE_USD;
+      const fees = platformFee + txFeeUsd;
+
+      const grossProfit = totalRevenue - collateral;
+      const netProfit = grossProfit - fees;
+
+      if (netProfit > 0) {
+        opps.push({
+          market,
+          yesCost: sellYesRevenue,
+          noCost: sellNoRevenue,
+          totalCost: collateral,
+          payout: totalRevenue,
+          grossProfit,
+          fees,
+          netProfit,
+          strategy: "split_sell",
+        });
+      }
+      continue;
+    }
+
+    // ── Merge: buyYes + buyNo < 1 - fees ──
+    const { yesPrice, noPrice, spread } = market;
     if (spread <= CONFIG.MIN_SPREAD) continue;
 
     const amount = CONFIG.ARB_AMOUNT;
@@ -479,7 +511,7 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
     const netProfit = grossProfit - fees;
 
     if (netProfit > 0) {
-      opps.push({ market, yesCost, noCost, totalCost, payout, grossProfit, fees, netProfit });
+      opps.push({ market, yesCost, noCost, totalCost, payout, grossProfit, fees, netProfit, strategy: "merge" });
     }
   }
 
