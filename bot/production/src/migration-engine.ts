@@ -558,8 +558,8 @@ function subscribePumpfun() {
 }
 
 // ── Auto-reconnect ──────────────────────────────────────
-const WS_HEALTH_CHECK_INTERVAL = 60_000;
-const WS_STALE_THRESHOLD = 120_000;
+const WS_HEALTH_CHECK_INTERVAL = 120_000;
+const WS_STALE_THRESHOLD = 600_000; // 10 min — Pump.fun logs are infrequent
 
 async function reconnectWebSocket() {
   console.warn("[MIGRATION] 🔄 WebSocket stale — reconnecting...");
