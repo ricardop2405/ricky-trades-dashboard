@@ -269,6 +269,9 @@ async function executeOpportunity(result: ScanResult) {
   const startTime = Date.now();
   totalOpportunities++;
 
+  // Pause to let Jupiter rate limits recover from scanning
+  await sleep(1500);
+
   console.log(
     `[SCANNER] 🎯 ${result.strategy} | ${result.route} | $${result.entryAmount} → $${result.exitAmount.toFixed(4)} | profit: $${result.estimatedProfit.toFixed(4)}`
   );
@@ -490,6 +493,8 @@ async function startScanner() {
     if (allResults.length > 0) {
       allResults.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
       await executeOpportunity(allResults[0]);
+      // Cool down after execution attempt to recover rate limit headroom
+      await sleep(5000);
     }
 
     await sleep(CONFIG.SCANNER_INTERVAL_MS);
