@@ -26,6 +26,7 @@ import {
   scanDexDifferential,
   scanDirect,
   scanDirectWithNearMiss,
+  getJupiterQuote,
 } from "./scanner-strategies";
 import {
   Signal,
