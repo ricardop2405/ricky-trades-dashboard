@@ -121,17 +121,12 @@ async function getUsdcBalance(): Promise<number> {
 
 // ── Jito bundle submission ──────────────────────────────
 const SWAP_ENDPOINTS = [
-  "https://api.jup.ag/swap/v1/swap",
   "https://lite-api.jup.ag/swap/v1/swap",
   "https://quote-api.jup.ag/v6/swap",
+  "https://api.jup.ag/swap/v1/swap",
 ];
 
 async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
-  if (Date.now() < jupiterCooldownUntil) {
-    console.warn(`[SWAP] Cooling down for ${Math.ceil((jupiterCooldownUntil - Date.now()) / 1000)}s after rate limit`);
-    return null;
-  }
-
   const body = JSON.stringify({
     quoteResponse: quote,
     userPublicKey: keypair.publicKey.toBase58(),
