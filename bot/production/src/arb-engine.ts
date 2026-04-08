@@ -578,10 +578,139 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
 
 // ── Execute Arb ─────────────────────────────────────────
 async function executeArb(opp: ArbOpportunity): Promise<void> {
+  if (opp.strategy === "split_sell") {
+    return executeSplitSell(opp);
+  }
+  return executeMerge(opp);
+}
+
+// ── Split & Sell Execution ──────────────────────────────
+async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
+  const { market, netProfit } = opp;
+  const contracts = Math.floor(CONFIG.ARB_AMOUNT);
+
+  console.log(`\n[SPLIT] ═══ EXECUTING SPLIT & SELL ══════════════════`);
+  console.log(`[SPLIT] Market: ${market.title}`);
+  console.log(`[SPLIT] Sell YES=$${market.sellYesPrice.toFixed(4)} + Sell NO=$${market.sellNoPrice.toFixed(4)} = ${(market.sellYesPrice + market.sellNoPrice).toFixed(4)}`);
+  console.log(`[SPLIT] Split spread: ${(market.splitSpread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
+  console.log(`[SPLIT] Collateral: $${CONFIG.ARB_AMOUNT} → ${contracts} YES + ${contracts} NO → sell both`);
+
+  if (market.platform === "dflow") {
+    console.log(`[SPLIT] 📊 DFlow opportunity logged (execution not yet supported)`);
+    marketCooldowns.set(market.marketId, Date.now());
+    return;
+  }
+
+  const { data: oppRow } = await supabase
+    .from("arb_opportunities")
+    .insert({
+      market_a_id: market.marketId,
+      market_b_id: market.marketId,
+      side_a: "sell_yes",
+      side_b: "sell_no",
+      price_a: market.sellYesPrice,
+      price_b: market.sellNoPrice,
+      spread: market.splitSpread,
+      status: "executing",
+    })
+    .select("id")
+    .single();
+
+  const oppId = oppRow?.id;
+
+  try {
+    const priorityFee = await getOptimalPriorityFee();
+    console.log(`[FEE] Dynamic priority fee: ${priorityFee} microlamports/CU`);
+
+    // Get sell transactions for both YES and NO
+    const [sellYesTxRaw, sellNoTxRaw] = await Promise.all([
+      getSellQuote(market.marketId, true, contracts, market.sellYesPrice),
+      getSellQuote(market.marketId, false, contracts, market.sellNoPrice),
+    ]);
+
+    if (!sellYesTxRaw || !sellNoTxRaw) {
+      console.log("[SPLIT] ⚠️  Could not get sell quotes — prices moved or region blocked");
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed",
+          error_message: `Sell quote failed: yes=${!!sellYesTxRaw} no=${!!sellNoTxRaw}`,
+        });
+        await supabase.from("arb_opportunities").update({ status: "expired" }).eq("id", oppId);
+      }
+      marketCooldowns.set(market.marketId, Date.now());
+      return;
+    }
+
+    // Sign and submit as atomic Jito bundle
+    const [sellYesTx, sellNoTx] = await Promise.all([
+      buildAndSign(sellYesTxRaw),
+      buildAndSign(sellNoTxRaw),
+    ]);
+
+    console.log("[JITO] Submitting Sell YES + Sell NO as atomic Jito bundle...");
+    const bundleResult = await sendJitoBundle([sellYesTx, sellNoTx]);
+    marketCooldowns.set(market.marketId, Date.now());
+
+    if (bundleResult) {
+      console.log(`[SPLIT] ✅ Jito bundle landed! Bundle ID: ${bundleResult}`);
+
+      await sleep(3000);
+      const openOrders = await getOpenOrders();
+      if (openOrders.length > 0) {
+        console.log(`[SPLIT] ⚠️  ${openOrders.length} unfilled orders — cancelling`);
+        await cancelAllOrders();
+        if (oppId) {
+          await supabase.from("arb_executions").insert({
+            opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+            status: "failed",
+            error_message: `Bundle landed but orders unfilled — cancelled ${openOrders.length}`,
+          });
+          await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+        }
+      } else {
+        console.log(`[SPLIT] ✅ Both sells filled atomically! Net profit: ~$${netProfit.toFixed(4)}`);
+        if (oppId) {
+          await supabase.from("arb_executions").insert({
+            opportunity_id: oppId, amount_usd: opp.totalCost, realized_pnl: netProfit,
+            fees: opp.fees, status: "filled",
+            side_a_tx: bs58.encode(sellYesTx.signatures[0]),
+            side_b_tx: bs58.encode(sellNoTx.signatures[0]),
+            side_a_fill_price: market.sellYesPrice, side_b_fill_price: market.sellNoPrice,
+          });
+          await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+        }
+      }
+    } else {
+      console.error(`[SPLIT] ❌ Jito bundle failed — no exposure, atomic rejection`);
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed",
+          error_message: "Jito bundle rejected — atomic failure, no exposure",
+        });
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      }
+    }
+  } catch (err) {
+    console.error("[SPLIT] ❌ Execution error:", err);
+    if (oppId) {
+      await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      await supabase.from("arb_executions").insert({
+        opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+        status: "failed",
+        error_message: err instanceof Error ? err.message : "Unknown error",
+      });
+    }
+  }
+}
+
+// ── Merge Execution (original strategy) ─────────────────
+async function executeMerge(opp: ArbOpportunity): Promise<void> {
   const { market, yesCost, noCost, totalCost, netProfit } = opp;
   const downMarketId = (market as any).downMarketId || market.marketId;
 
-  console.log(`\n[ARB] ═══ EXECUTING ═════════════════════════════════`);
+  console.log(`\n[ARB] ═══ EXECUTING MERGE ═══════════════════════════`);
   console.log(`[ARB] Event: ${market.title}`);
   console.log(`[ARB] Up YES=$${market.yesPrice.toFixed(4)} + Down YES=$${market.noPrice.toFixed(4)} = ${(market.yesPrice + market.noPrice).toFixed(4)}`);
   console.log(`[ARB] Spread: ${(market.spread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
