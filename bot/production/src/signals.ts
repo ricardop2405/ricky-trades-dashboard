@@ -12,6 +12,7 @@ import { CONFIG } from "./config";
 import {
   ALL_SCAN_TOKENS,
   DEX_PROGRAMS,
+  ENTRY_SIZES_USDC,
   STABLECOIN_MINTS,
   SOL_MINT,
   USDC_MINT,
@@ -177,9 +178,15 @@ function estimateProfitUsd(entryAmount: number, exitAmount: number): number {
   return (exitAmount - entryAmount) / 1_000_000 - tipUsd;
 }
 
+function getScannerExecutionFloorUsd(): number {
+  return Math.max(CONFIG.MIN_PROFIT, CONFIG.SCANNER_MIN_PROFIT);
+}
+
 export async function findSpreadOpportunities(onSignal: SignalCallback): Promise<ScanResult[]> {
   const results: ScanResult[] = [];
-  const bestSize = 50_000_000; // $50 — our main executable size
+  const executionFloorUsd = getScannerExecutionFloorUsd();
+  const probeThresholdUsd = executionFloorUsd * 0.4;
+  const executionSizes = [...ENTRY_SIZES_USDC].sort((a, b) => a - b);
 
   for (const token of ALL_SCAN_TOKENS) {
     try {
@@ -196,56 +203,39 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
 
       const probeExit = Number(sellProbe.outAmount);
       const spreadPct = (probeAmount - probeExit) / probeAmount;
-
-      // Only pursue if spread is tight enough (< 0.1%)
-      if (spreadPct >= 0.001) continue;
-
-      // USE THE PROBE QUOTES DIRECTLY if already profitable at $10
       const probeProfitUsd = estimateProfitUsd(probeAmount, probeExit);
-      if (probeProfitUsd >= CONFIG.MIN_PROFIT) {
-        tokenResults.push({
-          route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
-          legs: 2,
-          quotes: [buyProbe, sellProbe],
-          entryAmount: probeAmount / 1_000_000,
-          exitAmount: probeExit / 1_000_000,
-          estimatedProfit: probeProfitUsd,
-          entryRaw: probeAmount,
-          strategy: "spread",
-        });
-      }
 
-      // Only quote at $50 if the probe spread looks promising (negative = profitable)
-      if (spreadPct < 0) {
+      if (spreadPct >= 0 || probeProfitUsd < probeThresholdUsd) continue;
+
+      for (const size of executionSizes) {
         try {
-          // Small delay to avoid rate limiting
-          await new Promise((r) => setTimeout(r, 150));
+          await new Promise((r) => setTimeout(r, 200));
 
-          const buyQ = await getJupiterQuote(USDC_MINT, token.mint, bestSize, 30);
-          if (buyQ) {
-            const sellQ = await getJupiterQuote(token.mint, USDC_MINT, Number(buyQ.outAmount), 30);
-            if (sellQ) {
-              const exitAmount = Number(sellQ.outAmount);
-              const ratio = exitAmount / bestSize;
-              if (ratio <= 2 && ratio >= 0.7) {
-                const profitUsd = estimateProfitUsd(bestSize, exitAmount);
-                if (profitUsd >= CONFIG.MIN_PROFIT) {
-                  console.log(`[SPREAD] ✓ ${token.symbol} $${bestSize/1e6}: profit=$${profitUsd.toFixed(4)}`);
-                  tokenResults.push({
-                    route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
-                    legs: 2,
-                    quotes: [buyQ, sellQ],
-                    entryAmount: bestSize / 1_000_000,
-                    exitAmount: exitAmount / 1_000_000,
-                    estimatedProfit: profitUsd,
-                    entryRaw: bestSize,
-                    strategy: "spread",
-                  });
-                } else {
-                  console.log(`[SPREAD-DEBUG] ${token.symbol} $${bestSize/1e6}: profit=$${profitUsd.toFixed(4)} < min`);
-                }
-              }
-            }
+          const buyQ = await getJupiterQuote(USDC_MINT, token.mint, size, 30);
+          if (!buyQ) continue;
+
+          const sellQ = await getJupiterQuote(token.mint, USDC_MINT, Number(buyQ.outAmount), 30);
+          if (!sellQ) continue;
+
+          const exitAmount = Number(sellQ.outAmount);
+          const ratio = exitAmount / size;
+          if (ratio > 2 || ratio < 0.7) continue;
+
+          const profitUsd = estimateProfitUsd(size, exitAmount);
+          if (profitUsd >= executionFloorUsd) {
+            console.log(`[SPREAD] ✓ ${token.symbol} $${size / 1e6}: profit=$${profitUsd.toFixed(4)}`);
+            tokenResults.push({
+              route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
+              legs: 2,
+              quotes: [buyQ, sellQ],
+              entryAmount: size / 1_000_000,
+              exitAmount: exitAmount / 1_000_000,
+              estimatedProfit: profitUsd,
+              entryRaw: size,
+              strategy: "spread",
+            });
+          } else {
+            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size / 1e6}: profit=$${profitUsd.toFixed(4)} < execution floor $${executionFloorUsd.toFixed(4)}`);
           }
         } catch {
           // continue
