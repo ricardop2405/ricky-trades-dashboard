@@ -52,7 +52,7 @@ export const CONFIG = {
 
   // ── Continuous Scanner ─────────────────────────────────
   SCANNER_ENABLED: process.env.SCANNER_ENABLED !== "false", // default true
-  SCANNER_INTERVAL_MS: parseInt(process.env.SCANNER_INTERVAL_MS || "6000"),
+  SCANNER_INTERVAL_MS: parseInt(process.env.SCANNER_INTERVAL_MS || "2000"),
   SCANNER_BATCH_SIZE: parseInt(process.env.SCANNER_BATCH_SIZE || "8"), // pairs per batch
   SCANNER_ENTRY_USDC: parseInt(process.env.SCANNER_ENTRY_USDC || "50000000"), // 50 USDC
   SCANNER_MIN_PROFIT: parseFloat(process.env.SCANNER_MIN_PROFIT || "0.01"),
