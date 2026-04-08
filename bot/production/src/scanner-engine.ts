@@ -286,10 +286,20 @@ async function executeOpportunity(result: ScanResult) {
 async function scanFromSignal(signal: Signal): Promise<ScanResult | null> {
   const results: ScanResult[] = [];
 
-  // Try multiple entry sizes, prioritize smaller for speed
-  const sizes = signal.strength > 0.7
-    ? [5_000_000, 10_000_000, 25_000_000, 50_000_000]
-    : [1_000_000, 2_000_000, 5_000_000, 10_000_000];
+  // Spread/depeg signals = confirmed arb exists, use LARGER sizes to overcome Jito tip
+  // Whale signals = speculative, start small
+  let sizes: number[];
+  if (signal.type === "spread" || signal.type === "depeg") {
+    // Bigger sizes = more absolute profit from the % spread
+    sizes = [10_000_000, 25_000_000, 50_000_000];
+  } else if (signal.strength > 0.7) {
+    sizes = [5_000_000, 10_000_000, 25_000_000, 50_000_000];
+  } else {
+    sizes = [2_000_000, 5_000_000, 10_000_000, 25_000_000];
+  }
+
+  // Skip scanning stablecoins directly (USDC→USDC makes no sense)
+  if (signal.tokenMint === USDC_MINT) return null;
 
   const scanPromises = sizes.map((size) =>
     scanDirect(signal.tokenMint, signal.tokenSymbol, size)

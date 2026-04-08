@@ -156,8 +156,22 @@ async function parseWhaleSwap(
     // Only signal on whale-sized swaps (> $2000)
     if (amountUSD < CONFIG.WHALE_THRESHOLD) return;
 
-    // Find the non-stablecoin token that was traded
-    const targetMint = STABLECOIN_MINTS.has(tokenInMint) ? tokenOutMint : tokenInMint;
+    // Skip same-token "swaps" (routing artifacts, not real trades)
+    if (tokenInMint === tokenOutMint) return;
+
+    // Skip if both tokens are stablecoins (USDC↔USDT — handled by depeg monitor)
+    if (STABLECOIN_MINTS.has(tokenInMint) && STABLECOIN_MINTS.has(tokenOutMint)) return;
+
+    // Find the non-stablecoin, non-SOL token that was traded (the one that moved in price)
+    let targetMint: string;
+    if (!STABLECOIN_MINTS.has(tokenInMint) && tokenInMint !== SOL_MINT) {
+      targetMint = tokenInMint;
+    } else if (!STABLECOIN_MINTS.has(tokenOutMint) && tokenOutMint !== SOL_MINT) {
+      targetMint = tokenOutMint;
+    } else {
+      // SOL ↔ stablecoin swap — use SOL
+      targetMint = tokenInMint === SOL_MINT ? tokenInMint : tokenOutMint;
+    }
     const targetSymbol = getTokenName(targetMint);
 
     // Strength based on size: $2k = 0.3, $10k = 0.6, $50k+ = 1.0
