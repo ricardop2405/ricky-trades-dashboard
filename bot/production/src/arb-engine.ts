@@ -185,66 +185,17 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
           const events = Array.isArray(data) ? data : data.data || data.events || [];
           const now = Date.now() / 1000;
 
-          let splitDebugLogged = false;
           for (const event of events) {
             const markets = event.markets || [];
-            // ── Split & Sell: check EACH individual market ──
-            for (const m of markets) {
-              if (m.status !== "open") continue;
-              const closeTime = Number(m.closeTime || m.metadata?.closeTime || 0);
-              if (closeTime && closeTime < now) continue;
 
-              const pricing = m.pricing || {};
-              const sellYes = Number(pricing.sellYesPriceUsd || 0) / 1_000_000;
-              const sellNo = Number(pricing.sellNoPriceUsd || 0) / 1_000_000;
-              const buyYes = Number(pricing.buyYesPriceUsd || 0) / 1_000_000;
-              const buyNo = Number(pricing.buyNoPriceUsd || 0) / 1_000_000;
-
-              // Debug: log first market's full pricing to see available fields
-              if (!splitDebugLogged) {
-                splitDebugLogged = true;
-                const pricingKeys = Object.keys(pricing);
-                console.log(`[SPLIT-DEBUG] First market pricing keys: ${pricingKeys.join(", ")}`);
-                console.log(`[SPLIT-DEBUG] Raw pricing: ${JSON.stringify(pricing)}`);
-                console.log(`[SPLIT-DEBUG] Parsed: buyY=$${buyYes.toFixed(4)} buyN=$${buyNo.toFixed(4)} sellY=$${sellYes.toFixed(4)} sellN=$${sellNo.toFixed(4)}`);
-              }
-
-              if (sellYes > 0 && sellNo > 0) {
-                const splitSpread = sellYes + sellNo - 1;
-                if (splitSpread > 0) {
-                  const mTitle = m.metadata?.title || m.title || m.marketId;
-                  const eventTitle = event.metadata?.title || event.title || `${coin.toUpperCase()} ${interval}`;
-                  const splitMarket: JupMarket = {
-                    marketId: m.marketId,
-                    eventId: event.eventId || "",
-                    title: `[SPLIT] ${eventTitle} — ${mTitle} [sellY=$${sellYes.toFixed(3)} sellN=$${sellNo.toFixed(3)}]`,
-                    status: "open",
-                    yesPrice: buyYes,
-                    noPrice: buyNo,
-                    spread: 0,
-                    category: "crypto",
-                    endDate: toIsoFromUnix(closeTime),
-                    volume: Number(pricing.volume || 0),
-                    platform: "jupiter_predict",
-                    closeTime: closeTime || null,
-                    openTime: Number(m.openTime || 0) || null,
-                    sellYesPrice: sellYes,
-                    sellNoPrice: sellNo,
-                    splitSpread,
-                  };
-                  allMarkets.push(splitMarket);
-                }
-              }
-            }
-
-            // ── Merge strategy: pair Up + Down markets ──
+            // ── Find Up + Down markets for this event ──
             let upMarket: any = null;
             let downMarket: any = null;
 
             for (const m of markets) {
               if (m.status !== "open") continue;
               const closeTime = Number(m.closeTime || m.metadata?.closeTime || 0);
-              if (closeTime && closeTime < now) continue; // expired
+              if (closeTime && closeTime < now) continue;
 
               const title = (m.metadata?.title || m.title || "").toLowerCase();
               if (title.includes("up")) upMarket = m;
@@ -253,29 +204,60 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
 
             if (!upMarket || !downMarket) continue;
 
-            // Get prices — in micro-USD (divide by 1M)
-            const upYes = Number(upMarket.pricing?.buyYesPriceUsd || 0) / 1_000_000;
-            const downYes = Number(downMarket.pricing?.buyYesPriceUsd || 0) / 1_000_000;
+            const upBuyYes = Number(upMarket.pricing?.buyYesPriceUsd || 0) / 1_000_000;
+            const downBuyYes = Number(downMarket.pricing?.buyYesPriceUsd || 0) / 1_000_000;
+            const upSellYes = Number(upMarket.pricing?.sellYesPriceUsd || 0) / 1_000_000;
+            const downSellYes = Number(downMarket.pricing?.sellYesPriceUsd || 0) / 1_000_000;
 
-            if (upYes <= 0 || downYes <= 0) continue;
+            if (upBuyYes <= 0 || downBuyYes <= 0) continue;
 
-            // The arb: buy YES on Up + YES on Down. One MUST resolve YES.
-            // Total cost = upYes + downYes. Payout = $1. Spread = 1 - totalCost.
-            const totalCost = upYes + downYes;
-            const spread = 1 - totalCost;
             const closeTime = Number(upMarket.closeTime || upMarket.metadata?.closeTime || 0);
-            const remaining = closeTime ? Math.round((closeTime - now) / 60) : 0;
             const eventTitle = event.metadata?.title || event.title || `${coin.toUpperCase()} ${interval}`;
 
-            // Create a synthetic market combining both sides
+            // ── Split & Sell: sellYes(Up) + sellYes(Down) > $1 ──
+            if (upSellYes > 0 && downSellYes > 0) {
+              const splitSpread = upSellYes + downSellYes - 1;
+              if (splitSpread > -0.05) { // Log near-misses too
+                console.log(
+                  `[SPLIT-SCAN] ${eventTitle} | sellUp=$${upSellYes.toFixed(4)} sellDown=$${downSellYes.toFixed(4)} ` +
+                  `sum=${(upSellYes + downSellYes).toFixed(4)} spread=${(splitSpread * 100).toFixed(2)}%`
+                );
+              }
+              if (splitSpread > 0) {
+                const splitMarket: JupMarket = {
+                  marketId: upMarket.marketId,
+                  eventId: event.eventId || "",
+                  title: `[SPLIT] ${eventTitle} [sellUp=$${upSellYes.toFixed(3)} sellDown=$${downSellYes.toFixed(3)}]`,
+                  status: "open",
+                  yesPrice: upBuyYes,
+                  noPrice: downBuyYes,
+                  spread: 0,
+                  category: "crypto",
+                  endDate: toIsoFromUnix(closeTime),
+                  volume: Number(upMarket.pricing?.volume || 0) + Number(downMarket.pricing?.volume || 0),
+                  platform: "jupiter_predict",
+                  closeTime: closeTime || null,
+                  openTime: Number(upMarket.openTime || 0) || null,
+                  sellYesPrice: upSellYes,
+                  sellNoPrice: downSellYes,
+                  splitSpread,
+                };
+                (splitMarket as any).downMarketId = downMarket.marketId;
+                allMarkets.push(splitMarket);
+              }
+            }
+
+            // ── Merge: buyYes(Up) + buyYes(Down) < $1 ──
+            const totalCost = upBuyYes + downBuyYes;
+            const spread = 1 - totalCost;
+
             const market: JupMarket = {
-              // Use Up market ID as primary (we'll need both for execution)
               marketId: upMarket.marketId,
               eventId: event.eventId || "",
-              title: `${eventTitle} [Up=$${upYes.toFixed(2)} Down=$${downYes.toFixed(2)}]`,
+              title: `${eventTitle} [Up=$${upBuyYes.toFixed(2)} Down=$${downBuyYes.toFixed(2)}]`,
               status: "open",
-              yesPrice: upYes,    // Up YES price
-              noPrice: downYes,   // Down YES price (our "other side")
+              yesPrice: upBuyYes,
+              noPrice: downBuyYes,
               spread,
               category: "crypto",
               endDate: toIsoFromUnix(closeTime),
@@ -283,14 +265,12 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
               platform: "jupiter_predict",
               closeTime: closeTime || null,
               openTime: Number(upMarket.openTime || 0) || null,
-              sellYesPrice: 0,
-              sellNoPrice: 0,
-              splitSpread: 0,
+              sellYesPrice: upSellYes,
+              sellNoPrice: downSellYes,
+              splitSpread: (upSellYes > 0 && downSellYes > 0) ? (upSellYes + downSellYes - 1) : 0,
             };
 
-            // Store the Down market ID for execution (we need both)
             (market as any).downMarketId = downMarket.marketId;
-
             allMarkets.push(market);
           }
         } catch (err) {
@@ -606,12 +586,13 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
 async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
   const { market, netProfit } = opp;
   const contracts = Math.floor(CONFIG.ARB_AMOUNT);
+  const downMarketId = (market as any).downMarketId || market.marketId;
 
   console.log(`\n[SPLIT] ═══ EXECUTING SPLIT & SELL ══════════════════`);
-  console.log(`[SPLIT] Market: ${market.title}`);
-  console.log(`[SPLIT] Sell YES=$${market.sellYesPrice.toFixed(4)} + Sell NO=$${market.sellNoPrice.toFixed(4)} = ${(market.sellYesPrice + market.sellNoPrice).toFixed(4)}`);
+  console.log(`[SPLIT] Event: ${market.title}`);
+  console.log(`[SPLIT] Sell YES(Up)=$${market.sellYesPrice.toFixed(4)} + Sell YES(Down)=$${market.sellNoPrice.toFixed(4)} = ${(market.sellYesPrice + market.sellNoPrice).toFixed(4)}`);
   console.log(`[SPLIT] Split spread: ${(market.splitSpread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
-  console.log(`[SPLIT] Collateral: $${CONFIG.ARB_AMOUNT} → ${contracts} YES + ${contracts} NO → sell both`);
+  console.log(`[SPLIT] Up market: ${market.marketId} | Down market: ${downMarketId}`);
 
   if (market.platform === "dflow") {
     console.log(`[SPLIT] 📊 DFlow opportunity logged (execution not yet supported)`);
@@ -623,9 +604,9 @@ async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
     .from("arb_opportunities")
     .insert({
       market_a_id: market.marketId,
-      market_b_id: market.marketId,
-      side_a: "sell_yes",
-      side_b: "sell_no",
+      market_b_id: downMarketId,
+      side_a: "sell_up_yes",
+      side_b: "sell_down_yes",
       price_a: market.sellYesPrice,
       price_b: market.sellNoPrice,
       spread: market.splitSpread,
@@ -640,19 +621,19 @@ async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
     const priorityFee = await getOptimalPriorityFee();
     console.log(`[FEE] Dynamic priority fee: ${priorityFee} microlamports/CU`);
 
-    // Get sell transactions for both YES and NO
-    const [sellYesTxRaw, sellNoTxRaw] = await Promise.all([
+    // Sell YES on Up market + Sell YES on Down market
+    const [sellUpTxRaw, sellDownTxRaw] = await Promise.all([
       getSellQuote(market.marketId, true, contracts, market.sellYesPrice),
-      getSellQuote(market.marketId, false, contracts, market.sellNoPrice),
+      getSellQuote(downMarketId, true, contracts, market.sellNoPrice),
     ]);
 
-    if (!sellYesTxRaw || !sellNoTxRaw) {
+    if (!sellUpTxRaw || !sellDownTxRaw) {
       console.log("[SPLIT] ⚠️  Could not get sell quotes — prices moved or region blocked");
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
           status: "failed",
-          error_message: `Sell quote failed: yes=${!!sellYesTxRaw} no=${!!sellNoTxRaw}`,
+          error_message: `Sell quote failed: up=${!!sellUpTxRaw} down=${!!sellDownTxRaw}`,
         });
         await supabase.from("arb_opportunities").update({ status: "expired" }).eq("id", oppId);
       }
@@ -661,13 +642,13 @@ async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
     }
 
     // Sign and submit as atomic Jito bundle
-    const [sellYesTx, sellNoTx] = await Promise.all([
-      buildAndSign(sellYesTxRaw),
-      buildAndSign(sellNoTxRaw),
+    const [sellUpTx, sellDownTx] = await Promise.all([
+      buildAndSign(sellUpTxRaw),
+      buildAndSign(sellDownTxRaw),
     ]);
 
-    console.log("[JITO] Submitting Sell YES + Sell NO as atomic Jito bundle...");
-    const bundleResult = await sendJitoBundle([sellYesTx, sellNoTx]);
+    console.log("[JITO] Submitting Sell YES(Up) + Sell YES(Down) as atomic Jito bundle...");
+    const bundleResult = await sendJitoBundle([sellUpTx, sellDownTx]);
     marketCooldowns.set(market.marketId, Date.now());
 
     if (bundleResult) {
