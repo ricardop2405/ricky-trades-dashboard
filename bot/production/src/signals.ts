@@ -175,7 +175,7 @@ function estimateProfitUsd(entryAmount: number, exitAmount: number): number {
 
 export async function findSpreadOpportunities(onSignal: SignalCallback): Promise<ScanResult[]> {
   const results: ScanResult[] = [];
-  const prodSizes = [10_000_000, 25_000_000, 50_000_000]; // $10, $25, $50
+  const prodSizes = [5_000_000, 10_000_000, 25_000_000, 50_000_000]; // $5, $10, $25, $50
 
   for (const token of ALL_SCAN_TOKENS) {
     try {
@@ -219,22 +219,31 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
         });
       }
 
-      // Also try larger sizes for bigger absolute profit
       for (const size of prodSizes) {
         if (size === probeAmount) continue; // Already handled above
         try {
           const buyQ = await getJupiterQuote(USDC_MINT, token.mint, size, 30);
-          if (!buyQ) continue;
+          if (!buyQ) {
+            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size/1e6}: buy quote failed`);
+            continue;
+          }
 
           const sellQ = await getJupiterQuote(token.mint, USDC_MINT, Number(buyQ.outAmount), 30);
-          if (!sellQ) continue;
+          if (!sellQ) {
+            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size/1e6}: sell quote failed`);
+            continue;
+          }
 
           const exitAmount = Number(sellQ.outAmount);
           const ratio = exitAmount / size;
-          if (ratio > 2 || ratio < 0.7) continue;
+          if (ratio > 2 || ratio < 0.7) {
+            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size/1e6}: bad ratio ${ratio.toFixed(4)}`);
+            continue;
+          }
 
           const profitUsd = estimateProfitUsd(size, exitAmount);
           if (profitUsd >= CONFIG.MIN_PROFIT) {
+            console.log(`[SPREAD] ✓ ${token.symbol} $${size/1e6}: profit=$${profitUsd.toFixed(4)}`);
             results.push({
               route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
               legs: 2,
@@ -245,6 +254,8 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
               entryRaw: size,
               strategy: "spread",
             });
+          } else {
+            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size/1e6}: profit=$${profitUsd.toFixed(4)} < min=$${CONFIG.MIN_PROFIT}`);
           }
         } catch {
           continue;
