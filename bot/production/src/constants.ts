@@ -104,6 +104,13 @@ export const MEMECOIN_TOKENS: { mint: string; symbol: string }[] = [
   { mint: "FUAfBo2jgks6gB4Z4LfZkqSZgzNucisEHqnNebaRxM1P", symbol: "FARTCOIN" },
   { mint: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", symbol: "WBTC" },
   { mint: "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4", symbol: "JLP" },
+  { mint: "DriFtupJYLTosbwoN8koMbEYSx54aFAVLddWsbksjwg7", symbol: "DRIFT" },
+  { mint: "EPeUFDgHRxs9xxEPVaL6kfGQvCon7jmAWKVUHuux1Tpz", symbol: "BAL" },
+  { mint: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", symbol: "SAMO" },
+  { mint: "DUSTawucrTsGU8hcqRdHDCbuYhCPADMLM2VcCb8VnFnQ", symbol: "DUST" },
+  { mint: "kinXdEcpDQeHPEuQnqmUg5YhzDMUCKWLYUZKz4j5iPo", symbol: "KIN" },
+  { mint: "nosXBVoaCTtYdLvKY6Csb4AC8JCdQKKAaWYtx2ZMoo7", symbol: "NOS" },
+  { mint: "METAewgxyPbgwsseH8T16a39CQ5VyVxZi9zXiDPY18m", symbol: "MPLX" },
 ];
 
 // All tokens combined for scanning

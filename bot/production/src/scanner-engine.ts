@@ -32,6 +32,7 @@ import {
   startWhaleMonitor,
   findSpreadOpportunities,
   findDepegOpportunities,
+  findSolIntermediaryOpportunities,
 } from "./signals";
 import { sleep } from "./utils";
 
@@ -54,6 +55,7 @@ let total3Leg = 0;
 let totalCrossStable = 0;
 let totalSpread = 0;
 let totalDepeg = 0;
+let totalSolTri = 0;
 let totalNearMisses = 0;
 let totalOpportunities = 0;
 let totalBundlesSent = 0;
@@ -402,6 +404,7 @@ async function startScanner() {
 
   console.log(`[SCANNER] ${ALL_SCAN_TOKENS.length} tokens (${ARB_INTERMEDIATE_TOKENS.length} blue-chip + ${ALL_SCAN_TOKENS.length - ARB_INTERMEDIATE_TOKENS.length} memecoin)`);
   console.log(`[SCANNER] Strategies: spread-scan, depeg-scan, whale-signal, direct, dex-diff, cross-stable, 3leg`);
+  console.log(`[SCANNER] + SOL-intermediary triangular scan`);
   console.log(`[SCANNER] ${allPairs.length} triangular pairs | Batch: ${batchSize}`);
   console.log(`[SCANNER] Entry sizes: ${ENTRY_SIZES_USDC.map((a) => `$${a / 1e6}`).join(", ")}`);
   console.log(`[SCANNER] Interval: ${CONFIG.SCANNER_INTERVAL_MS}ms`);
@@ -443,6 +446,21 @@ async function startScanner() {
       console.error(`[DEPEG] Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, 10_000); // Every 10s
+
+  // SOL-intermediary triangular scan every 20s
+  setInterval(async () => {
+    try {
+      const solTriResults = await findSolIntermediaryOpportunities(onSignal);
+      if (solTriResults.length > 0) {
+        totalSolTri += solTriResults.length;
+        solTriResults.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
+        console.log(`[SOL-TRI] Found ${solTriResults.length} opp(s), best: $${solTriResults[0].estimatedProfit.toFixed(4)}`);
+        await executeOpportunity(solTriResults[0]);
+      }
+    } catch (e) {
+      console.error(`[SOL-TRI] Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, 20_000);
 
   // Initial spread + depeg scan
   findSpreadOpportunities(onSignal).then((r) => {
@@ -566,5 +584,8 @@ startScanner();
 setInterval(() => {
   console.log(
     `[HEARTBEAT] ${new Date().toISOString()} | scans=${totalScans} | whale=${totalWhaleSignals} spread=${totalSpreadSignals}(${totalSpread} exec) depeg=${totalDepegSignals}(${totalDepeg} exec) | direct=${totalDirect} | dexDiff=${totalDexDiff} | 3leg=${total3Leg} | xstable=${totalCrossStable} | nearMiss=${totalNearMisses} | opps=${totalOpportunities} | bundles=${totalBundlesSent} | profit=$${totalProfit.toFixed(4)}`
+  );
+  console.log(
+    `[HEARTBEAT] solTri=${totalSolTri}`
   );
 }, 60_000);
