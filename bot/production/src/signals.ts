@@ -22,6 +22,7 @@ import { getJupiterQuote, ScanResult } from "./scanner-strategies";
 import { getTokenName } from "./utils";
 
 const SOL_MINT_LOCAL = "So11111111111111111111111111111111111111112";
+const SPREAD_SCAN_TOKENS = ALL_SCAN_TOKENS.filter((token) => !token.symbol.match(/^(POPCAT|MEW|BOME|MOTHER|MOODENG|PNUT|GIGA|TRUMP|AI16Z|GRASS|FARTCOIN|SAMO|DUST|KIN|NOS)$/));
 
 const SUPPORTED_SIGNAL_MINTS = new Set(ALL_SCAN_TOKENS.map((token) => token.mint));
 
@@ -190,7 +191,7 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
   const probeThresholdUsd = executionFloorUsd * 0.4;
   const executionSizes = [...ENTRY_SIZES_USDC].sort((a, b) => a - b);
 
-  for (const token of ALL_SCAN_TOKENS) {
+  for (const token of SPREAD_SCAN_TOKENS) {
     try {
       const tokenResults: ScanResult[] = [];
 
