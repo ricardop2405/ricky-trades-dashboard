@@ -178,6 +178,18 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
   return null;
 }
 
+function getScannerExecutionFloorUsd(): number {
+  return Math.max(CONFIG.MIN_PROFIT, CONFIG.SCANNER_MIN_PROFIT);
+}
+
+function applyScannerCooldown(ms: number, reason: string) {
+  const until = Date.now() + ms;
+  if (until > jupiterCooldownUntil) {
+    jupiterCooldownUntil = until;
+  }
+  console.log(`[SCANNER] Cooling down for ${Math.ceil(ms / 1000)}s after ${reason}`);
+}
+
 async function submitJitoBundle(result: ScanResult): Promise<{
   success: boolean;
   bundleId?: string;
@@ -273,6 +285,14 @@ async function executeOpportunity(result: ScanResult) {
   if (executionInFlight) return;
   if (Date.now() < jupiterCooldownUntil) return;
 
+  const executionFloorUsd = getScannerExecutionFloorUsd();
+  if (result.estimatedProfit < executionFloorUsd) {
+    console.log(
+      `[SCANNER] Skipping ${result.route} | $${result.estimatedProfit.toFixed(4)} below execution floor $${executionFloorUsd.toFixed(4)}`
+    );
+    return;
+  }
+
   executionInFlight = true;
   try {
     const startTime = Date.now();
@@ -325,6 +345,19 @@ async function executeOpportunity(result: ScanResult) {
     if (bundleResult.success) {
       totalProfit += result.estimatedProfit;
       usdcBalanceCache = 0;
+    } else if (bundleResult.pending) {
+      applyScannerCooldown(CONFIG.SCANNER_PENDING_COOLDOWN_MS, "pending bundle status");
+    } else if (bundleResult.error) {
+      const normalizedError = bundleResult.error.toLowerCase();
+      if (
+        normalizedError.includes("rate limited") ||
+        normalizedError.includes("network congested") ||
+        normalizedError.includes("failed to get swap transactions")
+      ) {
+        applyScannerCooldown(CONFIG.SCANNER_RATE_LIMIT_COOLDOWN_MS, bundleResult.error);
+      } else if (normalizedError.includes("vote accounts")) {
+        applyScannerCooldown(CONFIG.SCANNER_PENDING_COOLDOWN_MS, bundleResult.error);
+      }
     }
 
     await supabase.from("bundle_results").insert(outcome);

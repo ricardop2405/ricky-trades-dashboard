@@ -55,6 +55,9 @@ export const CONFIG = {
   SCANNER_INTERVAL_MS: parseInt(process.env.SCANNER_INTERVAL_MS || "6000"),
   SCANNER_BATCH_SIZE: parseInt(process.env.SCANNER_BATCH_SIZE || "8"), // pairs per batch
   SCANNER_ENTRY_USDC: parseInt(process.env.SCANNER_ENTRY_USDC || "50000000"), // 50 USDC
+  SCANNER_MIN_PROFIT: parseFloat(process.env.SCANNER_MIN_PROFIT || "0.08"),
+  SCANNER_RATE_LIMIT_COOLDOWN_MS: parseInt(process.env.SCANNER_RATE_LIMIT_COOLDOWN_MS || "30000"),
+  SCANNER_PENDING_COOLDOWN_MS: parseInt(process.env.SCANNER_PENDING_COOLDOWN_MS || "45000"),
 
   // ── Limitless (Base Chain) ────────────────────────────
   LIMITLESS_OWNER_ID: Number(process.env.LIMITLESS_OWNER_ID || 0),
