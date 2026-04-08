@@ -278,66 +278,68 @@ async function executeOpportunity(result: ScanResult) {
   if (Date.now() < jupiterCooldownUntil) return;
 
   executionInFlight = true;
-  const startTime = Date.now();
-  totalOpportunities++;
+  try {
+    const startTime = Date.now();
+    totalOpportunities++;
 
-  // Pause to let Jupiter rate limits recover from scanning
-  await sleep(1500);
+    await sleep(1500);
 
-  console.log(
-    `[SCANNER] 🎯 ${result.strategy} | ${result.route} | $${result.entryAmount} → $${result.exitAmount.toFixed(4)} | profit: $${result.estimatedProfit.toFixed(4)}`
-  );
+    console.log(
+      `[SCANNER] 🎯 ${result.strategy} | ${result.route} | $${result.entryAmount} → $${result.exitAmount.toFixed(4)} | profit: $${result.estimatedProfit.toFixed(4)}`
+    );
 
-  const balance = await getUsdcBalance();
-  if (balance < result.entryRaw) {
-    console.warn(`[SCANNER] Insufficient USDC: ${balance / 1e6} < ${result.entryRaw / 1e6}`);
-    return;
-  }
+    const balance = await getUsdcBalance();
+    if (balance < result.entryRaw) {
+      console.warn(`[SCANNER] Insufficient USDC: ${balance / 1e6} < ${result.entryRaw / 1e6}`);
+      return;
+    }
 
-  if (CONFIG.MEV_DRY_RUN) {
-    console.log(`[DRY-RUN] Would submit: ${result.route} | $${result.estimatedProfit.toFixed(4)}`);
-    await supabase.from("bundle_results").insert({
+    if (CONFIG.MEV_DRY_RUN) {
+      console.log(`[DRY-RUN] Would submit: ${result.route} | $${result.estimatedProfit.toFixed(4)}`);
+      await supabase.from("bundle_results").insert({
+        route: result.route,
+        entry_amount: result.entryAmount,
+        exit_amount: result.exitAmount,
+        profit: result.estimatedProfit,
+        jito_tip: CONFIG.JITO_TIP / LAMPORTS_PER_SOL,
+        status: "dry_run",
+        tx_signature: null,
+        trigger_tx: `scan_${result.strategy}_${Date.now()}`,
+        latency_ms: Date.now() - startTime,
+      });
+      return;
+    }
+
+    totalBundlesSent++;
+    const bundleResult = await submitJitoBundle(result);
+    const latencyMs = Date.now() - startTime;
+
+    const outcome = {
       route: result.route,
       entry_amount: result.entryAmount,
-      exit_amount: result.exitAmount,
-      profit: result.estimatedProfit,
+      exit_amount: bundleResult.success ? result.exitAmount : result.entryAmount,
+      profit: bundleResult.success ? result.estimatedProfit : 0,
       jito_tip: CONFIG.JITO_TIP / LAMPORTS_PER_SOL,
-      status: "dry_run",
-      tx_signature: null,
+      status: bundleResult.success ? "success" : "reverted",
+      tx_signature: bundleResult.bundleId || null,
       trigger_tx: `scan_${result.strategy}_${Date.now()}`,
-      latency_ms: Date.now() - startTime,
-    });
-    return;
+      latency_ms: latencyMs,
+    };
+
+    if (bundleResult.success) {
+      totalProfit += result.estimatedProfit;
+      usdcBalanceCache = 0;
+    }
+
+    await supabase.from("bundle_results").insert(outcome);
+    console.log(
+      `[BUNDLE] ${outcome.status.toUpperCase()} | ${result.route} | $${outcome.profit.toFixed(4)} | ${latencyMs}ms${
+        bundleResult.error ? ` | ${bundleResult.error}` : ""
+      }`
+    );
+  } finally {
+    executionInFlight = false;
   }
-
-  totalBundlesSent++;
-  const bundleResult = await submitJitoBundle(result);
-  const latencyMs = Date.now() - startTime;
-
-  const outcome = {
-    route: result.route,
-    entry_amount: result.entryAmount,
-    exit_amount: bundleResult.success ? result.exitAmount : result.entryAmount,
-    profit: bundleResult.success ? result.estimatedProfit : 0,
-    jito_tip: CONFIG.JITO_TIP / LAMPORTS_PER_SOL,
-    status: bundleResult.success ? "success" : "reverted",
-    tx_signature: bundleResult.bundleId || null,
-    trigger_tx: `scan_${result.strategy}_${Date.now()}`,
-    latency_ms: latencyMs,
-  };
-
-  if (bundleResult.success) {
-    totalProfit += result.estimatedProfit;
-    usdcBalanceCache = 0;
-  }
-
-  await supabase.from("bundle_results").insert(outcome);
-  console.log(
-    `[BUNDLE] ${outcome.status.toUpperCase()} | ${result.route} | $${outcome.profit.toFixed(4)} | ${latencyMs}ms${
-      bundleResult.error ? ` | ${bundleResult.error}` : ""
-    }`
-  );
-  executionInFlight = false;
 }
 
 // ── Whale signal scan ───────────────────────────────────
