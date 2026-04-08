@@ -421,14 +421,11 @@ async function startScanner() {
     strategyRotation++;
 
     if (strategy === 0) {
-      const directBatch: Promise<{ result: ScanResult | null; nearMiss?: { route: string; profitUsd: number; entryUsd: number } }>[] = [];
-      for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
+      // Sequential instead of parallel to avoid rate limiting Jupiter
+      for (let i = 0; i < Math.min(3, ALL_SCAN_TOKENS.length); i++) {
         const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
         tokenIndex++;
-        directBatch.push(scanDirectWithNearMiss(token.mint, token.symbol, entryAmount));
-      }
-      const directResults = await Promise.all(directBatch);
-      for (const { result, nearMiss } of directResults) {
+        const { result, nearMiss } = await scanDirectWithNearMiss(token.mint, token.symbol, entryAmount);
         if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
           totalDirect++;
           allResults.push(result);
@@ -440,42 +437,30 @@ async function startScanner() {
         }
       }
     } else if (strategy === 1) {
-      const dexBatch: Promise<ScanResult | null>[] = [];
-      for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
+      for (let i = 0; i < Math.min(3, ALL_SCAN_TOKENS.length); i++) {
         const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
         tokenIndex++;
-        dexBatch.push(scanDexDifferential(token.mint, token.symbol, entryAmount, getDexPair(dexPairIndex++)));
-      }
-      const dexResults = await Promise.all(dexBatch);
-      for (const result of dexResults) {
+        const result = await scanDexDifferential(token.mint, token.symbol, entryAmount, getDexPair(dexPairIndex++));
         if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
           totalDexDiff++;
           allResults.push(result);
         }
       }
     } else if (strategy === 2) {
-      const crossBatch: Promise<ScanResult | null>[] = [];
-      for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
+      for (let i = 0; i < Math.min(3, ALL_SCAN_TOKENS.length); i++) {
         const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
         tokenIndex++;
-        crossBatch.push(scanCrossStable(token.mint, token.symbol, entryAmount));
-      }
-      const crossResults = await Promise.all(crossBatch);
-      for (const result of crossResults) {
+        const result = await scanCrossStable(token.mint, token.symbol, entryAmount);
         if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
           totalCrossStable++;
           allResults.push(result);
         }
       }
     } else {
-      const triBatch: Promise<ScanResult | null>[] = [];
-      for (let i = 0; i < batchSize; i++) {
+      for (let i = 0; i < 3; i++) {
         const pair = allPairs[pairIndex % allPairs.length];
         pairIndex++;
-        triBatch.push(scan3Leg(pair.tokenA, pair.symbolA, pair.tokenB, pair.symbolB, entryAmount));
-      }
-      const triResults = await Promise.all(triBatch);
-      for (const result of triResults) {
+        const result = await scan3Leg(pair.tokenA, pair.symbolA, pair.tokenB, pair.symbolB, entryAmount);
         if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
           total3Leg++;
           allResults.push(result);
