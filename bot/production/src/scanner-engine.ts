@@ -26,6 +26,7 @@ import {
   scanDexDifferential,
   scanDirect,
   scanDirectWithNearMiss,
+  getJupiterQuote,
 } from "./scanner-strategies";
 import {
   Signal,
@@ -464,6 +465,20 @@ async function startScanner() {
       console.error(`[SPREAD] Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, 12_000); // Every 12s
+
+  // Offset second spread scan for double coverage
+  setTimeout(() => {
+    setInterval(async () => {
+      try {
+        const spreadResults = await findSpreadOpportunities(onSignal);
+        if (spreadResults.length > 0) {
+          totalSpread += spreadResults.length;
+          spreadResults.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
+          await executeOpportunity(spreadResults[0]);
+        }
+      } catch {}
+    }, 12_000);
+  }, 6_000);
 
   setInterval(async () => {
     try {

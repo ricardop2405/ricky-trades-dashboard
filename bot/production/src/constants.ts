@@ -136,7 +136,7 @@ export function generateScanPairs(): { tokenA: string; symbolA: string; tokenB: 
 }
 
 // Multiple entry sizes to find opportunities at different scales
-export const ENTRY_SIZES_USDC = [25_000_000, 50_000_000];
+export const ENTRY_SIZES_USDC = [10_000_000, 25_000_000, 50_000_000];
 
 export const JITO_TIP_ACCOUNTS = [
   "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
