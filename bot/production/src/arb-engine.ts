@@ -445,7 +445,65 @@ async function getExactOutQuote(
   }
 }
 
-// ── Build & Sign Transaction ────────────────────────────
+// ── Sell Order (for Split & Sell strategy) ───────────────
+async function getSellQuote(
+  marketId: string,
+  isYes: boolean,
+  contracts: number,
+  limitPrice: number,
+): Promise<string | null> {
+  try {
+    const body = {
+      ownerPubkey: WALLET,
+      marketId,
+      isYes,
+      isBuy: false,
+      contracts,
+    };
+
+    console.log(
+      `[JUP] Sell: ${isYes ? "YES" : "NO"} market=${marketId.slice(0, 12)}... ` +
+      `${contracts} contracts @ limit $${limitPrice.toFixed(4)}`
+    );
+
+    const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
+      method: "POST",
+      headers: jupHeaders(),
+      body: JSON.stringify(body),
+    });
+
+    const rawText = await res.text();
+    if (!res.ok) {
+      if (rawText.includes("unsupported_region")) {
+        console.error("[JUP] ❌ REGION BLOCKED on sell order — need PROXY_URL");
+      } else {
+        console.error(`[JUP] Sell error ${res.status}: ${rawText.slice(0, 500)}`);
+      }
+      return null;
+    }
+
+    let data: any;
+    try { data = JSON.parse(rawText); } catch { return null; }
+
+    // Verify sell price meets our minimum
+    if (data.minSellPriceUsd) {
+      const minFillPrice = Number(data.minSellPriceUsd) / 1_000_000;
+      if (minFillPrice < limitPrice * 0.98) { // 2% tolerance
+        console.error(
+          `[JUP] ❌ Sell fill $${minFillPrice.toFixed(4)} below limit $${limitPrice.toFixed(4)} — skipping`
+        );
+        return null;
+      }
+      console.log(`[JUP] ✅ Sell fill: $${minFillPrice.toFixed(4)} (within limit)`);
+    }
+
+    return data.transaction || null;
+  } catch (err) {
+    console.error("[JUP] Sell quote error:", err);
+    return null;
+  }
+}
+
 async function buildAndSign(base64Tx: string): Promise<VersionedTransaction> {
   const txBuf = Buffer.from(base64Tx, "base64");
   const tx = VersionedTransaction.deserialize(txBuf);
