@@ -3,11 +3,21 @@ import { CONFIG } from "./config";
 import { MEMECOIN_TOKENS, SOL_MINT, USDC_MINT, USDT_MINT } from "./constants";
 
 const MEMECOIN_MINTS = new Set(MEMECOIN_TOKENS.map((token) => token.mint));
-const JUPITER_QUOTE_ENDPOINTS = [
-  "https://lite-api.jup.ag/swap/v1/quote",
-  "https://api.jup.ag/swap/v1/quote",
-  "https://quote-api.jup.ag/v6/quote",
-] as const;
+
+// Use paid endpoint first if API key is available, then free fallbacks
+function getQuoteEndpoints(): string[] {
+  if (CONFIG.JUPITER_API_KEY) {
+    return [
+      "https://api.jup.ag/swap/v1/quote",
+      "https://lite-api.jup.ag/swap/v1/quote",
+    ];
+  }
+  return [
+    "https://lite-api.jup.ag/swap/v1/quote",
+    "https://api.jup.ag/swap/v1/quote",
+    "https://quote-api.jup.ag/v6/quote",
+  ];
+}
 
 export interface ScanResult {
   route: string;
@@ -64,17 +74,22 @@ export const DEX_ARB_PAIRS: DexPair[] = [
 
 async function fetchQuoteWithFallbacks(urlSuffix: string): Promise<{ data: any | null; endpoint?: string; reason?: string }> {
   let lastReason = "unknown";
+  const endpoints = getQuoteEndpoints();
+  const headers: Record<string, string> = {
+    "User-Agent": "ricky-trades-scanner/1.0",
+  };
+  if (CONFIG.JUPITER_API_KEY) {
+    headers["x-api-key"] = CONFIG.JUPITER_API_KEY;
+  }
 
-  for (const endpoint of JUPITER_QUOTE_ENDPOINTS) {
+  for (const endpoint of endpoints) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2500);
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
         const res = await fetch(`${endpoint}?${urlSuffix}`, {
           signal: controller.signal,
-          headers: {
-            "User-Agent": "ricky-trades-scanner/1.0",
-          },
+          headers,
         });
         clearTimeout(timeoutId);
 

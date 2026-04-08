@@ -124,9 +124,8 @@ async function getUsdcBalance(): Promise<number> {
 
 // ── Jito bundle submission ──────────────────────────────
 const SWAP_ENDPOINTS = [
-  "https://lite-api.jup.ag/swap/v1/swap",
-  "https://quote-api.jup.ag/v6/swap",
   "https://api.jup.ag/swap/v1/swap",
+  "https://lite-api.jup.ag/swap/v1/swap",
 ];
 
 async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
@@ -147,6 +146,7 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
           headers: {
             "Content-Type": "application/json",
             "User-Agent": "ricky-trades-scanner/1.0",
+            ...(CONFIG.JUPITER_API_KEY ? { "x-api-key": CONFIG.JUPITER_API_KEY } : {}),
           },
           body,
         });
