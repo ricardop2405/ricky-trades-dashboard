@@ -113,6 +113,7 @@ interface ArbOpportunity {
   grossProfit: number;
   fees: number;
   netProfit: number;
+  strategy: "merge" | "split_sell";
 }
 
 // ── Dynamic Priority Fees (Helius) ──────────────────────
