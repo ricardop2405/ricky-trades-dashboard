@@ -53,6 +53,13 @@ export const CONFIG = {
   MAX_GET_TX_RETRIES: parseInt(process.env.MAX_GET_TX_RETRIES || "3"),
   RATE_LIMIT_BACKOFF_MS: parseInt(process.env.RATE_LIMIT_BACKOFF_MS || "2000"),
 
+  // ── Pump.fun Migration Sniper ───────────────────────────
+  MIGRATION_ENTRY_USDC: parseInt(process.env.MIGRATION_ENTRY_USDC || "10000000"), // $10 USDC — conservative start
+  MIGRATION_SELL_DELAY_MS: parseInt(process.env.MIGRATION_SELL_DELAY_MS || "2000"), // wait for Jupiter indexing
+  MIGRATION_MAX_SLIPPAGE_BPS: parseInt(process.env.MIGRATION_MAX_SLIPPAGE_BPS || "500"), // 5% — new pools are volatile
+  MIGRATION_JITO_TIP: parseInt(process.env.MIGRATION_JITO_TIP || "50000"), // 50k lamports — aggressive tip for slot priority
+  MIGRATION_COOLDOWN_MS: parseInt(process.env.MIGRATION_COOLDOWN_MS || "5000"), // 5s between snipes
+
   // ── Continuous Scanner ─────────────────────────────────
   SCANNER_ENABLED: process.env.SCANNER_ENABLED !== "false", // default true
   SCANNER_INTERVAL_MS: parseInt(process.env.SCANNER_INTERVAL_MS || "1500"),
