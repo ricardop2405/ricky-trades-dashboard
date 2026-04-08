@@ -586,12 +586,13 @@ async function executeArb(opp: ArbOpportunity): Promise<void> {
 async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
   const { market, netProfit } = opp;
   const contracts = Math.floor(CONFIG.ARB_AMOUNT);
+  const downMarketId = (market as any).downMarketId || market.marketId;
 
   console.log(`\n[SPLIT] ═══ EXECUTING SPLIT & SELL ══════════════════`);
-  console.log(`[SPLIT] Market: ${market.title}`);
-  console.log(`[SPLIT] Sell YES=$${market.sellYesPrice.toFixed(4)} + Sell NO=$${market.sellNoPrice.toFixed(4)} = ${(market.sellYesPrice + market.sellNoPrice).toFixed(4)}`);
+  console.log(`[SPLIT] Event: ${market.title}`);
+  console.log(`[SPLIT] Sell YES(Up)=$${market.sellYesPrice.toFixed(4)} + Sell YES(Down)=$${market.sellNoPrice.toFixed(4)} = ${(market.sellYesPrice + market.sellNoPrice).toFixed(4)}`);
   console.log(`[SPLIT] Split spread: ${(market.splitSpread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
-  console.log(`[SPLIT] Collateral: $${CONFIG.ARB_AMOUNT} → ${contracts} YES + ${contracts} NO → sell both`);
+  console.log(`[SPLIT] Up market: ${market.marketId} | Down market: ${downMarketId}`);
 
   if (market.platform === "dflow") {
     console.log(`[SPLIT] 📊 DFlow opportunity logged (execution not yet supported)`);
@@ -603,9 +604,9 @@ async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
     .from("arb_opportunities")
     .insert({
       market_a_id: market.marketId,
-      market_b_id: market.marketId,
-      side_a: "sell_yes",
-      side_b: "sell_no",
+      market_b_id: downMarketId,
+      side_a: "sell_up_yes",
+      side_b: "sell_down_yes",
       price_a: market.sellYesPrice,
       price_b: market.sellNoPrice,
       spread: market.splitSpread,
@@ -620,19 +621,19 @@ async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
     const priorityFee = await getOptimalPriorityFee();
     console.log(`[FEE] Dynamic priority fee: ${priorityFee} microlamports/CU`);
 
-    // Get sell transactions for both YES and NO
-    const [sellYesTxRaw, sellNoTxRaw] = await Promise.all([
+    // Sell YES on Up market + Sell YES on Down market
+    const [sellUpTxRaw, sellDownTxRaw] = await Promise.all([
       getSellQuote(market.marketId, true, contracts, market.sellYesPrice),
-      getSellQuote(market.marketId, false, contracts, market.sellNoPrice),
+      getSellQuote(downMarketId, true, contracts, market.sellNoPrice),
     ]);
 
-    if (!sellYesTxRaw || !sellNoTxRaw) {
+    if (!sellUpTxRaw || !sellDownTxRaw) {
       console.log("[SPLIT] ⚠️  Could not get sell quotes — prices moved or region blocked");
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
           status: "failed",
-          error_message: `Sell quote failed: yes=${!!sellYesTxRaw} no=${!!sellNoTxRaw}`,
+          error_message: `Sell quote failed: up=${!!sellUpTxRaw} down=${!!sellDownTxRaw}`,
         });
         await supabase.from("arb_opportunities").update({ status: "expired" }).eq("id", oppId);
       }
@@ -641,13 +642,13 @@ async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
     }
 
     // Sign and submit as atomic Jito bundle
-    const [sellYesTx, sellNoTx] = await Promise.all([
-      buildAndSign(sellYesTxRaw),
-      buildAndSign(sellNoTxRaw),
+    const [sellUpTx, sellDownTx] = await Promise.all([
+      buildAndSign(sellUpTxRaw),
+      buildAndSign(sellDownTxRaw),
     ]);
 
-    console.log("[JITO] Submitting Sell YES + Sell NO as atomic Jito bundle...");
-    const bundleResult = await sendJitoBundle([sellYesTx, sellNoTx]);
+    console.log("[JITO] Submitting Sell YES(Up) + Sell YES(Down) as atomic Jito bundle...");
+    const bundleResult = await sendJitoBundle([sellUpTx, sellDownTx]);
     marketCooldowns.set(market.marketId, Date.now());
 
     if (bundleResult) {
