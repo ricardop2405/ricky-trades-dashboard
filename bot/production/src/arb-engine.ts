@@ -341,6 +341,9 @@ async function fetchDFlowCryptoMarkets(): Promise<JupMarket[]> {
         const noPrice = Number(m.noAsk ?? m.noBid ?? 0);
         if (yesPrice <= 0 || noPrice <= 0) continue;
 
+        const sellYes = Number(m.yesBid ?? 0);
+        const sellNo = Number(m.noBid ?? 0);
+
         const market: JupMarket = {
           marketId: m.ticker || m.id,
           eventId: m.eventTicker || event.ticker || "",
@@ -355,6 +358,9 @@ async function fetchDFlowCryptoMarkets(): Promise<JupMarket[]> {
           platform: "dflow",
           closeTime: Number(m.closeTime ?? m.expirationTime ?? 0) || null,
           openTime: Number(m.openTime ?? 0) || null,
+          sellYesPrice: sellYes,
+          sellNoPrice: sellNo,
+          splitSpread: (sellYes > 0 && sellNo > 0) ? (sellYes + sellNo - 1) : 0,
         };
 
         // Simple time check: must close within 16 minutes
