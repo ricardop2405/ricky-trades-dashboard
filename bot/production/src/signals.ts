@@ -179,7 +179,7 @@ function estimateProfitUsd(entryAmount: number, exitAmount: number): number {
 
 export async function findSpreadOpportunities(onSignal: SignalCallback): Promise<ScanResult[]> {
   const results: ScanResult[] = [];
-  const prodSizes = [25_000_000, 50_000_000]; // focus on sizes that can actually clear the profit guardrail
+  const bestSize = 50_000_000; // $50 — our main executable size
 
   for (const token of ALL_SCAN_TOKENS) {
     try {
@@ -215,46 +215,40 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
         });
       }
 
-      for (const size of prodSizes) {
-        if (size === probeAmount) continue; // Already handled above
+      // Only quote at $50 if the probe spread looks promising (negative = profitable)
+      if (spreadPct < 0) {
         try {
-          const buyQ = await getJupiterQuote(USDC_MINT, token.mint, size, 30);
-          if (!buyQ) {
-            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size/1e6}: buy quote failed`);
-            continue;
-          }
+          // Small delay to avoid rate limiting
+          await new Promise((r) => setTimeout(r, 150));
 
-          const sellQ = await getJupiterQuote(token.mint, USDC_MINT, Number(buyQ.outAmount), 30);
-          if (!sellQ) {
-            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size/1e6}: sell quote failed`);
-            continue;
-          }
-
-          const exitAmount = Number(sellQ.outAmount);
-          const ratio = exitAmount / size;
-          if (ratio > 2 || ratio < 0.7) {
-            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size/1e6}: bad ratio ${ratio.toFixed(4)}`);
-            continue;
-          }
-
-          const profitUsd = estimateProfitUsd(size, exitAmount);
-          if (profitUsd >= CONFIG.MIN_PROFIT) {
-            console.log(`[SPREAD] ✓ ${token.symbol} $${size/1e6}: profit=$${profitUsd.toFixed(4)}`);
-            tokenResults.push({
-              route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
-              legs: 2,
-              quotes: [buyQ, sellQ],
-              entryAmount: size / 1_000_000,
-              exitAmount: exitAmount / 1_000_000,
-              estimatedProfit: profitUsd,
-              entryRaw: size,
-              strategy: "spread",
-            });
-          } else {
-            console.log(`[SPREAD-DEBUG] ${token.symbol} $${size/1e6}: profit=$${profitUsd.toFixed(4)} < min=$${CONFIG.MIN_PROFIT}`);
+          const buyQ = await getJupiterQuote(USDC_MINT, token.mint, bestSize, 30);
+          if (buyQ) {
+            const sellQ = await getJupiterQuote(token.mint, USDC_MINT, Number(buyQ.outAmount), 30);
+            if (sellQ) {
+              const exitAmount = Number(sellQ.outAmount);
+              const ratio = exitAmount / bestSize;
+              if (ratio <= 2 && ratio >= 0.7) {
+                const profitUsd = estimateProfitUsd(bestSize, exitAmount);
+                if (profitUsd >= CONFIG.MIN_PROFIT) {
+                  console.log(`[SPREAD] ✓ ${token.symbol} $${bestSize/1e6}: profit=$${profitUsd.toFixed(4)}`);
+                  tokenResults.push({
+                    route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
+                    legs: 2,
+                    quotes: [buyQ, sellQ],
+                    entryAmount: bestSize / 1_000_000,
+                    exitAmount: exitAmount / 1_000_000,
+                    estimatedProfit: profitUsd,
+                    entryRaw: bestSize,
+                    strategy: "spread",
+                  });
+                } else {
+                  console.log(`[SPREAD-DEBUG] ${token.symbol} $${bestSize/1e6}: profit=$${profitUsd.toFixed(4)} < min`);
+                }
+              }
+            }
           }
         } catch {
-          continue;
+          // continue
         }
       }
 
