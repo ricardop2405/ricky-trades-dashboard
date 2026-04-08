@@ -3,11 +3,8 @@
  *
  * Detects market dislocations that create arb opportunities:
  * 1. Whale swaps (large trades that move prices)
- * 2. Spread pulses (buy/sell gap widening on a token)
+ * 2. Spread pulses (buy/sell gap widening — returns executable results)
  * 3. Stablecoin depeg (USDC/USDT drift from 1:1)
- *
- * Signals are emitted to the scanner which then verifies with
- * atomic round-trip quotes before executing.
  */
 
 import { Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
@@ -20,7 +17,7 @@ import {
   USDC_MINT,
   USDT_MINT,
 } from "./constants";
-import { getJupiterQuote } from "./scanner-strategies";
+import { getJupiterQuote, ScanResult } from "./scanner-strategies";
 import { getTokenName } from "./utils";
 
 // ── Signal types ────────────────────────────────────────
@@ -28,7 +25,7 @@ export interface Signal {
   type: "whale" | "spread" | "depeg";
   tokenMint: string;
   tokenSymbol: string;
-  strength: number; // 0-1, higher = more likely profitable
+  strength: number;
   detail: string;
   timestamp: number;
 }
@@ -36,13 +33,7 @@ export interface Signal {
 export type SignalCallback = (signal: Signal) => void;
 
 // ── Whale Signal Monitor ────────────────────────────────
-// Listens to Helius WebSocket for large swaps on DEX programs.
-// When a whale moves a token, prices temporarily shift — that's our window.
 export function startWhaleMonitor(connection: Connection, onSignal: SignalCallback) {
-  const dexProgramIds = Object.values(DEX_PROGRAMS).map((d) => d.id);
-  let wsActive = false;
-  let lastLogTime = 0;
-
   function subscribe() {
     try {
       const wsId = connection.onLogs(
@@ -50,13 +41,11 @@ export function startWhaleMonitor(connection: Connection, onSignal: SignalCallba
         (logInfo) => {
           if (logInfo.err) return;
 
-          // Check if this tx involves a DEX program
           const logs = logInfo.logs.join(" ");
           let matchedDex: string | null = null;
 
           for (const [name, prog] of Object.entries(DEX_PROGRAMS)) {
             if (logs.includes(prog.id)) {
-              // Check for swap instructions
               for (const ix of prog.swapInstructions) {
                 if (logs.includes(ix)) {
                   matchedDex = name;
@@ -68,27 +57,22 @@ export function startWhaleMonitor(connection: Connection, onSignal: SignalCallba
           }
 
           if (!matchedDex) return;
-
-          // We found a DEX swap — enqueue the signature for parsing
-          const sig = logInfo.signature;
-          parseWhaleSwap(connection, sig, matchedDex, onSignal);
+          parseWhaleSwap(connection, logInfo.signature, matchedDex, onSignal);
         },
         "confirmed"
       );
 
-      wsActive = true;
       console.log(`[SIGNALS] Whale monitor active (WebSocket subscription ${wsId})`);
 
-      // Health check — if no logs for 120s, resubscribe
+      let lastLogTime = Date.now();
       const healthCheck = setInterval(() => {
-        if (Date.now() - lastLogTime > 120_000 && lastLogTime > 0) {
+        if (Date.now() - lastLogTime > 120_000) {
           console.warn("[SIGNALS] No whale logs for 120s, resubscribing...");
-          try {
-            connection.removeOnLogsListener(wsId);
-          } catch {}
+          try { connection.removeOnLogsListener(wsId); } catch {}
           clearInterval(healthCheck);
           setTimeout(subscribe, 2000);
         }
+        lastLogTime = Date.now();
       }, 30_000);
 
     } catch (error) {
@@ -134,7 +118,6 @@ async function parseWhaleSwap(
     const received = changes.filter((c) => c.diff > 0).sort((a, b) => b.diff - a.diff);
     if (!spent.length || !received.length) return;
 
-    // Estimate USD value
     let amountUSD = 0;
     const tokenInMint = spent[0].mint;
     const tokenOutMint = received[0].mint;
@@ -153,28 +136,20 @@ async function parseWhaleSwap(
       amountUSD = Math.abs(postSol - preSol) * CONFIG.SOL_PRICE_USD;
     }
 
-    // Only signal on whale-sized swaps (> $2000)
     if (amountUSD < CONFIG.WHALE_THRESHOLD) return;
-
-    // Skip same-token "swaps" (routing artifacts, not real trades)
     if (tokenInMint === tokenOutMint) return;
-
-    // Skip if both tokens are stablecoins (USDC↔USDT — handled by depeg monitor)
     if (STABLECOIN_MINTS.has(tokenInMint) && STABLECOIN_MINTS.has(tokenOutMint)) return;
 
-    // Find the non-stablecoin, non-SOL token that was traded (the one that moved in price)
     let targetMint: string;
     if (!STABLECOIN_MINTS.has(tokenInMint) && tokenInMint !== SOL_MINT) {
       targetMint = tokenInMint;
     } else if (!STABLECOIN_MINTS.has(tokenOutMint) && tokenOutMint !== SOL_MINT) {
       targetMint = tokenOutMint;
     } else {
-      // SOL ↔ stablecoin swap — use SOL
       targetMint = tokenInMint === SOL_MINT ? tokenInMint : tokenOutMint;
     }
     const targetSymbol = getTokenName(targetMint);
 
-    // Strength based on size: $2k = 0.3, $10k = 0.6, $50k+ = 1.0
     const strength = Math.min(1, amountUSD / 50_000 + 0.2);
 
     onSignal({
@@ -186,83 +161,172 @@ async function parseWhaleSwap(
       timestamp: Date.now(),
     });
   } catch {
-    // Silent fail — don't block on RPC errors
+    // Silent fail
   }
 }
 
-// ── Spread Pulse Monitor ────────────────────────────────
-// Periodically checks buy vs sell quote gaps.
-// When the spread widens, it signals a potential arb window.
-export async function checkSpreadPulse(onSignal: SignalCallback) {
-  const checkAmount = 10_000_000; // $10 test quote
+// ── Spread Pulse Scanner ────────────────────────────────
+// Instead of just signaling, this directly returns executable ScanResults
+// when it finds a profitable round-trip at production sizes.
+function estimateProfitUsd(entryAmount: number, exitAmount: number): number {
+  const tipUsd = (CONFIG.JITO_TIP / LAMPORTS_PER_SOL) * CONFIG.SOL_PRICE_USD;
+  return (exitAmount - entryAmount) / 1_000_000 - tipUsd;
+}
+
+export async function findSpreadOpportunities(onSignal: SignalCallback): Promise<ScanResult[]> {
+  const results: ScanResult[] = [];
+  const prodSizes = [10_000_000, 25_000_000, 50_000_000]; // $10, $25, $50
 
   for (const token of ALL_SCAN_TOKENS) {
     try {
-      // Get buy quote (USDC → Token)
-      const buyQuote = await getJupiterQuote(USDC_MINT, token.mint, checkAmount, 30);
-      if (!buyQuote) continue;
+      // Quick probe at $10 to detect spread
+      const probeAmount = 10_000_000;
+      const buyProbe = await getJupiterQuote(USDC_MINT, token.mint, probeAmount, 30);
+      if (!buyProbe) continue;
 
-      // Get sell quote (Token → USDC) for same amount of tokens
-      const tokenAmount = Number(buyQuote.outAmount);
-      const sellQuote = await getJupiterQuote(token.mint, USDC_MINT, tokenAmount, 30);
-      if (!sellQuote) continue;
+      const tokenAmount = Number(buyProbe.outAmount);
+      const sellProbe = await getJupiterQuote(token.mint, USDC_MINT, tokenAmount, 30);
+      if (!sellProbe) continue;
 
-      const exitAmount = Number(sellQuote.outAmount);
-      const spreadPct = (checkAmount - exitAmount) / checkAmount;
+      const probeExit = Number(sellProbe.outAmount);
+      const spreadPct = (probeAmount - probeExit) / probeAmount;
 
-      // Normal spread is 0.1-0.5%. If spread is < 0.05%, there might be an arb.
-      // If spread is negative (exit > entry), definite arb signal.
-      if (spreadPct < 0.001) {
-        // Spread is < 0.1% — very tight, worth scanning at multiple sizes
-        const strength = spreadPct <= 0 ? 1.0 : 0.5 + (0.001 - spreadPct) * 500;
+      // Only pursue if spread is tight enough (< 0.1%)
+      if (spreadPct >= 0.001) continue;
 
-        onSignal({
-          type: "spread",
-          tokenMint: token.mint,
-          tokenSymbol: token.symbol,
-          strength: Math.min(1, Math.max(0.3, strength)),
-          detail: `spread=${(spreadPct * 100).toFixed(4)}% ($${(exitAmount / 1e6).toFixed(4)} exit on $10 entry)`,
-          timestamp: Date.now(),
-        });
+      // Log as signal for visibility
+      onSignal({
+        type: "spread",
+        tokenMint: token.mint,
+        tokenSymbol: token.symbol,
+        strength: spreadPct <= 0 ? 1.0 : 0.5,
+        detail: `spread=${(spreadPct * 100).toFixed(4)}% ($${(probeExit / 1e6).toFixed(4)} exit on $10 entry)`,
+        timestamp: Date.now(),
+      });
+
+      // Now immediately scan at production sizes — DON'T re-signal, just build results
+      for (const size of prodSizes) {
+        try {
+          const buyQ = await getJupiterQuote(USDC_MINT, token.mint, size, 30);
+          if (!buyQ) continue;
+
+          const sellQ = await getJupiterQuote(token.mint, USDC_MINT, Number(buyQ.outAmount), 30);
+          if (!sellQ) continue;
+
+          const exitAmount = Number(sellQ.outAmount);
+          const ratio = exitAmount / size;
+          if (ratio > 2 || ratio < 0.7) continue; // Safety check
+
+          const profitUsd = estimateProfitUsd(size, exitAmount);
+          if (profitUsd >= CONFIG.MIN_PROFIT) {
+            results.push({
+              route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
+              legs: 2,
+              quotes: [buyQ, sellQ],
+              entryAmount: size / 1_000_000,
+              exitAmount: exitAmount / 1_000_000,
+              estimatedProfit: profitUsd,
+              entryRaw: size,
+              strategy: "spread",
+            });
+          }
+        } catch {
+          continue;
+        }
       }
     } catch {
       continue;
     }
   }
+
+  return results;
 }
 
-// ── Stablecoin Depeg Monitor ────────────────────────────
-// Checks USDC/USDT rate. Any drift > 0.05% creates a safe arb opportunity.
-export async function checkDepeg(onSignal: SignalCallback) {
+// ── Stablecoin Depeg Scanner ────────────────────────────
+// Returns executable results when USDC/USDT depeg is profitable
+export async function findDepegOpportunities(onSignal: SignalCallback): Promise<ScanResult[]> {
+  const results: ScanResult[] = [];
+
   try {
-    const amount = 100_000_000; // $100
+    const probeAmount = 100_000_000; // $100 probe
 
-    // USDC → USDT
-    const q1 = await getJupiterQuote(USDC_MINT, USDT_MINT, amount, 5);
-    if (!q1) return;
+    const q1 = await getJupiterQuote(USDC_MINT, USDT_MINT, probeAmount, 5);
+    if (!q1) return results;
 
-    // USDT → USDC
-    const q2 = await getJupiterQuote(USDT_MINT, USDC_MINT, amount, 5);
-    if (!q2) return;
+    const q2 = await getJupiterQuote(USDT_MINT, USDC_MINT, probeAmount, 5);
+    if (!q2) return results;
 
-    const usdcToUsdt = Number(q1.outAmount) / amount;
-    const usdtToUsdc = Number(q2.outAmount) / amount;
+    const usdcToUsdt = Number(q1.outAmount) / probeAmount;
+    const usdtToUsdc = Number(q2.outAmount) / probeAmount;
 
-    // If either direction gives > 1.0005 (0.05% premium), there's a depeg arb
-    if (usdcToUsdt > 1.0003 || usdtToUsdc > 1.0003) {
-      const bestRate = Math.max(usdcToUsdt, usdtToUsdc);
-      const direction = usdcToUsdt > usdtToUsdc ? "USDC→USDT" : "USDT→USDC";
+    if (usdcToUsdt <= 1.0003 && usdtToUsdc <= 1.0003) return results;
 
-      onSignal({
-        type: "depeg",
-        tokenMint: usdcToUsdt > usdtToUsdc ? USDT_MINT : USDC_MINT,
-        tokenSymbol: usdcToUsdt > usdtToUsdc ? "USDT" : "USDC",
-        strength: Math.min(1, (bestRate - 1) * 100),
-        detail: `${direction} rate=${bestRate.toFixed(6)} (${((bestRate - 1) * 100).toFixed(3)}% premium)`,
-        timestamp: Date.now(),
-      });
+    const bestDirection = usdcToUsdt > usdtToUsdc ? "USDC→USDT→USDC" : "USDT→USDC→USDT";
+    const bestRate = Math.max(usdcToUsdt, usdtToUsdc);
+
+    onSignal({
+      type: "depeg",
+      tokenMint: usdcToUsdt > usdtToUsdc ? USDT_MINT : USDC_MINT,
+      tokenSymbol: usdcToUsdt > usdtToUsdc ? "USDT" : "USDC",
+      strength: Math.min(1, (bestRate - 1) * 100),
+      detail: `${bestDirection} rate=${bestRate.toFixed(6)} (${((bestRate - 1) * 100).toFixed(3)}% premium)`,
+      timestamp: Date.now(),
+    });
+
+    // Try at production sizes
+    const sizes = [25_000_000, 50_000_000]; // $25, $50
+    for (const size of sizes) {
+      try {
+        if (usdcToUsdt > usdtToUsdc) {
+          // USDC → USDT → USDC
+          const buyQ = await getJupiterQuote(USDC_MINT, USDT_MINT, size, 5);
+          if (!buyQ) continue;
+          const sellQ = await getJupiterQuote(USDT_MINT, USDC_MINT, Number(buyQ.outAmount), 5);
+          if (!sellQ) continue;
+
+          const exitAmount = Number(sellQ.outAmount);
+          const profitUsd = estimateProfitUsd(size, exitAmount);
+          if (profitUsd >= CONFIG.MIN_PROFIT) {
+            results.push({
+              route: `USDC → USDT → USDC (depeg)`,
+              legs: 2,
+              quotes: [buyQ, sellQ],
+              entryAmount: size / 1_000_000,
+              exitAmount: exitAmount / 1_000_000,
+              estimatedProfit: profitUsd,
+              entryRaw: size,
+              strategy: "depeg",
+            });
+          }
+        } else {
+          // USDT → USDC → USDT (but we hold USDC, so: USDC → buy USDT cheap → sell USDT for more USDC)
+          const buyQ = await getJupiterQuote(USDC_MINT, USDT_MINT, size, 5);
+          if (!buyQ) continue;
+          const sellQ = await getJupiterQuote(USDT_MINT, USDC_MINT, Number(buyQ.outAmount), 5);
+          if (!sellQ) continue;
+
+          const exitAmount = Number(sellQ.outAmount);
+          const profitUsd = estimateProfitUsd(size, exitAmount);
+          if (profitUsd >= CONFIG.MIN_PROFIT) {
+            results.push({
+              route: `USDC → USDT → USDC (depeg)`,
+              legs: 2,
+              quotes: [buyQ, sellQ],
+              entryAmount: size / 1_000_000,
+              exitAmount: exitAmount / 1_000_000,
+              estimatedProfit: profitUsd,
+              entryRaw: size,
+              strategy: "depeg",
+            });
+          }
+        }
+      } catch {
+        continue;
+      }
     }
   } catch {
     // Silent
   }
+
+  return results;
 }
