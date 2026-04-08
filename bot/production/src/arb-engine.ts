@@ -673,8 +673,8 @@ async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
           await supabase.from("arb_executions").insert({
             opportunity_id: oppId, amount_usd: opp.totalCost, realized_pnl: netProfit,
             fees: opp.fees, status: "filled",
-            side_a_tx: bs58.encode(sellYesTx.signatures[0]),
-            side_b_tx: bs58.encode(sellNoTx.signatures[0]),
+            side_a_tx: bs58.encode(sellUpTx.signatures[0]),
+            side_b_tx: bs58.encode(sellDownTx.signatures[0]),
             side_a_fill_price: market.sellYesPrice, side_b_fill_price: market.sellNoPrice,
           });
           await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
