@@ -128,13 +128,14 @@ const SWAP_ENDPOINTS = [
   "https://api.jup.ag/swap/v1/swap",
 ];
 
-async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
+async function getJupiterSwapTx(quote: any, priorityLamports: number = 0): Promise<Buffer | null> {
   const body = JSON.stringify({
     quoteResponse: quote,
     userPublicKey: keypair.publicKey.toBase58(),
     wrapAndUnwrapSol: true,
     dynamicComputeUnitLimit: true,
-    prioritizationFeeLamports: 0,
+    prioritizationFeeLamports: priorityLamports,
+    dynamicSlippage: { maxBps: 300 },
   });
 
   for (const endpoint of SWAP_ENDPOINTS) {
@@ -178,6 +179,79 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
 
   console.error("[SWAP] All endpoints failed for quote");
   return null;
+}
+
+// ── Direct transaction submission (no Jito) ─────────────
+// For small trades where Jito tip eats the profit.
+// Signs and sends via RPC with priority fees instead.
+async function submitDirectTx(result: ScanResult): Promise<{
+  success: boolean;
+  txSignature?: string;
+  error?: string;
+}> {
+  try {
+    // Re-quote to get fresh prices right before execution
+    const freshQuotes: any[] = [];
+    for (const quote of result.quotes) {
+      const freshQuote = await getJupiterQuote(
+        quote.inputMint,
+        quote.outputMint,
+        Number(quote.inAmount),
+        Number(quote.slippageBps || 30)
+      );
+      if (!freshQuote) {
+        return { success: false, error: "Fresh re-quote failed" };
+      }
+      freshQuotes.push(freshQuote);
+      await sleep(100);
+    }
+
+    // Verify the re-quoted route is still profitable
+    const lastQuote = freshQuotes[freshQuotes.length - 1];
+    const freshExit = Number(lastQuote.outAmount);
+    const tipUsd = 0; // no Jito tip for direct sends
+    const freshProfit = (freshExit - result.entryRaw) / 1_000_000 - tipUsd;
+    if (freshProfit < CONFIG.MIN_PROFIT) {
+      return { success: false, error: `Re-quote profit $${freshProfit.toFixed(4)} below minimum` };
+    }
+
+    // Build and send each swap tx with priority fees
+    // Use "auto" priority fee estimation (~5000-25000 lamports)
+    const priorityLamports = 25_000; // ~$0.004 at $150 SOL — much cheaper than Jito tip
+
+    for (let i = 0; i < freshQuotes.length; i++) {
+      const swapBuffer = await getJupiterSwapTx(freshQuotes[i], priorityLamports);
+      if (!swapBuffer) {
+        return { success: false, error: `Swap tx ${i + 1} build failed` };
+      }
+
+      const tx = VersionedTransaction.deserialize(swapBuffer);
+      tx.sign([keypair]);
+
+      const signature = await connection.sendTransaction(tx, {
+        skipPreflight: true,
+        maxRetries: 2,
+      });
+
+      console.log(`[DIRECT-TX] Sent leg ${i + 1}/${freshQuotes.length}: ${signature}`);
+
+      // Wait for confirmation
+      const confirmation = await connection.confirmTransaction(
+        { signature, ...(await connection.getLatestBlockhash("confirmed")) },
+        "confirmed"
+      );
+
+      if (confirmation.value.err) {
+        return { success: false, txSignature: signature, error: `Leg ${i + 1} reverted on-chain` };
+      }
+
+      console.log(`[DIRECT-TX] ✓ Leg ${i + 1} confirmed: ${signature}`);
+    }
+
+    return { success: true, txSignature: "direct_multi_leg" };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function getScannerExecutionFloorUsd(): number {
@@ -300,8 +374,6 @@ async function executeOpportunity(result: ScanResult) {
     const startTime = Date.now();
     totalOpportunities++;
 
-    await sleep(1500);
-
     console.log(
       `[SCANNER] 🎯 ${result.strategy} | ${result.route} | $${result.entryAmount} → $${result.exitAmount.toFixed(4)} | profit: $${result.estimatedProfit.toFixed(4)}`
     );
@@ -328,17 +400,34 @@ async function executeOpportunity(result: ScanResult) {
       return;
     }
 
+    // Choose execution path: direct tx for small trades, Jito for large
+    const useJito = result.entryRaw >= 50_000_000; // $50+ uses Jito atomic bundles
     totalBundlesSent++;
-    const bundleResult = await submitJitoBundle(result);
+
+    let bundleResult: { success: boolean; bundleId?: string; txSignature?: string; pending?: boolean; error?: string };
+
+    if (useJito) {
+      console.log(`[EXEC] Using Jito bundle (entry $${result.entryAmount})`);
+      bundleResult = await submitJitoBundle(result);
+    } else {
+      console.log(`[EXEC] Using direct tx (entry $${result.entryAmount})`);
+      const directResult = await submitDirectTx(result);
+      bundleResult = {
+        success: directResult.success,
+        bundleId: directResult.txSignature,
+        error: directResult.error,
+      };
+    }
+
     const latencyMs = Date.now() - startTime;
 
     const outcome = {
       route: result.route,
       entry_amount: result.entryAmount,
-    exit_amount: bundleResult.success ? result.exitAmount : result.entryAmount,
-    profit: bundleResult.success ? result.estimatedProfit : 0,
-      jito_tip: CONFIG.JITO_TIP / LAMPORTS_PER_SOL,
-    status: bundleResult.success ? "success" : bundleResult.pending ? "submitted" : "reverted",
+      exit_amount: bundleResult.success ? result.exitAmount : result.entryAmount,
+      profit: bundleResult.success ? result.estimatedProfit : 0,
+      jito_tip: useJito ? CONFIG.JITO_TIP / LAMPORTS_PER_SOL : 0,
+      status: bundleResult.success ? "success" : bundleResult.pending ? "submitted" : "reverted",
       tx_signature: bundleResult.bundleId || null,
       trigger_tx: `scan_${result.strategy}_${Date.now()}`,
       latency_ms: latencyMs,
@@ -364,7 +453,7 @@ async function executeOpportunity(result: ScanResult) {
 
     await supabase.from("bundle_results").insert(outcome);
     console.log(
-      `[BUNDLE] ${outcome.status.toUpperCase()} | ${result.route} | $${outcome.profit.toFixed(4)} | ${latencyMs}ms${
+      `[${useJito ? "BUNDLE" : "DIRECT"}] ${outcome.status.toUpperCase()} | ${result.route} | $${outcome.profit.toFixed(4)} | ${latencyMs}ms${
         bundleResult.error ? ` | ${bundleResult.error}` : ""
       }`
     );
