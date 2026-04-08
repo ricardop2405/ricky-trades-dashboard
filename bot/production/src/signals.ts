@@ -20,6 +20,8 @@ import {
 import { getJupiterQuote, ScanResult } from "./scanner-strategies";
 import { getTokenName } from "./utils";
 
+const SUPPORTED_SIGNAL_MINTS = new Set(ALL_SCAN_TOKENS.map((token) => token.mint));
+
 // ── Signal types ────────────────────────────────────────
 export interface Signal {
   type: "whale" | "spread" | "depeg";
@@ -150,6 +152,8 @@ async function parseWhaleSwap(
     }
     const targetSymbol = getTokenName(targetMint);
 
+    if (!SUPPORTED_SIGNAL_MINTS.has(targetMint)) return;
+
     const strength = Math.min(1, amountUSD / 50_000 + 0.2);
 
     onSignal({
@@ -179,6 +183,8 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
 
   for (const token of ALL_SCAN_TOKENS) {
     try {
+      const tokenResults: ScanResult[] = [];
+
       // Quick probe at $10 to detect spread
       const probeAmount = 10_000_000;
       const buyProbe = await getJupiterQuote(USDC_MINT, token.mint, probeAmount, 30);
@@ -194,20 +200,10 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
       // Only pursue if spread is tight enough (< 0.1%)
       if (spreadPct >= 0.001) continue;
 
-      // Log as signal for visibility
-      onSignal({
-        type: "spread",
-        tokenMint: token.mint,
-        tokenSymbol: token.symbol,
-        strength: spreadPct <= 0 ? 1.0 : 0.5,
-        detail: `spread=${(spreadPct * 100).toFixed(4)}% ($${(probeExit / 1e6).toFixed(4)} exit on $10 entry)`,
-        timestamp: Date.now(),
-      });
-
       // USE THE PROBE QUOTES DIRECTLY if already profitable at $10
       const probeProfitUsd = estimateProfitUsd(probeAmount, probeExit);
       if (probeProfitUsd >= CONFIG.MIN_PROFIT) {
-        results.push({
+        tokenResults.push({
           route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
           legs: 2,
           quotes: [buyProbe, sellProbe],
@@ -244,7 +240,7 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
           const profitUsd = estimateProfitUsd(size, exitAmount);
           if (profitUsd >= CONFIG.MIN_PROFIT) {
             console.log(`[SPREAD] ✓ ${token.symbol} $${size/1e6}: profit=$${profitUsd.toFixed(4)}`);
-            results.push({
+            tokenResults.push({
               route: `USDC →[spread] ${token.symbol} →[spread] USDC`,
               legs: 2,
               quotes: [buyQ, sellQ],
@@ -261,6 +257,25 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
           continue;
         }
       }
+
+      if (tokenResults.length === 0) {
+        console.log(`[SPREAD-DEBUG] ${token.symbol}: probe matched but no executable size passed profit/quote checks`);
+        continue;
+      }
+
+      tokenResults.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
+      const bestResult = tokenResults[0];
+
+      onSignal({
+        type: "spread",
+        tokenMint: token.mint,
+        tokenSymbol: token.symbol,
+        strength: spreadPct <= 0 ? 1.0 : 0.5,
+        detail: `spread=${(spreadPct * 100).toFixed(4)}% | best=$${bestResult.estimatedProfit.toFixed(4)} on $${bestResult.entryAmount.toFixed(0)} entry`,
+        timestamp: Date.now(),
+      });
+
+      results.push(...tokenResults);
     } catch {
       continue;
     }
