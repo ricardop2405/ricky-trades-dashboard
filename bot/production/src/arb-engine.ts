@@ -186,7 +186,46 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
 
           for (const event of events) {
             const markets = event.markets || [];
-            // Each event has Up + Down markets — we want to pair them
+            // ── Split & Sell: check EACH individual market ──
+            for (const m of markets) {
+              if (m.status !== "open") continue;
+              const closeTime = Number(m.closeTime || m.metadata?.closeTime || 0);
+              if (closeTime && closeTime < now) continue;
+
+              const sellYes = Number(m.pricing?.sellYesPriceUsd || 0) / 1_000_000;
+              const sellNo = Number(m.pricing?.sellNoPriceUsd || 0) / 1_000_000;
+              const buyYes = Number(m.pricing?.buyYesPriceUsd || 0) / 1_000_000;
+              const buyNo = Number(m.pricing?.buyNoPriceUsd || 0) / 1_000_000;
+
+              if (sellYes > 0 && sellNo > 0) {
+                const splitSpread = sellYes + sellNo - 1;
+                if (splitSpread > 0) {
+                  const mTitle = m.metadata?.title || m.title || m.marketId;
+                  const eventTitle = event.metadata?.title || event.title || `${coin.toUpperCase()} ${interval}`;
+                  const splitMarket: JupMarket = {
+                    marketId: m.marketId,
+                    eventId: event.eventId || "",
+                    title: `[SPLIT] ${eventTitle} — ${mTitle} [sellY=$${sellYes.toFixed(3)} sellN=$${sellNo.toFixed(3)}]`,
+                    status: "open",
+                    yesPrice: buyYes,
+                    noPrice: buyNo,
+                    spread: 0,
+                    category: "crypto",
+                    endDate: toIsoFromUnix(closeTime),
+                    volume: Number(m.pricing?.volume || 0),
+                    platform: "jupiter_predict",
+                    closeTime: closeTime || null,
+                    openTime: Number(m.openTime || 0) || null,
+                    sellYesPrice: sellYes,
+                    sellNoPrice: sellNo,
+                    splitSpread,
+                  };
+                  allMarkets.push(splitMarket);
+                }
+              }
+            }
+
+            // ── Merge strategy: pair Up + Down markets ──
             let upMarket: any = null;
             let downMarket: any = null;
 
@@ -232,6 +271,9 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
               platform: "jupiter_predict",
               closeTime: closeTime || null,
               openTime: Number(upMarket.openTime || 0) || null,
+              sellYesPrice: 0,
+              sellNoPrice: 0,
+              splitSpread: 0,
             };
 
             // Store the Down market ID for execution (we need both)
