@@ -139,7 +139,7 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
   });
 
   for (const endpoint of SWAP_ENDPOINTS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < CONFIG.SCANNER_SWAP_MAX_ATTEMPTS; attempt++) {
       try {
         const res = await fetch(endpoint, {
           method: "POST",
@@ -154,10 +154,16 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
         if (!res.ok) {
           const errText = await res.text().catch(() => "");
           console.warn(`[SWAP] ${endpoint} → ${res.status}: ${errText.slice(0, 120)}`);
-          if ((res.status === 429 || res.status >= 500) && attempt === 0) {
-            if (res.status === 429) jupiterCooldownUntil = Date.now() + 15_000;
-            await sleep(250);
-            continue;
+          if (res.status === 429 || res.status >= 500) {
+            const backoffMs = CONFIG.SCANNER_SWAP_RETRY_BASE_MS * 2 ** attempt;
+            if (res.status === 429) {
+              applyScannerCooldown(CONFIG.SCANNER_RATE_LIMIT_COOLDOWN_MS, `swap API 429 at ${endpoint}`);
+            }
+            console.warn(`[SWAP] Backing off ${backoffMs}ms before retry ${attempt + 2}/${CONFIG.SCANNER_SWAP_MAX_ATTEMPTS}`);
+            if (attempt < CONFIG.SCANNER_SWAP_MAX_ATTEMPTS - 1) {
+              await sleep(backoffMs);
+              continue;
+            }
           }
           break;
         }
@@ -170,9 +176,10 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
         break;
       } catch (err) {
         console.warn(`[SWAP] ${endpoint} → ${err instanceof Error ? err.message : String(err)}`);
-        if (attempt === 0) {
-          await sleep(250);
-          continue;
+        if (attempt < CONFIG.SCANNER_SWAP_MAX_ATTEMPTS - 1) {
+          const backoffMs = CONFIG.SCANNER_SWAP_RETRY_BASE_MS * 2 ** attempt;
+          await sleep(backoffMs);
+            continue;
         }
       }
     }
