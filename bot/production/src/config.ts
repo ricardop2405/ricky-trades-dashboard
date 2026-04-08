@@ -42,7 +42,7 @@ export const CONFIG = {
   MEV_DRY_RUN: process.env.MEV_DRY_RUN !== "false", // default true
   MEV_ENTRY_USDC: parseInt(process.env.MEV_ENTRY_USDC || "50000000"), // 50 USDC in raw (6 decimals)
   WHALE_THRESHOLD: parseFloat(process.env.WHALE_THRESHOLD || "5000"),
-  JITO_TIP: parseInt(process.env.JITO_TIP || "50000"), // lamports (~$0.0075 at $150 SOL)
+  JITO_TIP: parseInt(process.env.JITO_TIP || "25000"), // lamports (~$0.00375 at $150 SOL)
   MIN_PROFIT: parseFloat(process.env.MIN_PROFIT || "0.05"), // USD — align with the atomic profit safety guardrail
   JITO_BLOCK_ENGINE_URL: process.env.JITO_BLOCK_ENGINE_URL || "https://mainnet.block-engine.jito.wtf",
   MAX_PENDING_SIGNATURES: parseInt(process.env.MAX_PENDING_SIGNATURES || "200"),
@@ -55,9 +55,9 @@ export const CONFIG = {
   SCANNER_INTERVAL_MS: parseInt(process.env.SCANNER_INTERVAL_MS || "6000"),
   SCANNER_BATCH_SIZE: parseInt(process.env.SCANNER_BATCH_SIZE || "8"), // pairs per batch
   SCANNER_ENTRY_USDC: parseInt(process.env.SCANNER_ENTRY_USDC || "50000000"), // 50 USDC
-  SCANNER_MIN_PROFIT: parseFloat(process.env.SCANNER_MIN_PROFIT || "0.08"),
-  SCANNER_RATE_LIMIT_COOLDOWN_MS: parseInt(process.env.SCANNER_RATE_LIMIT_COOLDOWN_MS || "30000"),
-  SCANNER_PENDING_COOLDOWN_MS: parseInt(process.env.SCANNER_PENDING_COOLDOWN_MS || "45000"),
+  SCANNER_MIN_PROFIT: parseFloat(process.env.SCANNER_MIN_PROFIT || "0.01"),
+  SCANNER_RATE_LIMIT_COOLDOWN_MS: parseInt(process.env.SCANNER_RATE_LIMIT_COOLDOWN_MS || "10000"),
+  SCANNER_PENDING_COOLDOWN_MS: parseInt(process.env.SCANNER_PENDING_COOLDOWN_MS || "15000"),
 
   // ── Limitless (Base Chain) ────────────────────────────
   LIMITLESS_OWNER_ID: Number(process.env.LIMITLESS_OWNER_ID || 0),
