@@ -186,6 +186,7 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
 async function submitJitoBundle(result: ScanResult): Promise<{
   success: boolean;
   bundleId?: string;
+  pending?: boolean;
   error?: string;
 }> {
   try {
@@ -267,7 +268,7 @@ async function submitJitoBundle(result: ScanResult): Promise<{
       }
     }
 
-    return { success: false, bundleId, error: "Status unknown after 30s" };
+    return { success: false, pending: true, bundleId, error: "Bundle submitted; status still pending after 30s" };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -317,10 +318,10 @@ async function executeOpportunity(result: ScanResult) {
     const outcome = {
       route: result.route,
       entry_amount: result.entryAmount,
-      exit_amount: bundleResult.success ? result.exitAmount : result.entryAmount,
-      profit: bundleResult.success ? result.estimatedProfit : 0,
+    exit_amount: bundleResult.success ? result.exitAmount : result.entryAmount,
+    profit: bundleResult.success ? result.estimatedProfit : 0,
       jito_tip: CONFIG.JITO_TIP / LAMPORTS_PER_SOL,
-      status: bundleResult.success ? "success" : "reverted",
+    status: bundleResult.success ? "success" : bundleResult.pending ? "submitted" : "reverted",
       tx_signature: bundleResult.bundleId || null,
       trigger_tx: `scan_${result.strategy}_${Date.now()}`,
       latency_ms: latencyMs,
