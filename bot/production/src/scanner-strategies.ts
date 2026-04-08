@@ -9,18 +9,6 @@ import {
 
 const MEMECOIN_MINTS = new Set(MEMECOIN_TOKENS.map((token) => token.mint));
 
-export interface QuoteOptions {
-  onlyDirectRoutes?: boolean;
-  dexes?: string[];
-  excludeDexes?: string[];
-  restrictIntermediateTokens?: boolean;
-}
-
-export interface DexPair {
-  buyDex: string;
-  sellDex: string;
-}
-
 export interface ScanResult {
   route: string;
   legs: number;
@@ -32,67 +20,71 @@ export interface ScanResult {
   strategy: string;
 }
 
-export const SCANNER_DEXES = [
-  "Raydium V4",
+// ── Jupiter program IDs → labels (used for dexes param) ─
+const PROGRAM_ID_TO_LABEL: Record<string, string> = {
+  "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "Raydium",
+  "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK": "Raydium CLMM",
+  "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C": "Raydium CP",
+  "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "Orca Whirlpool",
+  "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP": "Orca V2",
+  "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "Meteora DLMM",
+  "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB": "Meteora",
+};
+
+// These are the labels Jupiter accepts in the `dexes` query param
+export const SCANNER_DEX_LABELS = [
+  "Raydium",
   "Raydium CLMM",
   "Raydium CP",
   "Orca Whirlpool",
+  "Orca V2",
   "Meteora DLMM",
-  "Meteora Pools",
+  "Meteora",
 ] as const;
 
+export type DexLabel = (typeof SCANNER_DEX_LABELS)[number];
+
+export interface DexPair {
+  buyDex: DexLabel;
+  sellDex: DexLabel;
+}
+
+// All cross-venue pairs to probe for price differences
 export const DEX_ARB_PAIRS: DexPair[] = [
+  // Raydium variants vs Orca
   { buyDex: "Raydium CLMM", sellDex: "Orca Whirlpool" },
   { buyDex: "Orca Whirlpool", sellDex: "Raydium CLMM" },
-  { buyDex: "Raydium V4", sellDex: "Meteora DLMM" },
-  { buyDex: "Meteora DLMM", sellDex: "Raydium V4" },
+  { buyDex: "Raydium", sellDex: "Orca Whirlpool" },
+  { buyDex: "Orca Whirlpool", sellDex: "Raydium" },
+  { buyDex: "Raydium CP", sellDex: "Orca Whirlpool" },
+  { buyDex: "Orca Whirlpool", sellDex: "Raydium CP" },
+  // Raydium vs Meteora
+  { buyDex: "Raydium", sellDex: "Meteora DLMM" },
+  { buyDex: "Meteora DLMM", sellDex: "Raydium" },
+  { buyDex: "Raydium CLMM", sellDex: "Meteora DLMM" },
+  { buyDex: "Meteora DLMM", sellDex: "Raydium CLMM" },
+  // Orca vs Meteora
+  { buyDex: "Orca Whirlpool", sellDex: "Meteora DLMM" },
+  { buyDex: "Meteora DLMM", sellDex: "Orca Whirlpool" },
+  // Raydium internal
+  { buyDex: "Raydium", sellDex: "Raydium CLMM" },
+  { buyDex: "Raydium CLMM", sellDex: "Raydium" },
   { buyDex: "Raydium CP", sellDex: "Raydium CLMM" },
   { buyDex: "Raydium CLMM", sellDex: "Raydium CP" },
-  { buyDex: "Meteora Pools", sellDex: "Raydium V4" },
-  { buyDex: "Raydium V4", sellDex: "Meteora Pools" },
 ];
 
-function normalizeLabel(label: string): string {
-  return label.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function routeMatchesDex(quote: any, dexLabel: string): boolean {
-  const routeLabels = (quote?.routePlan ?? [])
-    .map((plan: any) => String(plan?.swapInfo?.label ?? ""))
-    .filter(Boolean);
-
-  if (routeLabels.length === 0) return false;
-
-  const normalizedDex = normalizeLabel(dexLabel);
-  return routeLabels.every((label: string) => {
-    const normalizedRoute = normalizeLabel(label);
-    return normalizedRoute.includes(normalizedDex) || normalizedDex.includes(normalizedRoute);
-  });
-}
-
-function getMaxEntry(mint: string): number {
-  return MEMECOIN_MINTS.has(mint) ? 25_000_000 : 100_000_000;
-}
-
-function isSafeQuote(inputAmount: number, outputAmount: number, isMemecoin: boolean): boolean {
-  const ratio = outputAmount / inputAmount;
-  if (ratio > 2) return false;
-  if (isMemecoin && ratio < 0.7) return false;
-  if (!isMemecoin && ratio < 0.5) return false;
-  return true;
-}
-
-function estimateProfitUsd(entryAmount: number, exitAmount: number): number {
-  const tipUsd = (CONFIG.JITO_TIP / LAMPORTS_PER_SOL) * CONFIG.SOL_PRICE_USD;
-  return (exitAmount - entryAmount) / 1_000_000 - tipUsd;
-}
-
+// ── Jupiter quote helper ────────────────────────────────
 export async function getJupiterQuote(
   inputMint: string,
   outputMint: string,
   amount: number,
   slippageBps = 30,
-  options: QuoteOptions = {}
+  options: {
+    onlyDirectRoutes?: boolean;
+    dexes?: string[];
+    excludeDexes?: string[];
+    restrictIntermediateTokens?: boolean;
+  } = {}
 ): Promise<any | null> {
   try {
     const params = new URLSearchParams({
@@ -112,27 +104,45 @@ export async function getJupiterQuote(
 
     const data = await res.json();
     if (data?.error) return null;
-
     return data;
   } catch {
     return null;
   }
 }
 
+// ── Safety helpers ──────────────────────────────────────
+function getMaxEntry(mint: string): number {
+  return MEMECOIN_MINTS.has(mint) ? 25_000_000 : 100_000_000;
+}
+
+function isSafeQuote(inputAmount: number, outputAmount: number, isMemecoin: boolean): boolean {
+  const ratio = outputAmount / inputAmount;
+  if (ratio > 2) return false;
+  if (isMemecoin && ratio < 0.7) return false;
+  if (!isMemecoin && ratio < 0.5) return false;
+  return true;
+}
+
+function estimateProfitUsd(entryAmount: number, exitAmount: number): number {
+  const tipUsd = (CONFIG.JITO_TIP / LAMPORTS_PER_SOL) * CONFIG.SOL_PRICE_USD;
+  return (exitAmount - entryAmount) / 1_000_000 - tipUsd;
+}
+
+// ── Probe: verify a DEX label works ─────────────────────
 export async function probeDexSupport(dexLabel: string): Promise<boolean> {
-  const quote = await getJupiterQuote(USDC_MINT, SOL_MINT, 1_000_000, 50, {
+  const quote = await getJupiterQuote(USDC_MINT, SOL_MINT, 1_000_000, 300, {
     onlyDirectRoutes: true,
     dexes: [dexLabel],
-    restrictIntermediateTokens: true,
   });
-
-  return Boolean(quote && routeMatchesDex(quote, dexLabel));
+  return quote !== null && Number(quote.outAmount || 0) > 0;
 }
 
 export function getDexPair(index: number): DexPair {
   return DEX_ARB_PAIRS[index % DEX_ARB_PAIRS.length];
 }
 
+// ── Strategy 1: DEX-vs-DEX price differential ───────────
+// Buy on one DEX, sell on another — real venue arbitrage
 export async function scanDexDifferential(
   tokenMint: string,
   tokenSymbol: string,
@@ -145,19 +155,19 @@ export async function scanDexDifferential(
 
     const slippage = isMemecoin ? 100 : 50;
 
+    // Buy on DEX A
     const buyQuote = await getJupiterQuote(USDC_MINT, tokenMint, entryAmount, slippage, {
       onlyDirectRoutes: true,
       dexes: [dexPair.buyDex],
-      restrictIntermediateTokens: true,
     });
-    if (!buyQuote || !routeMatchesDex(buyQuote, dexPair.buyDex)) return null;
+    if (!buyQuote) return null;
 
+    // Sell on DEX B
     const sellQuote = await getJupiterQuote(tokenMint, USDC_MINT, Number(buyQuote.outAmount), slippage, {
       onlyDirectRoutes: true,
       dexes: [dexPair.sellDex],
-      restrictIntermediateTokens: true,
     });
-    if (!sellQuote || !routeMatchesDex(sellQuote, dexPair.sellDex)) return null;
+    if (!sellQuote) return null;
 
     const exitAmount = Number(sellQuote.outAmount);
     if (!isSafeQuote(entryAmount, exitAmount, isMemecoin)) return null;
@@ -166,7 +176,7 @@ export async function scanDexDifferential(
     if (profitUsd <= 0) return null;
 
     return {
-      route: `USDC → ${tokenSymbol} via ${dexPair.buyDex} → USDC via ${dexPair.sellDex}`,
+      route: `USDC →[${dexPair.buyDex}] ${tokenSymbol} →[${dexPair.sellDex}] USDC`,
       legs: 2,
       quotes: [buyQuote, sellQuote],
       entryAmount: entryAmount / 1_000_000,
@@ -180,6 +190,7 @@ export async function scanDexDifferential(
   }
 }
 
+// ── Strategy 2: Cross-stablecoin ────────────────────────
 export async function scanCrossStable(
   tokenMint: string,
   tokenSymbol: string,
@@ -197,10 +208,7 @@ export async function scanCrossStable(
     const q2 = await getJupiterQuote(tokenMint, USDT_MINT, Number(q1.outAmount), slippage);
     if (!q2) return null;
 
-    const q3 = await getJupiterQuote(USDT_MINT, USDC_MINT, Number(q2.outAmount), 10, {
-      onlyDirectRoutes: true,
-      restrictIntermediateTokens: true,
-    });
+    const q3 = await getJupiterQuote(USDT_MINT, USDC_MINT, Number(q2.outAmount), 10);
     if (!q3) return null;
 
     const exitAmount = Number(q3.outAmount);
@@ -224,6 +232,7 @@ export async function scanCrossStable(
   }
 }
 
+// ── Strategy 3: Triangular ──────────────────────────────
 export async function scan3Leg(
   tokenA: string,
   symbolA: string,

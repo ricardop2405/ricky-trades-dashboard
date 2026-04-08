@@ -23,7 +23,7 @@ import {
   probeDexSupport,
   ScanResult,
   scan3Leg,
-  SCANNER_DEXES,
+  SCANNER_DEX_LABELS,
   scanCrossStable,
   scanDexDifferential,
 } from "./scanner-strategies";
@@ -240,14 +240,14 @@ async function executeOpportunity(result: ScanResult) {
 
 async function logDexSupport() {
   const results = await Promise.all(
-    SCANNER_DEXES.map(async (dex) => ({ dex, supported: await probeDexSupport(dex) }))
+    SCANNER_DEX_LABELS.map(async (dex) => ({ dex, supported: await probeDexSupport(dex) }))
   );
 
   for (const result of results) {
     console.log(
       result.supported
-        ? `[SCANNER] DEX filter OK: ${result.dex}`
-        : `[SCANNER] DEX filter unavailable: ${result.dex}`
+        ? `[SCANNER] ✓ DEX OK: ${result.dex}`
+        : `[SCANNER] ✗ DEX unavailable: ${result.dex} (no pool for USDC→SOL)`
     );
   }
 }
