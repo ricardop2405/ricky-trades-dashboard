@@ -32,6 +32,9 @@ export const CONFIG = {
   JUP_PREDICT_API_KEY: process.env.JUP_PREDICT_API_KEY || "",
   JUP_USD_MINT: process.env.JUP_USD_MINT || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
 
+  // ── Jupiter Paid API ─────────────────────────────────
+  JUPITER_API_KEY: process.env.JUPITER_API_KEY || "",
+
   // ── Arb Settings ──────────────────────────────────────
   ARB_AMOUNT: parseFloat(process.env.ARB_AMOUNT || "5"),
   MIN_SPREAD: parseFloat(process.env.MIN_SPREAD || "0.005"),
@@ -52,7 +55,7 @@ export const CONFIG = {
 
   // ── Continuous Scanner ─────────────────────────────────
   SCANNER_ENABLED: process.env.SCANNER_ENABLED !== "false", // default true
-  SCANNER_INTERVAL_MS: parseInt(process.env.SCANNER_INTERVAL_MS || "2000"),
+  SCANNER_INTERVAL_MS: parseInt(process.env.SCANNER_INTERVAL_MS || "500"),
   SCANNER_BATCH_SIZE: parseInt(process.env.SCANNER_BATCH_SIZE || "8"), // pairs per batch
   SCANNER_ENTRY_USDC: parseInt(process.env.SCANNER_ENTRY_USDC || "50000000"), // 50 USDC
   SCANNER_MIN_PROFIT: parseFloat(process.env.SCANNER_MIN_PROFIT || "0.01"),
