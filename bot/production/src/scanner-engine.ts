@@ -29,10 +29,12 @@ import {
   scanDirect,
   scanDirectWithNearMiss,
 } from "./scanner-strategies";
+import { Signal, startWhaleMonitor, checkSpreadPulse, checkDepeg } from "./signals";
 import { sleep } from "./utils";
 
 const keypair = Keypair.fromSecretKey(bs58.decode(CONFIG.PRIVATE_KEY));
 const connection = new Connection(CONFIG.HELIUS_HTTP, {
+  wsEndpoint: CONFIG.HELIUS_WS,
   commitment: "confirmed",
   disableRetryOnRateLimit: true,
 });
@@ -41,18 +43,48 @@ const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
+// ── Stats ───────────────────────────────────────────────
 let totalScans = 0;
+let totalDirect = 0;
 let totalDexDiff = 0;
 let total3Leg = 0;
 let totalCrossStable = 0;
-let totalDirect = 0;
 let totalNearMisses = 0;
 let totalOpportunities = 0;
 let totalBundlesSent = 0;
 let totalProfit = 0;
+let totalWhaleSignals = 0;
+let totalSpreadSignals = 0;
+let totalDepegSignals = 0;
 let usdcBalanceCache = 0;
 let lastBalanceCheck = 0;
 
+// ── Signal queue ────────────────────────────────────────
+const signalQueue: Signal[] = [];
+const MAX_SIGNAL_QUEUE = 50;
+
+function onSignal(signal: Signal) {
+  // Dedupe: don't queue same token within 5 seconds
+  const recent = signalQueue.find(
+    (s) => s.tokenMint === signal.tokenMint && Date.now() - s.timestamp < 5_000
+  );
+  if (recent) return;
+
+  if (signalQueue.length >= MAX_SIGNAL_QUEUE) {
+    signalQueue.shift(); // Drop oldest
+  }
+  signalQueue.push(signal);
+
+  if (signal.type === "whale") totalWhaleSignals++;
+  else if (signal.type === "spread") totalSpreadSignals++;
+  else if (signal.type === "depeg") totalDepegSignals++;
+
+  console.log(
+    `[SIGNAL] ${signal.type.toUpperCase()} | ${signal.tokenSymbol} | strength=${signal.strength.toFixed(2)} | ${signal.detail}`
+  );
+}
+
+// ── Balance ─────────────────────────────────────────────
 function getAssociatedTokenAddressSync(mint: PublicKey, owner: PublicKey) {
   return PublicKey.findProgramAddressSync(
     [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
@@ -67,44 +99,22 @@ async function getUsdcBalance(): Promise<number> {
 
   try {
     const mint = new PublicKey(USDC_MINT);
-    const ata = getAssociatedTokenAddressSync(mint, keypair.publicKey);
-    console.log(`[BALANCE] Checking wallet ${keypair.publicKey.toBase58()} for USDC mint ${USDC_MINT}`);
-    console.log(`[BALANCE] Expected ATA: ${ata.toBase58()}`);
+    const parsedAccounts = await connection.getParsedTokenAccountsByOwner(keypair.publicKey, { mint });
 
-    const parsedAccounts = await connection.getParsedTokenAccountsByOwner(keypair.publicKey, {
-      mint,
-    });
-
-    const balances = parsedAccounts.value.map(({ pubkey, account }) => {
-      const parsedInfo = account.data.parsed.info;
-      const rawAmount = Number(parsedInfo.tokenAmount.amount || 0);
-      return {
-        pubkey: pubkey.toBase58(),
-        rawAmount,
-      };
-    });
-
-    usdcBalanceCache = balances.reduce((sum, account) => sum + account.rawAmount, 0);
+    usdcBalanceCache = parsedAccounts.value.reduce((sum, { account }) => {
+      return sum + Number(account.data.parsed.info.tokenAmount.amount || 0);
+    }, 0);
     lastBalanceCheck = Date.now();
 
-    if (balances.length === 0) {
-      console.error(`[BALANCE] No USDC token accounts found for wallet ${keypair.publicKey.toBase58()}`);
-    } else {
-      console.log(
-        `[BALANCE] Found ${balances.length} USDC account(s): ${balances
-          .map((account) => `${account.pubkey}=${account.rawAmount / 1e6}`)
-          .join(", ")}`
-      );
-    }
-
-    console.log(`[BALANCE] Total USDC balance: ${usdcBalanceCache / 1e6} (raw: ${usdcBalanceCache})`);
+    console.log(`[BALANCE] USDC: $${(usdcBalanceCache / 1e6).toFixed(2)}`);
     return usdcBalanceCache;
   } catch (error) {
-    console.error(`[BALANCE] Failed to fetch USDC balance: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`[BALANCE] Failed: ${error instanceof Error ? error.message : String(error)}`);
     return usdcBalanceCache;
   }
 }
 
+// ── Jito bundle submission ──────────────────────────────
 async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
   try {
     const res = await fetch("https://quote-api.jup.ag/v6/swap", {
@@ -118,7 +128,6 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
         prioritizationFeeLamports: 0,
       }),
     });
-
     if (!res.ok) return null;
     const data = await res.json();
     return Buffer.from(data.swapTransaction, "base64");
@@ -133,12 +142,12 @@ async function submitJitoBundle(result: ScanResult): Promise<{
   error?: string;
 }> {
   try {
-    const swapBuffers = await Promise.all(result.quotes.map((quote) => getJupiterSwapTx(quote)));
-    if (swapBuffers.some((buffer) => !buffer)) {
+    const swapBuffers = await Promise.all(result.quotes.map((q) => getJupiterSwapTx(q)));
+    if (swapBuffers.some((b) => !b)) {
       return { success: false, error: "Failed to get swap transactions" };
     }
 
-    const swapTxs = swapBuffers.map((buffer) => VersionedTransaction.deserialize(buffer!));
+    const swapTxs = swapBuffers.map((b) => VersionedTransaction.deserialize(b!));
     const tipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
     const tipIx = SystemProgram.transfer({
       fromPubkey: keypair.publicKey,
@@ -271,36 +280,87 @@ async function executeOpportunity(result: ScanResult) {
   );
 }
 
-async function logDexSupport() {
-  const results = await Promise.all(
-    SCANNER_DEX_LABELS.map(async (dex) => ({ dex, probe: await probeDexSupport(dex) }))
+// ── Signal-driven scan ──────────────────────────────────
+// When a signal fires, we immediately scan that specific token
+// at multiple entry sizes for an atomic arb opportunity.
+async function scanFromSignal(signal: Signal): Promise<ScanResult | null> {
+  const results: ScanResult[] = [];
+
+  // Try multiple entry sizes, prioritize smaller for speed
+  const sizes = signal.strength > 0.7
+    ? [5_000_000, 10_000_000, 25_000_000, 50_000_000]
+    : [1_000_000, 2_000_000, 5_000_000, 10_000_000];
+
+  const scanPromises = sizes.map((size) =>
+    scanDirect(signal.tokenMint, signal.tokenSymbol, size)
   );
 
-  for (const result of results) {
-    console.log(
-      result.probe.supported
-        ? `[SCANNER] ✓ DEX OK: ${result.dex} via ${result.probe.endpoint}`
-        : `[SCANNER] ✗ DEX unavailable: ${result.dex}${result.probe.endpoint ? ` via ${result.probe.endpoint}` : ""}${result.probe.reason ? ` | ${result.probe.reason}` : ""}`
-    );
+  const scanResults = await Promise.all(scanPromises);
+  for (const result of scanResults) {
+    if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
+      results.push(result);
+    }
   }
+
+  // Also try cross-stable for the signaled token
+  const crossResults = await Promise.all(
+    sizes.slice(0, 2).map((size) =>
+      scanCrossStable(signal.tokenMint, signal.tokenSymbol, size)
+    )
+  );
+  for (const result of crossResults) {
+    if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
+      results.push(result);
+    }
+  }
+
+  if (results.length === 0) return null;
+
+  results.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
+  return results[0];
 }
 
+// ── Main loop ───────────────────────────────────────────
 async function startScanner() {
   const allPairs = generateScanPairs();
   const batchSize = CONFIG.SCANNER_BATCH_SIZE;
 
   console.log(`[SCANNER] ${ALL_SCAN_TOKENS.length} tokens (${ARB_INTERMEDIATE_TOKENS.length} blue-chip + ${ALL_SCAN_TOKENS.length - ARB_INTERMEDIATE_TOKENS.length} memecoin)`);
-  console.log(`[SCANNER] Strategies: direct, dex-diff, cross-stable, 3leg-tri`);
-  console.log(`[SCANNER] ${allPairs.length} triangular pairs + ${ALL_SCAN_TOKENS.length} direct + ${ALL_SCAN_TOKENS.length} dex-diff + ${ALL_SCAN_TOKENS.length} cross-stable`);
-  console.log(`[SCANNER] Entry sizes: ${ENTRY_SIZES_USDC.map((amount) => `$${amount / 1e6}`).join(", ")}`);
-  console.log(`[SCANNER] Interval: ${CONFIG.SCANNER_INTERVAL_MS}ms | Batch: ${batchSize}`);
+  console.log(`[SCANNER] Strategies: signal-driven + direct, dex-diff, cross-stable, 3leg-tri`);
+  console.log(`[SCANNER] ${allPairs.length} triangular pairs | Batch: ${batchSize}`);
+  console.log(`[SCANNER] Entry sizes: ${ENTRY_SIZES_USDC.map((a) => `$${a / 1e6}`).join(", ")}`);
+  console.log(`[SCANNER] Interval: ${CONFIG.SCANNER_INTERVAL_MS}ms`);
   console.log(`[SCANNER] RPC: ${CONFIG.HELIUS_HTTP.replace(/api-key=.*/, "api-key=***")}`);
+  console.log(`[SCANNER] WS: ${CONFIG.HELIUS_WS.replace(/api-key=.*/, "api-key=***")}`);
 
   // Startup balance check
   const startupBalance = await getUsdcBalance();
-  console.log(`[SCANNER] Startup USDC balance: $${(startupBalance / 1e6).toFixed(2)} (raw: ${startupBalance})`);
+  console.log(`[SCANNER] Startup USDC balance: $${(startupBalance / 1e6).toFixed(2)}`);
 
-  await logDexSupport();
+  // Start signal monitors
+  startWhaleMonitor(connection, onSignal);
+  console.log("[SCANNER] Whale signal monitor started");
+
+  // Start periodic spread + depeg checks
+  const spreadInterval = setInterval(async () => {
+    try {
+      await checkSpreadPulse(onSignal);
+    } catch (e) {
+      console.error(`[SIGNALS] Spread check error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, 15_000); // Every 15s
+
+  const depegInterval = setInterval(async () => {
+    try {
+      await checkDepeg(onSignal);
+    } catch (e) {
+      console.error(`[SIGNALS] Depeg check error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, 10_000); // Every 10s
+
+  // Initial spread + depeg check
+  checkSpreadPulse(onSignal).catch(() => {});
+  checkDepeg(onSignal).catch(() => {});
 
   let pairIndex = 0;
   let tokenIndex = 0;
@@ -310,15 +370,34 @@ async function startScanner() {
 
   while (true) {
     totalScans++;
+
+    // ── PRIORITY 1: Process signal queue ──
+    while (signalQueue.length > 0) {
+      const signal = signalQueue.shift()!;
+
+      // Skip stale signals (> 10 seconds old)
+      if (Date.now() - signal.timestamp > 10_000) continue;
+
+      console.log(`[SCANNER] Processing ${signal.type} signal for ${signal.tokenSymbol}...`);
+      const result = await scanFromSignal(signal);
+      if (result) {
+        if (signal.type === "whale") totalDirect++;
+        else if (signal.type === "spread") totalDirect++;
+        else if (signal.type === "depeg") totalCrossStable++;
+        await executeOpportunity(result);
+      }
+    }
+
+    // ── PRIORITY 2: Background scanning ──
     const entryAmount = ENTRY_SIZES_USDC[entryIndex % ENTRY_SIZES_USDC.length];
     entryIndex++;
 
     const allResults: ScanResult[] = [];
-    const strategy = strategyRotation % 4; // Now 4 strategies
+    const strategy = strategyRotation % 4;
     strategyRotation++;
 
     if (strategy === 0) {
-      // ── DIRECT: Jupiter best-route (highest hit rate) ──
+      // Direct scan with near-miss logging
       const directBatch: Promise<{ result: ScanResult | null; nearMiss?: { route: string; profitUsd: number; entryUsd: number } }>[] = [];
 
       for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
@@ -342,22 +421,14 @@ async function startScanner() {
         }
       }
     } else if (strategy === 1) {
-      // ── DEX DIFFERENTIAL ──
+      // Dex differential
       const dexBatch: Promise<ScanResult | null>[] = [];
-
       for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
         const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
         tokenIndex++;
-
-        const primaryPair = getDexPair(dexPairIndex++);
-        dexBatch.push(scanDexDifferential(token.mint, token.symbol, entryAmount, primaryPair));
-
-        if (entryAmount <= 5_000_000) {
-          const secondaryPair = getDexPair(dexPairIndex++);
-          dexBatch.push(scanDexDifferential(token.mint, token.symbol, entryAmount, secondaryPair));
-        }
+        const pair = getDexPair(dexPairIndex++);
+        dexBatch.push(scanDexDifferential(token.mint, token.symbol, entryAmount, pair));
       }
-
       const dexResults = await Promise.all(dexBatch);
       for (const result of dexResults) {
         if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
@@ -366,15 +437,13 @@ async function startScanner() {
         }
       }
     } else if (strategy === 2) {
-      // ── CROSS-STABLE ──
+      // Cross-stable
       const crossBatch: Promise<ScanResult | null>[] = [];
-
       for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
         const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
         tokenIndex++;
         crossBatch.push(scanCrossStable(token.mint, token.symbol, entryAmount));
       }
-
       const crossResults = await Promise.all(crossBatch);
       for (const result of crossResults) {
         if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
@@ -383,15 +452,13 @@ async function startScanner() {
         }
       }
     } else {
-      // ── 3-LEG TRIANGULAR ──
+      // 3-leg triangular
       const triBatch: Promise<ScanResult | null>[] = [];
-
       for (let i = 0; i < batchSize; i++) {
         const pair = allPairs[pairIndex % allPairs.length];
         pairIndex++;
         triBatch.push(scan3Leg(pair.tokenA, pair.symbolA, pair.tokenB, pair.symbolB, entryAmount));
       }
-
       const triResults = await Promise.all(triBatch);
       for (const result of triResults) {
         if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
@@ -410,8 +477,9 @@ async function startScanner() {
   }
 }
 
+// ── Boot ────────────────────────────────────────────────
 console.log("═══════════════════════════════════════════════════");
-console.log("  RICKY TRADES — Continuous Arb Scanner v5");
+console.log("  RICKY TRADES — Signal-Driven Arb Scanner v6");
 console.log("═══════════════════════════════════════════════════");
 console.log(`[SCANNER] Bot wallet: ${keypair.publicKey.toBase58()}`);
 console.log(`[SCANNER] Min profit: $${CONFIG.MIN_PROFIT}`);
@@ -423,6 +491,6 @@ startScanner();
 
 setInterval(() => {
   console.log(
-    `[HEARTBEAT] ${new Date().toISOString()} | scans=${totalScans} | direct=${totalDirect} | dexDiff=${totalDexDiff} | 3leg=${total3Leg} | xstable=${totalCrossStable} | nearMiss=${totalNearMisses} | opps=${totalOpportunities} | bundles=${totalBundlesSent} | profit=$${totalProfit.toFixed(4)}`
+    `[HEARTBEAT] ${new Date().toISOString()} | scans=${totalScans} | signals: whale=${totalWhaleSignals} spread=${totalSpreadSignals} depeg=${totalDepegSignals} | direct=${totalDirect} | dexDiff=${totalDexDiff} | 3leg=${total3Leg} | xstable=${totalCrossStable} | nearMiss=${totalNearMisses} | opps=${totalOpportunities} | bundles=${totalBundlesSent} | profit=$${totalProfit.toFixed(4)}`
   );
 }, 60_000);
