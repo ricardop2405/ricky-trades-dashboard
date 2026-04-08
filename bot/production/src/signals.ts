@@ -253,10 +253,6 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
     } catch {
       continue;
     }
-      }
-    } catch {
-      continue;
-    }
   }
 
   return results;
