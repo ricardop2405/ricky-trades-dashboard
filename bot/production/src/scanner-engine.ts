@@ -490,6 +490,8 @@ async function startScanner() {
     if (allResults.length > 0) {
       allResults.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
       await executeOpportunity(allResults[0]);
+      // Cool down after execution attempt to recover rate limit headroom
+      await sleep(5000);
     }
 
     await sleep(CONFIG.SCANNER_INTERVAL_MS);
