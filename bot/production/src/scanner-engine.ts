@@ -23,7 +23,7 @@ import {
   probeDexSupport,
   ScanResult,
   scan3Leg,
-  SCANNER_DEXES,
+  SCANNER_DEX_LABELS,
   scanCrossStable,
   scanDexDifferential,
 } from "./scanner-strategies";
