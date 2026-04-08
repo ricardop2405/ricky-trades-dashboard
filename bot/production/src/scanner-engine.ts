@@ -63,6 +63,8 @@ let totalSpreadSignals = 0;
 let totalDepegSignals = 0;
 let usdcBalanceCache = 0;
 let lastBalanceCheck = 0;
+let executionInFlight = false;
+let jupiterCooldownUntil = 0;
 
 // ── Whale signal queue (only for whale signals now) ─────
 const whaleQueue: Signal[] = [];
@@ -125,6 +127,11 @@ const SWAP_ENDPOINTS = [
 ];
 
 async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
+  if (Date.now() < jupiterCooldownUntil) {
+    console.warn(`[SWAP] Cooling down for ${Math.ceil((jupiterCooldownUntil - Date.now()) / 1000)}s after rate limit`);
+    return null;
+  }
+
   const body = JSON.stringify({
     quoteResponse: quote,
     userPublicKey: keypair.publicKey.toBase58(),
@@ -149,6 +156,7 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
           const errText = await res.text().catch(() => "");
           console.warn(`[SWAP] ${endpoint} → ${res.status}: ${errText.slice(0, 120)}`);
           if ((res.status === 429 || res.status >= 500) && attempt === 0) {
+            if (res.status === 429) jupiterCooldownUntil = Date.now() + 15_000;
             await sleep(250);
             continue;
           }
@@ -266,6 +274,10 @@ async function submitJitoBundle(result: ScanResult): Promise<{
 }
 
 async function executeOpportunity(result: ScanResult) {
+  if (executionInFlight) return;
+  if (Date.now() < jupiterCooldownUntil) return;
+
+  executionInFlight = true;
   const startTime = Date.now();
   totalOpportunities++;
 
@@ -325,6 +337,7 @@ async function executeOpportunity(result: ScanResult) {
       bundleResult.error ? ` | ${bundleResult.error}` : ""
     }`
   );
+  executionInFlight = false;
 }
 
 // ── Whale signal scan ───────────────────────────────────
@@ -425,6 +438,7 @@ async function startScanner() {
     while (whaleQueue.length > 0) {
       const signal = whaleQueue.shift()!;
       if (Date.now() - signal.timestamp > 10_000) continue;
+      if (executionInFlight || Date.now() < jupiterCooldownUntil) break;
 
       console.log(`[SCANNER] Processing whale signal for ${signal.tokenSymbol}...`);
       const result = await scanFromWhaleSignal(signal);
@@ -435,6 +449,11 @@ async function startScanner() {
     }
 
     // ── PRIORITY 2: Background scanning ──
+    if (executionInFlight || Date.now() < jupiterCooldownUntil) {
+      await sleep(1000);
+      continue;
+    }
+
     const entryAmount = ENTRY_SIZES_USDC[entryIndex % ENTRY_SIZES_USDC.length];
     entryIndex++;
 
