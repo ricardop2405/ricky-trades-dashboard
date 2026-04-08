@@ -185,6 +185,7 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
           const events = Array.isArray(data) ? data : data.data || data.events || [];
           const now = Date.now() / 1000;
 
+          let splitDebugLogged = false;
           for (const event of events) {
             const markets = event.markets || [];
             // ── Split & Sell: check EACH individual market ──
@@ -193,10 +194,20 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
               const closeTime = Number(m.closeTime || m.metadata?.closeTime || 0);
               if (closeTime && closeTime < now) continue;
 
-              const sellYes = Number(m.pricing?.sellYesPriceUsd || 0) / 1_000_000;
-              const sellNo = Number(m.pricing?.sellNoPriceUsd || 0) / 1_000_000;
-              const buyYes = Number(m.pricing?.buyYesPriceUsd || 0) / 1_000_000;
-              const buyNo = Number(m.pricing?.buyNoPriceUsd || 0) / 1_000_000;
+              const pricing = m.pricing || {};
+              const sellYes = Number(pricing.sellYesPriceUsd || 0) / 1_000_000;
+              const sellNo = Number(pricing.sellNoPriceUsd || 0) / 1_000_000;
+              const buyYes = Number(pricing.buyYesPriceUsd || 0) / 1_000_000;
+              const buyNo = Number(pricing.buyNoPriceUsd || 0) / 1_000_000;
+
+              // Debug: log first market's full pricing to see available fields
+              if (!splitDebugLogged) {
+                splitDebugLogged = true;
+                const pricingKeys = Object.keys(pricing);
+                console.log(`[SPLIT-DEBUG] First market pricing keys: ${pricingKeys.join(", ")}`);
+                console.log(`[SPLIT-DEBUG] Raw pricing: ${JSON.stringify(pricing)}`);
+                console.log(`[SPLIT-DEBUG] Parsed: buyY=$${buyYes.toFixed(4)} buyN=$${buyNo.toFixed(4)} sellY=$${sellYes.toFixed(4)} sellN=$${sellNo.toFixed(4)}`);
+              }
 
               if (sellYes > 0 && sellNo > 0) {
                 const splitSpread = sellYes + sellNo - 1;
@@ -213,7 +224,7 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
                     spread: 0,
                     category: "crypto",
                     endDate: toIsoFromUnix(closeTime),
-                    volume: Number(m.pricing?.volume || 0),
+                    volume: Number(pricing.volume || 0),
                     platform: "jupiter_predict",
                     closeTime: closeTime || null,
                     openTime: Number(m.openTime || 0) || null,
