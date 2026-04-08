@@ -287,3 +287,98 @@ export async function scan3Leg(
     return null;
   }
 }
+
+// ── NEW: Direct 2-leg scan (Jupiter best-route, no DEX restriction) ──
+// Lets Jupiter pick the optimal route across ALL available DEXes.
+// Same atomic safety: if exit < entry + tip, Jito bundle reverts at $0 cost.
+export async function scanDirect(
+  tokenMint: string,
+  tokenSymbol: string,
+  entryAmount: number
+): Promise<ScanResult | null> {
+  try {
+    const isMemecoin = MEMECOIN_MINTS.has(tokenMint);
+    if (entryAmount > getMaxEntry(tokenMint)) return null;
+
+    const slippage = isMemecoin ? 100 : 30;
+
+    const buyQuote = await getJupiterQuote(USDC_MINT, tokenMint, entryAmount, slippage);
+    if (!buyQuote) return null;
+
+    const sellQuote = await getJupiterQuote(tokenMint, USDC_MINT, Number(buyQuote.outAmount), slippage);
+    if (!sellQuote) return null;
+
+    const exitAmount = Number(sellQuote.outAmount);
+    if (!isSafeQuote(entryAmount, exitAmount, isMemecoin)) return null;
+
+    const profitUsd = estimateProfitUsd(entryAmount, exitAmount);
+    if (profitUsd <= 0) return null;
+
+    return {
+      route: `USDC →[best] ${tokenSymbol} →[best] USDC`,
+      legs: 2,
+      quotes: [buyQuote, sellQuote],
+      entryAmount: entryAmount / 1_000_000,
+      exitAmount: exitAmount / 1_000_000,
+      estimatedProfit: profitUsd,
+      entryRaw: entryAmount,
+      strategy: "direct",
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ── Near-miss logger ──
+export async function scanDirectWithNearMiss(
+  tokenMint: string,
+  tokenSymbol: string,
+  entryAmount: number
+): Promise<{ result: ScanResult | null; nearMiss?: { route: string; profitUsd: number; entryUsd: number } }> {
+  try {
+    const isMemecoin = MEMECOIN_MINTS.has(tokenMint);
+    if (entryAmount > getMaxEntry(tokenMint)) return { result: null };
+
+    const slippage = isMemecoin ? 100 : 30;
+
+    const buyQuote = await getJupiterQuote(USDC_MINT, tokenMint, entryAmount, slippage);
+    if (!buyQuote) return { result: null };
+
+    const sellQuote = await getJupiterQuote(tokenMint, USDC_MINT, Number(buyQuote.outAmount), slippage);
+    if (!sellQuote) return { result: null };
+
+    const exitAmount = Number(sellQuote.outAmount);
+    if (!isSafeQuote(entryAmount, exitAmount, isMemecoin)) return { result: null };
+
+    const profitUsd = estimateProfitUsd(entryAmount, exitAmount);
+
+    if (profitUsd <= 0) {
+      if (profitUsd > -0.10) {
+        return {
+          result: null,
+          nearMiss: {
+            route: `USDC →[best] ${tokenSymbol} →[best] USDC`,
+            profitUsd,
+            entryUsd: entryAmount / 1_000_000,
+          },
+        };
+      }
+      return { result: null };
+    }
+
+    return {
+      result: {
+        route: `USDC →[best] ${tokenSymbol} →[best] USDC`,
+        legs: 2,
+        quotes: [buyQuote, sellQuote],
+        entryAmount: entryAmount / 1_000_000,
+        exitAmount: exitAmount / 1_000_000,
+        estimatedProfit: profitUsd,
+        entryRaw: entryAmount,
+        strategy: "direct",
+      },
+    };
+  } catch {
+    return { result: null };
+  }
+}
