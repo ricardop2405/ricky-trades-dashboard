@@ -97,6 +97,10 @@ interface JupMarket {
   platform: "jupiter_predict" | "dflow";
   closeTime?: number | null;
   openTime?: number | null;
+  // Sell (bid) prices for Split & Sell strategy
+  sellYesPrice: number;
+  sellNoPrice: number;
+  splitSpread: number; // sellYes + sellNo - 1 (positive = profit)
 }
 
 function toIsoFromUnix(value?: number | null): string | null {
