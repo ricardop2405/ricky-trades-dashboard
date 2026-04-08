@@ -21,6 +21,8 @@ import {
 import { getJupiterQuote, ScanResult } from "./scanner-strategies";
 import { getTokenName } from "./utils";
 
+const SOL_MINT_LOCAL = "So11111111111111111111111111111111111111112";
+
 const SUPPORTED_SIGNAL_MINTS = new Set(ALL_SCAN_TOKENS.map((token) => token.mint));
 
 // ── Signal types ────────────────────────────────────────
@@ -260,6 +262,91 @@ export async function findSpreadOpportunities(onSignal: SignalCallback): Promise
       });
 
       results.push(...tokenResults);
+    } catch {
+      continue;
+    }
+  }
+
+  return results;
+}
+
+// ── SOL-Intermediary Scanner ────────────────────────────
+// Finds USDC → SOL → Token → USDC triangular routes through SOL
+// SOL has deepest liquidity so routing through it can find edges
+export async function findSolIntermediaryOpportunities(onSignal: SignalCallback): Promise<ScanResult[]> {
+  const results: ScanResult[] = [];
+  const executionFloorUsd = getScannerExecutionFloorUsd();
+  const sizes = [25_000_000, 50_000_000]; // $25, $50
+
+  // Only scan non-SOL, non-stablecoin tokens
+  const candidates = ALL_SCAN_TOKENS.filter(
+    (t) => t.mint !== SOL_MINT_LOCAL && t.mint !== USDC_MINT && t.mint !== USDT_MINT
+  );
+
+  for (const token of candidates) {
+    try {
+      // Quick probe at $10: USDC → SOL → Token → USDC
+      const probeSize = 10_000_000;
+      const q1 = await getJupiterQuote(USDC_MINT, SOL_MINT_LOCAL, probeSize, 30);
+      if (!q1) continue;
+
+      const q2 = await getJupiterQuote(SOL_MINT_LOCAL, token.mint, Number(q1.outAmount), 50);
+      if (!q2) continue;
+
+      const q3 = await getJupiterQuote(token.mint, USDC_MINT, Number(q2.outAmount), 30);
+      if (!q3) continue;
+
+      const probeExit = Number(q3.outAmount);
+      const probeProfitUsd = estimateProfitUsd(probeSize, probeExit);
+
+      if (probeProfitUsd < executionFloorUsd * 0.4) continue;
+
+      // Scale up to production sizes
+      for (const size of sizes) {
+        try {
+          await new Promise((r) => setTimeout(r, 200));
+
+          const buyQ1 = await getJupiterQuote(USDC_MINT, SOL_MINT_LOCAL, size, 30);
+          if (!buyQ1) continue;
+
+          const buyQ2 = await getJupiterQuote(SOL_MINT_LOCAL, token.mint, Number(buyQ1.outAmount), 50);
+          if (!buyQ2) continue;
+
+          const sellQ = await getJupiterQuote(token.mint, USDC_MINT, Number(buyQ2.outAmount), 30);
+          if (!sellQ) continue;
+
+          const exitAmount = Number(sellQ.outAmount);
+          const ratio = exitAmount / size;
+          if (ratio > 2 || ratio < 0.7) continue;
+
+          const profitUsd = estimateProfitUsd(size, exitAmount);
+          if (profitUsd >= executionFloorUsd) {
+            console.log(`[SOL-TRI] ✓ USDC→SOL→${token.symbol}→USDC $${size / 1e6}: profit=$${profitUsd.toFixed(4)}`);
+
+            onSignal({
+              type: "spread",
+              tokenMint: token.mint,
+              tokenSymbol: token.symbol,
+              strength: 1.0,
+              detail: `SOL-tri profit=$${profitUsd.toFixed(4)} on $${size / 1e6} entry`,
+              timestamp: Date.now(),
+            });
+
+            results.push({
+              route: `USDC → SOL → ${token.symbol} → USDC`,
+              legs: 3,
+              quotes: [buyQ1, buyQ2, sellQ],
+              entryAmount: size / 1_000_000,
+              exitAmount: exitAmount / 1_000_000,
+              estimatedProfit: profitUsd,
+              entryRaw: size,
+              strategy: "sol_tri",
+            });
+          }
+        } catch {
+          continue;
+        }
+      }
     } catch {
       continue;
     }
