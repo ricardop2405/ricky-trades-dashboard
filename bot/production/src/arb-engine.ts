@@ -79,6 +79,7 @@ console.log(`[ARB] Min spread: ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}%`);
 console.log(`[ARB] Scan interval: ${CONFIG.SCAN_INTERVAL / 1000}s`);
 console.log(`[ARB] Jupiter API: ${CONFIG.JUP_PREDICT_API}`);
 console.log(`[ARB] Execution: ATOMIC via Jito bundles (both legs same slot or neither)`);
+console.log(`[ARB] Strategies: MERGE (buy both < $1) + SPLIT & SELL (sell both > $1)`);
 console.log(`[ARB] Dynamic priority fees: ON`);
 console.log("═══════════════════════════════════════════════════════");
 
@@ -97,6 +98,10 @@ interface JupMarket {
   platform: "jupiter_predict" | "dflow";
   closeTime?: number | null;
   openTime?: number | null;
+  // Sell (bid) prices for Split & Sell strategy
+  sellYesPrice: number;
+  sellNoPrice: number;
+  splitSpread: number; // sellYes + sellNo - 1 (positive = profit)
 }
 
 function toIsoFromUnix(value?: number | null): string | null {
@@ -113,6 +118,7 @@ interface ArbOpportunity {
   grossProfit: number;
   fees: number;
   netProfit: number;
+  strategy: "merge" | "split_sell";
 }
 
 // ── Dynamic Priority Fees (Helius) ──────────────────────
@@ -181,7 +187,46 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
 
           for (const event of events) {
             const markets = event.markets || [];
-            // Each event has Up + Down markets — we want to pair them
+            // ── Split & Sell: check EACH individual market ──
+            for (const m of markets) {
+              if (m.status !== "open") continue;
+              const closeTime = Number(m.closeTime || m.metadata?.closeTime || 0);
+              if (closeTime && closeTime < now) continue;
+
+              const sellYes = Number(m.pricing?.sellYesPriceUsd || 0) / 1_000_000;
+              const sellNo = Number(m.pricing?.sellNoPriceUsd || 0) / 1_000_000;
+              const buyYes = Number(m.pricing?.buyYesPriceUsd || 0) / 1_000_000;
+              const buyNo = Number(m.pricing?.buyNoPriceUsd || 0) / 1_000_000;
+
+              if (sellYes > 0 && sellNo > 0) {
+                const splitSpread = sellYes + sellNo - 1;
+                if (splitSpread > 0) {
+                  const mTitle = m.metadata?.title || m.title || m.marketId;
+                  const eventTitle = event.metadata?.title || event.title || `${coin.toUpperCase()} ${interval}`;
+                  const splitMarket: JupMarket = {
+                    marketId: m.marketId,
+                    eventId: event.eventId || "",
+                    title: `[SPLIT] ${eventTitle} — ${mTitle} [sellY=$${sellYes.toFixed(3)} sellN=$${sellNo.toFixed(3)}]`,
+                    status: "open",
+                    yesPrice: buyYes,
+                    noPrice: buyNo,
+                    spread: 0,
+                    category: "crypto",
+                    endDate: toIsoFromUnix(closeTime),
+                    volume: Number(m.pricing?.volume || 0),
+                    platform: "jupiter_predict",
+                    closeTime: closeTime || null,
+                    openTime: Number(m.openTime || 0) || null,
+                    sellYesPrice: sellYes,
+                    sellNoPrice: sellNo,
+                    splitSpread,
+                  };
+                  allMarkets.push(splitMarket);
+                }
+              }
+            }
+
+            // ── Merge strategy: pair Up + Down markets ──
             let upMarket: any = null;
             let downMarket: any = null;
 
@@ -227,6 +272,9 @@ async function fetchJupiterMarkets(): Promise<JupMarket[]> {
               platform: "jupiter_predict",
               closeTime: closeTime || null,
               openTime: Number(upMarket.openTime || 0) || null,
+              sellYesPrice: 0,
+              sellNoPrice: 0,
+              splitSpread: 0,
             };
 
             // Store the Down market ID for execution (we need both)
@@ -294,6 +342,9 @@ async function fetchDFlowCryptoMarkets(): Promise<JupMarket[]> {
         const noPrice = Number(m.noAsk ?? m.noBid ?? 0);
         if (yesPrice <= 0 || noPrice <= 0) continue;
 
+        const sellYes = Number(m.yesBid ?? 0);
+        const sellNo = Number(m.noBid ?? 0);
+
         const market: JupMarket = {
           marketId: m.ticker || m.id,
           eventId: m.eventTicker || event.ticker || "",
@@ -308,6 +359,9 @@ async function fetchDFlowCryptoMarkets(): Promise<JupMarket[]> {
           platform: "dflow",
           closeTime: Number(m.closeTime ?? m.expirationTime ?? 0) || null,
           openTime: Number(m.openTime ?? 0) || null,
+          sellYesPrice: sellYes,
+          sellNoPrice: sellNo,
+          splitSpread: (sellYes > 0 && sellNo > 0) ? (sellYes + sellNo - 1) : 0,
         };
 
         // Simple time check: must close within 16 minutes
@@ -398,7 +452,65 @@ async function getExactOutQuote(
   }
 }
 
-// ── Build & Sign Transaction ────────────────────────────
+// ── Sell Order (for Split & Sell strategy) ───────────────
+async function getSellQuote(
+  marketId: string,
+  isYes: boolean,
+  contracts: number,
+  limitPrice: number,
+): Promise<string | null> {
+  try {
+    const body = {
+      ownerPubkey: WALLET,
+      marketId,
+      isYes,
+      isBuy: false,
+      contracts,
+    };
+
+    console.log(
+      `[JUP] Sell: ${isYes ? "YES" : "NO"} market=${marketId.slice(0, 12)}... ` +
+      `${contracts} contracts @ limit $${limitPrice.toFixed(4)}`
+    );
+
+    const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
+      method: "POST",
+      headers: jupHeaders(),
+      body: JSON.stringify(body),
+    });
+
+    const rawText = await res.text();
+    if (!res.ok) {
+      if (rawText.includes("unsupported_region")) {
+        console.error("[JUP] ❌ REGION BLOCKED on sell order — need PROXY_URL");
+      } else {
+        console.error(`[JUP] Sell error ${res.status}: ${rawText.slice(0, 500)}`);
+      }
+      return null;
+    }
+
+    let data: any;
+    try { data = JSON.parse(rawText); } catch { return null; }
+
+    // Verify sell price meets our minimum
+    if (data.minSellPriceUsd) {
+      const minFillPrice = Number(data.minSellPriceUsd) / 1_000_000;
+      if (minFillPrice < limitPrice * 0.98) { // 2% tolerance
+        console.error(
+          `[JUP] ❌ Sell fill $${minFillPrice.toFixed(4)} below limit $${limitPrice.toFixed(4)} — skipping`
+        );
+        return null;
+      }
+      console.log(`[JUP] ✅ Sell fill: $${minFillPrice.toFixed(4)} (within limit)`);
+    }
+
+    return data.transaction || null;
+  } catch (err) {
+    console.error("[JUP] Sell quote error:", err);
+    return null;
+  }
+}
+
 async function buildAndSign(base64Tx: string): Promise<VersionedTransaction> {
   const txBuf = Buffer.from(base64Tx, "base64");
   const tx = VersionedTransaction.deserialize(txBuf);
@@ -411,10 +523,42 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
   const opps: ArbOpportunity[] = [];
 
   for (const market of markets) {
-    const { yesPrice, noPrice, spread } = market;
-    // Skip markets on cooldown (recently attempted)
     const lastAttempt = marketCooldowns.get(market.marketId);
     if (lastAttempt && (Date.now() - lastAttempt) < COOLDOWN_MS) continue;
+
+    // ── Split & Sell: sellYes + sellNo > 1 + fees ──
+    if (market.splitSpread > 0) {
+      const amount = CONFIG.ARB_AMOUNT;
+      const sellYesRevenue = market.sellYesPrice * amount;
+      const sellNoRevenue = market.sellNoPrice * amount;
+      const totalRevenue = sellYesRevenue + sellNoRevenue;
+      const collateral = amount; // $1 per pair to split
+
+      const platformFee = totalRevenue * 0.005;
+      const txFeeUsd = 0.002 * CONFIG.SOL_PRICE_USD;
+      const fees = platformFee + txFeeUsd;
+
+      const grossProfit = totalRevenue - collateral;
+      const netProfit = grossProfit - fees;
+
+      if (netProfit > 0) {
+        opps.push({
+          market,
+          yesCost: sellYesRevenue,
+          noCost: sellNoRevenue,
+          totalCost: collateral,
+          payout: totalRevenue,
+          grossProfit,
+          fees,
+          netProfit,
+          strategy: "split_sell",
+        });
+      }
+      continue;
+    }
+
+    // ── Merge: buyYes + buyNo < 1 - fees ──
+    const { yesPrice, noPrice, spread } = market;
     if (spread <= CONFIG.MIN_SPREAD) continue;
 
     const amount = CONFIG.ARB_AMOUNT;
@@ -432,7 +576,7 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
     const netProfit = grossProfit - fees;
 
     if (netProfit > 0) {
-      opps.push({ market, yesCost, noCost, totalCost, payout, grossProfit, fees, netProfit });
+      opps.push({ market, yesCost, noCost, totalCost, payout, grossProfit, fees, netProfit, strategy: "merge" });
     }
   }
 
@@ -441,10 +585,139 @@ function findArbs(markets: JupMarket[]): ArbOpportunity[] {
 
 // ── Execute Arb ─────────────────────────────────────────
 async function executeArb(opp: ArbOpportunity): Promise<void> {
+  if (opp.strategy === "split_sell") {
+    return executeSplitSell(opp);
+  }
+  return executeMerge(opp);
+}
+
+// ── Split & Sell Execution ──────────────────────────────
+async function executeSplitSell(opp: ArbOpportunity): Promise<void> {
+  const { market, netProfit } = opp;
+  const contracts = Math.floor(CONFIG.ARB_AMOUNT);
+
+  console.log(`\n[SPLIT] ═══ EXECUTING SPLIT & SELL ══════════════════`);
+  console.log(`[SPLIT] Market: ${market.title}`);
+  console.log(`[SPLIT] Sell YES=$${market.sellYesPrice.toFixed(4)} + Sell NO=$${market.sellNoPrice.toFixed(4)} = ${(market.sellYesPrice + market.sellNoPrice).toFixed(4)}`);
+  console.log(`[SPLIT] Split spread: ${(market.splitSpread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
+  console.log(`[SPLIT] Collateral: $${CONFIG.ARB_AMOUNT} → ${contracts} YES + ${contracts} NO → sell both`);
+
+  if (market.platform === "dflow") {
+    console.log(`[SPLIT] 📊 DFlow opportunity logged (execution not yet supported)`);
+    marketCooldowns.set(market.marketId, Date.now());
+    return;
+  }
+
+  const { data: oppRow } = await supabase
+    .from("arb_opportunities")
+    .insert({
+      market_a_id: market.marketId,
+      market_b_id: market.marketId,
+      side_a: "sell_yes",
+      side_b: "sell_no",
+      price_a: market.sellYesPrice,
+      price_b: market.sellNoPrice,
+      spread: market.splitSpread,
+      status: "executing",
+    })
+    .select("id")
+    .single();
+
+  const oppId = oppRow?.id;
+
+  try {
+    const priorityFee = await getOptimalPriorityFee();
+    console.log(`[FEE] Dynamic priority fee: ${priorityFee} microlamports/CU`);
+
+    // Get sell transactions for both YES and NO
+    const [sellYesTxRaw, sellNoTxRaw] = await Promise.all([
+      getSellQuote(market.marketId, true, contracts, market.sellYesPrice),
+      getSellQuote(market.marketId, false, contracts, market.sellNoPrice),
+    ]);
+
+    if (!sellYesTxRaw || !sellNoTxRaw) {
+      console.log("[SPLIT] ⚠️  Could not get sell quotes — prices moved or region blocked");
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed",
+          error_message: `Sell quote failed: yes=${!!sellYesTxRaw} no=${!!sellNoTxRaw}`,
+        });
+        await supabase.from("arb_opportunities").update({ status: "expired" }).eq("id", oppId);
+      }
+      marketCooldowns.set(market.marketId, Date.now());
+      return;
+    }
+
+    // Sign and submit as atomic Jito bundle
+    const [sellYesTx, sellNoTx] = await Promise.all([
+      buildAndSign(sellYesTxRaw),
+      buildAndSign(sellNoTxRaw),
+    ]);
+
+    console.log("[JITO] Submitting Sell YES + Sell NO as atomic Jito bundle...");
+    const bundleResult = await sendJitoBundle([sellYesTx, sellNoTx]);
+    marketCooldowns.set(market.marketId, Date.now());
+
+    if (bundleResult) {
+      console.log(`[SPLIT] ✅ Jito bundle landed! Bundle ID: ${bundleResult}`);
+
+      await sleep(3000);
+      const openOrders = await getOpenOrders();
+      if (openOrders.length > 0) {
+        console.log(`[SPLIT] ⚠️  ${openOrders.length} unfilled orders — cancelling`);
+        await cancelAllOrders();
+        if (oppId) {
+          await supabase.from("arb_executions").insert({
+            opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+            status: "failed",
+            error_message: `Bundle landed but orders unfilled — cancelled ${openOrders.length}`,
+          });
+          await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+        }
+      } else {
+        console.log(`[SPLIT] ✅ Both sells filled atomically! Net profit: ~$${netProfit.toFixed(4)}`);
+        if (oppId) {
+          await supabase.from("arb_executions").insert({
+            opportunity_id: oppId, amount_usd: opp.totalCost, realized_pnl: netProfit,
+            fees: opp.fees, status: "filled",
+            side_a_tx: bs58.encode(sellYesTx.signatures[0]),
+            side_b_tx: bs58.encode(sellNoTx.signatures[0]),
+            side_a_fill_price: market.sellYesPrice, side_b_fill_price: market.sellNoPrice,
+          });
+          await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+        }
+      }
+    } else {
+      console.error(`[SPLIT] ❌ Jito bundle failed — no exposure, atomic rejection`);
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed",
+          error_message: "Jito bundle rejected — atomic failure, no exposure",
+        });
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      }
+    }
+  } catch (err) {
+    console.error("[SPLIT] ❌ Execution error:", err);
+    if (oppId) {
+      await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      await supabase.from("arb_executions").insert({
+        opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+        status: "failed",
+        error_message: err instanceof Error ? err.message : "Unknown error",
+      });
+    }
+  }
+}
+
+// ── Merge Execution (original strategy) ─────────────────
+async function executeMerge(opp: ArbOpportunity): Promise<void> {
   const { market, yesCost, noCost, totalCost, netProfit } = opp;
   const downMarketId = (market as any).downMarketId || market.marketId;
 
-  console.log(`\n[ARB] ═══ EXECUTING ═════════════════════════════════`);
+  console.log(`\n[ARB] ═══ EXECUTING MERGE ═══════════════════════════`);
   console.log(`[ARB] Event: ${market.title}`);
   console.log(`[ARB] Up YES=$${market.yesPrice.toFixed(4)} + Down YES=$${market.noPrice.toFixed(4)} = ${(market.yesPrice + market.noPrice).toFixed(4)}`);
   console.log(`[ARB] Spread: ${(market.spread * 100).toFixed(2)}% | Est. net profit: $${netProfit.toFixed(4)}`);
@@ -782,19 +1055,29 @@ async function runScan() {
 
     if (arbs.length === 0) {
       const allSpreads = markets.filter(m => m.spread > 0).sort((a, b) => b.spread - a.spread);
-      console.log(`[SCAN] No arbs above ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}% min spread`);
+      const allSplits = markets.filter(m => m.splitSpread > 0).sort((a, b) => b.splitSpread - a.splitSpread);
+      console.log(`[SCAN] No arbs above threshold | merge_candidates=${allSpreads.length} split_candidates=${allSplits.length}`);
       if (allSpreads.length > 0) {
-        console.log(`[SCAN] Closest positive spreads:`);
-        for (const m of allSpreads.slice(0, 5)) {
+        console.log(`[SCAN] Closest merge spreads:`);
+        for (const m of allSpreads.slice(0, 3)) {
           console.log(`  "${m.title.slice(0, 50)}" spread=${(m.spread * 100).toFixed(3)}%`);
+        }
+      }
+      if (allSplits.length > 0) {
+        console.log(`[SCAN] Closest split spreads:`);
+        for (const m of allSplits.slice(0, 3)) {
+          console.log(`  "${m.title.slice(0, 50)}" splitSpread=${(m.splitSpread * 100).toFixed(3)}%`);
         }
       }
       return;
     }
 
-    console.log(`\n[SCAN] 🎯 FOUND ${arbs.length} ARB OPPORTUNITIES!`);
+    const mergeArbs = arbs.filter(a => a.strategy === "merge");
+    const splitArbs = arbs.filter(a => a.strategy === "split_sell");
+    console.log(`\n[SCAN] 🎯 FOUND ${arbs.length} ARB OPPORTUNITIES! (${mergeArbs.length} merge, ${splitArbs.length} split)`);
     for (const a of arbs) {
-      console.log(`  💰 "${a.market.title.slice(0, 50)}" spread=${(a.market.spread * 100).toFixed(2)}% net=$${a.netProfit.toFixed(4)}`);
+      const icon = a.strategy === "split_sell" ? "🔀" : "💰";
+      console.log(`  ${icon} [${a.strategy}] "${a.market.title.slice(0, 50)}" net=$${a.netProfit.toFixed(4)}`);
     }
 
     for (const arb of arbs.slice(0, 3)) {
