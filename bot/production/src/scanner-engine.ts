@@ -462,6 +462,7 @@ async function startScanner() {
 
   // ── Periodic spread + depeg scanners (return executable results) ──
   setInterval(async () => {
+    if (executionInFlight || Date.now() < jupiterCooldownUntil) return;
     try {
       const spreadResults = await findSpreadOpportunities(onSignal);
       if (spreadResults.length > 0) {
@@ -475,21 +476,8 @@ async function startScanner() {
     }
   }, 12_000); // Every 12s
 
-  // Offset second spread scan for double coverage
-  setTimeout(() => {
-    setInterval(async () => {
-      try {
-        const spreadResults = await findSpreadOpportunities(onSignal);
-        if (spreadResults.length > 0) {
-          totalSpread += spreadResults.length;
-          spreadResults.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
-          await executeOpportunity(spreadResults[0]);
-        }
-      } catch {}
-    }, 12_000);
-  }, 6_000);
-
   setInterval(async () => {
+    if (executionInFlight || Date.now() < jupiterCooldownUntil) return;
     try {
       const depegResults = await findDepegOpportunities(onSignal);
       if (depegResults.length > 0) {
@@ -505,6 +493,7 @@ async function startScanner() {
 
   // SOL-intermediary triangular scan every 20s
   setInterval(async () => {
+    if (executionInFlight || Date.now() < jupiterCooldownUntil) return;
     try {
       const solTriResults = await findSolIntermediaryOpportunities(onSignal);
       if (solTriResults.length > 0) {
