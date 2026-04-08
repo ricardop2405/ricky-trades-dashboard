@@ -26,6 +26,8 @@ import {
   SCANNER_DEX_LABELS,
   scanCrossStable,
   scanDexDifferential,
+  scanDirect,
+  scanDirectWithNearMiss,
 } from "./scanner-strategies";
 import { sleep } from "./utils";
 
@@ -43,6 +45,8 @@ let totalScans = 0;
 let totalDexDiff = 0;
 let total3Leg = 0;
 let totalCrossStable = 0;
+let totalDirect = 0;
+let totalNearMisses = 0;
 let totalOpportunities = 0;
 let totalBundlesSent = 0;
 let totalProfit = 0;
@@ -286,8 +290,8 @@ async function startScanner() {
   const batchSize = CONFIG.SCANNER_BATCH_SIZE;
 
   console.log(`[SCANNER] ${ALL_SCAN_TOKENS.length} tokens (${ARB_INTERMEDIATE_TOKENS.length} blue-chip + ${ALL_SCAN_TOKENS.length - ARB_INTERMEDIATE_TOKENS.length} memecoin)`);
-  console.log(`[SCANNER] Strategies: dex-diff, cross-stable, 3leg-tri`);
-  console.log(`[SCANNER] ${allPairs.length} triangular pairs + ${ALL_SCAN_TOKENS.length} dex-diff + ${ALL_SCAN_TOKENS.length} cross-stable`);
+  console.log(`[SCANNER] Strategies: direct, dex-diff, cross-stable, 3leg-tri`);
+  console.log(`[SCANNER] ${allPairs.length} triangular pairs + ${ALL_SCAN_TOKENS.length} direct + ${ALL_SCAN_TOKENS.length} dex-diff + ${ALL_SCAN_TOKENS.length} cross-stable`);
   console.log(`[SCANNER] Entry sizes: ${ENTRY_SIZES_USDC.map((amount) => `$${amount / 1e6}`).join(", ")}`);
   console.log(`[SCANNER] Interval: ${CONFIG.SCANNER_INTERVAL_MS}ms | Batch: ${batchSize}`);
   console.log(`[SCANNER] RPC: ${CONFIG.HELIUS_HTTP.replace(/api-key=.*/, "api-key=***")}`);
@@ -310,10 +314,35 @@ async function startScanner() {
     entryIndex++;
 
     const allResults: ScanResult[] = [];
-    const strategy = strategyRotation % 3;
+    const strategy = strategyRotation % 4; // Now 4 strategies
     strategyRotation++;
 
     if (strategy === 0) {
+      // ── DIRECT: Jupiter best-route (highest hit rate) ──
+      const directBatch: Promise<{ result: ScanResult | null; nearMiss?: { route: string; profitUsd: number; entryUsd: number } }>[] = [];
+
+      for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
+        const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
+        tokenIndex++;
+        directBatch.push(scanDirectWithNearMiss(token.mint, token.symbol, entryAmount));
+      }
+
+      const directResults = await Promise.all(directBatch);
+      for (const { result, nearMiss } of directResults) {
+        if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
+          totalDirect++;
+          allResults.push(result);
+        } else if (nearMiss) {
+          totalNearMisses++;
+          if (totalNearMisses <= 20 || totalNearMisses % 50 === 0) {
+            console.log(
+              `[NEAR-MISS] ${nearMiss.route} | $${nearMiss.entryUsd} | gap: $${nearMiss.profitUsd.toFixed(4)}`
+            );
+          }
+        }
+      }
+    } else if (strategy === 1) {
+      // ── DEX DIFFERENTIAL ──
       const dexBatch: Promise<ScanResult | null>[] = [];
 
       for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
@@ -336,7 +365,8 @@ async function startScanner() {
           allResults.push(result);
         }
       }
-    } else if (strategy === 1) {
+    } else if (strategy === 2) {
+      // ── CROSS-STABLE ──
       const crossBatch: Promise<ScanResult | null>[] = [];
 
       for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
@@ -353,6 +383,7 @@ async function startScanner() {
         }
       }
     } else {
+      // ── 3-LEG TRIANGULAR ──
       const triBatch: Promise<ScanResult | null>[] = [];
 
       for (let i = 0; i < batchSize; i++) {
@@ -380,7 +411,7 @@ async function startScanner() {
 }
 
 console.log("═══════════════════════════════════════════════════");
-console.log("  RICKY TRADES — Continuous Arb Scanner v4");
+console.log("  RICKY TRADES — Continuous Arb Scanner v5");
 console.log("═══════════════════════════════════════════════════");
 console.log(`[SCANNER] Bot wallet: ${keypair.publicKey.toBase58()}`);
 console.log(`[SCANNER] Min profit: $${CONFIG.MIN_PROFIT}`);
@@ -392,6 +423,6 @@ startScanner();
 
 setInterval(() => {
   console.log(
-    `[HEARTBEAT] ${new Date().toISOString()} | scans=${totalScans} | dexDiff=${totalDexDiff} | 3leg=${total3Leg} | xstable=${totalCrossStable} | opps=${totalOpportunities} | bundles=${totalBundlesSent} | profit=$${totalProfit.toFixed(4)}`
+    `[HEARTBEAT] ${new Date().toISOString()} | scans=${totalScans} | direct=${totalDirect} | dexDiff=${totalDexDiff} | 3leg=${total3Leg} | xstable=${totalCrossStable} | nearMiss=${totalNearMisses} | opps=${totalOpportunities} | bundles=${totalBundlesSent} | profit=$${totalProfit.toFixed(4)}`
   );
 }, 60_000);
