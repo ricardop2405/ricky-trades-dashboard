@@ -134,26 +134,40 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
   });
 
   for (const endpoint of SWAP_ENDPOINTS) {
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-      });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": "ricky-trades-scanner/1.0",
+          },
+          body,
+        });
 
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        console.warn(`[SWAP] ${endpoint} → ${res.status}: ${errText.slice(0, 120)}`);
-        continue;
-      }
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          console.warn(`[SWAP] ${endpoint} → ${res.status}: ${errText.slice(0, 120)}`);
+          if ((res.status === 429 || res.status >= 500) && attempt === 0) {
+            await sleep(250);
+            continue;
+          }
+          break;
+        }
 
-      const data = await res.json();
-      if (data.swapTransaction) {
-        return Buffer.from(data.swapTransaction, "base64");
+        const data = await res.json();
+        if (data.swapTransaction) {
+          return Buffer.from(data.swapTransaction, "base64");
+        }
+        console.warn(`[SWAP] ${endpoint} → no swapTransaction`);
+        break;
+      } catch (err) {
+        console.warn(`[SWAP] ${endpoint} → ${err instanceof Error ? err.message : String(err)}`);
+        if (attempt === 0) {
+          await sleep(250);
+          continue;
+        }
       }
-      console.warn(`[SWAP] ${endpoint} → no swapTransaction`);
-    } catch (err) {
-      console.warn(`[SWAP] ${endpoint} → ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -167,12 +181,17 @@ async function submitJitoBundle(result: ScanResult): Promise<{
   error?: string;
 }> {
   try {
-    const swapBuffers = await Promise.all(result.quotes.map((q) => getJupiterSwapTx(q)));
-    if (swapBuffers.some((b) => !b)) {
-      return { success: false, error: "Failed to get swap transactions" };
+    const swapBuffers: Buffer[] = [];
+    for (const quote of result.quotes) {
+      const swapBuffer = await getJupiterSwapTx(quote);
+      if (!swapBuffer) {
+        return { success: false, error: "Failed to get swap transactions" };
+      }
+      swapBuffers.push(swapBuffer);
+      await sleep(150);
     }
 
-    const swapTxs = swapBuffers.map((b) => VersionedTransaction.deserialize(b!));
+    const swapTxs = swapBuffers.map((b) => VersionedTransaction.deserialize(b));
     const tipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
     const tipIx = SystemProgram.transfer({
       fromPubkey: keypair.publicKey,
