@@ -1055,19 +1055,29 @@ async function runScan() {
 
     if (arbs.length === 0) {
       const allSpreads = markets.filter(m => m.spread > 0).sort((a, b) => b.spread - a.spread);
-      console.log(`[SCAN] No arbs above ${(CONFIG.MIN_SPREAD * 100).toFixed(1)}% min spread`);
+      const allSplits = markets.filter(m => m.splitSpread > 0).sort((a, b) => b.splitSpread - a.splitSpread);
+      console.log(`[SCAN] No arbs above threshold | merge_candidates=${allSpreads.length} split_candidates=${allSplits.length}`);
       if (allSpreads.length > 0) {
-        console.log(`[SCAN] Closest positive spreads:`);
-        for (const m of allSpreads.slice(0, 5)) {
+        console.log(`[SCAN] Closest merge spreads:`);
+        for (const m of allSpreads.slice(0, 3)) {
           console.log(`  "${m.title.slice(0, 50)}" spread=${(m.spread * 100).toFixed(3)}%`);
+        }
+      }
+      if (allSplits.length > 0) {
+        console.log(`[SCAN] Closest split spreads:`);
+        for (const m of allSplits.slice(0, 3)) {
+          console.log(`  "${m.title.slice(0, 50)}" splitSpread=${(m.splitSpread * 100).toFixed(3)}%`);
         }
       }
       return;
     }
 
-    console.log(`\n[SCAN] 🎯 FOUND ${arbs.length} ARB OPPORTUNITIES!`);
+    const mergeArbs = arbs.filter(a => a.strategy === "merge");
+    const splitArbs = arbs.filter(a => a.strategy === "split_sell");
+    console.log(`\n[SCAN] 🎯 FOUND ${arbs.length} ARB OPPORTUNITIES! (${mergeArbs.length} merge, ${splitArbs.length} split)`);
     for (const a of arbs) {
-      console.log(`  💰 "${a.market.title.slice(0, 50)}" spread=${(a.market.spread * 100).toFixed(2)}% net=$${a.netProfit.toFixed(4)}`);
+      const icon = a.strategy === "split_sell" ? "🔀" : "💰";
+      console.log(`  ${icon} [${a.strategy}] "${a.market.title.slice(0, 50)}" net=$${a.netProfit.toFixed(4)}`);
     }
 
     for (const arb of arbs.slice(0, 3)) {
