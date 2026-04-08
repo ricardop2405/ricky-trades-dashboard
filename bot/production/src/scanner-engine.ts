@@ -290,6 +290,11 @@ async function startScanner() {
   console.log(`[SCANNER] ${allPairs.length} triangular pairs + ${ALL_SCAN_TOKENS.length} dex-diff + ${ALL_SCAN_TOKENS.length} cross-stable`);
   console.log(`[SCANNER] Entry sizes: ${ENTRY_SIZES_USDC.map((amount) => `$${amount / 1e6}`).join(", ")}`);
   console.log(`[SCANNER] Interval: ${CONFIG.SCANNER_INTERVAL_MS}ms | Batch: ${batchSize}`);
+  console.log(`[SCANNER] RPC: ${CONFIG.HELIUS_HTTP.replace(/api-key=.*/, "api-key=***")}`);
+
+  // Startup balance check
+  const startupBalance = await getUsdcBalance();
+  console.log(`[SCANNER] Startup USDC balance: $${(startupBalance / 1e6).toFixed(2)} (raw: ${startupBalance})`);
 
   await logDexSupport();
 
