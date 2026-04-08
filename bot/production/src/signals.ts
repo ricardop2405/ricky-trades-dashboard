@@ -179,7 +179,7 @@ function estimateProfitUsd(entryAmount: number, exitAmount: number): number {
 
 export async function findSpreadOpportunities(onSignal: SignalCallback): Promise<ScanResult[]> {
   const results: ScanResult[] = [];
-  const prodSizes = [5_000_000, 10_000_000, 25_000_000, 50_000_000]; // $5, $10, $25, $50
+  const prodSizes = [25_000_000, 50_000_000]; // focus on sizes that can actually clear the profit guardrail
 
   for (const token of ALL_SCAN_TOKENS) {
     try {
