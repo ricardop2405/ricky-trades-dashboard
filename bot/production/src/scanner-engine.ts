@@ -118,25 +118,47 @@ async function getUsdcBalance(): Promise<number> {
 }
 
 // ── Jito bundle submission ──────────────────────────────
+const SWAP_ENDPOINTS = [
+  "https://api.jup.ag/swap/v1/swap",
+  "https://lite-api.jup.ag/swap/v1/swap",
+  "https://quote-api.jup.ag/v6/swap",
+];
+
 async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
-  try {
-    const res = await fetch("https://quote-api.jup.ag/v6/swap", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey: keypair.publicKey.toBase58(),
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: 0,
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return Buffer.from(data.swapTransaction, "base64");
-  } catch {
-    return null;
+  const body = JSON.stringify({
+    quoteResponse: quote,
+    userPublicKey: keypair.publicKey.toBase58(),
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+    prioritizationFeeLamports: 0,
+  });
+
+  for (const endpoint of SWAP_ENDPOINTS) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        console.warn(`[SWAP] ${endpoint} → ${res.status}: ${errText.slice(0, 120)}`);
+        continue;
+      }
+
+      const data = await res.json();
+      if (data.swapTransaction) {
+        return Buffer.from(data.swapTransaction, "base64");
+      }
+      console.warn(`[SWAP] ${endpoint} → no swapTransaction`);
+    } catch (err) {
+      console.warn(`[SWAP] ${endpoint} → ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
+
+  console.error("[SWAP] All endpoints failed for quote");
+  return null;
 }
 
 async function submitJitoBundle(result: ScanResult): Promise<{
