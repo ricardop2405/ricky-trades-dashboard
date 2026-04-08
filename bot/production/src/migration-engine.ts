@@ -28,7 +28,7 @@ import { sleep, isRateLimitError } from "./utils";
 
 // ── Pump.fun Program ID ─────────────────────────────────
 const PUMPFUN_PROGRAM = new PublicKey(
-  "6EF8rrecthR5DkZztzU2LR9qe338PzIi9FMA00000000"
+  "6EF8rrecthR5Dkj7gP9PbHM1cwNYhQ1CaYc5NCbSKuap"
 );
 
 // ── Raydium V4 (pool creation target) ───────────────────
