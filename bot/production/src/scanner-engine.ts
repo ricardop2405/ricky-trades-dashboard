@@ -63,6 +63,8 @@ let totalSpreadSignals = 0;
 let totalDepegSignals = 0;
 let usdcBalanceCache = 0;
 let lastBalanceCheck = 0;
+let executionInFlight = false;
+let jupiterCooldownUntil = 0;
 
 // ── Whale signal queue (only for whale signals now) ─────
 const whaleQueue: Signal[] = [];
@@ -125,6 +127,11 @@ const SWAP_ENDPOINTS = [
 ];
 
 async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
+  if (Date.now() < jupiterCooldownUntil) {
+    console.warn(`[SWAP] Cooling down for ${Math.ceil((jupiterCooldownUntil - Date.now()) / 1000)}s after rate limit`);
+    return null;
+  }
+
   const body = JSON.stringify({
     quoteResponse: quote,
     userPublicKey: keypair.publicKey.toBase58(),
@@ -149,6 +156,7 @@ async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
           const errText = await res.text().catch(() => "");
           console.warn(`[SWAP] ${endpoint} → ${res.status}: ${errText.slice(0, 120)}`);
           if ((res.status === 429 || res.status >= 500) && attempt === 0) {
+            if (res.status === 429) jupiterCooldownUntil = Date.now() + 15_000;
             await sleep(250);
             continue;
           }
@@ -266,65 +274,72 @@ async function submitJitoBundle(result: ScanResult): Promise<{
 }
 
 async function executeOpportunity(result: ScanResult) {
-  const startTime = Date.now();
-  totalOpportunities++;
+  if (executionInFlight) return;
+  if (Date.now() < jupiterCooldownUntil) return;
 
-  // Pause to let Jupiter rate limits recover from scanning
-  await sleep(1500);
+  executionInFlight = true;
+  try {
+    const startTime = Date.now();
+    totalOpportunities++;
 
-  console.log(
-    `[SCANNER] 🎯 ${result.strategy} | ${result.route} | $${result.entryAmount} → $${result.exitAmount.toFixed(4)} | profit: $${result.estimatedProfit.toFixed(4)}`
-  );
+    await sleep(1500);
 
-  const balance = await getUsdcBalance();
-  if (balance < result.entryRaw) {
-    console.warn(`[SCANNER] Insufficient USDC: ${balance / 1e6} < ${result.entryRaw / 1e6}`);
-    return;
-  }
+    console.log(
+      `[SCANNER] 🎯 ${result.strategy} | ${result.route} | $${result.entryAmount} → $${result.exitAmount.toFixed(4)} | profit: $${result.estimatedProfit.toFixed(4)}`
+    );
 
-  if (CONFIG.MEV_DRY_RUN) {
-    console.log(`[DRY-RUN] Would submit: ${result.route} | $${result.estimatedProfit.toFixed(4)}`);
-    await supabase.from("bundle_results").insert({
+    const balance = await getUsdcBalance();
+    if (balance < result.entryRaw) {
+      console.warn(`[SCANNER] Insufficient USDC: ${balance / 1e6} < ${result.entryRaw / 1e6}`);
+      return;
+    }
+
+    if (CONFIG.MEV_DRY_RUN) {
+      console.log(`[DRY-RUN] Would submit: ${result.route} | $${result.estimatedProfit.toFixed(4)}`);
+      await supabase.from("bundle_results").insert({
+        route: result.route,
+        entry_amount: result.entryAmount,
+        exit_amount: result.exitAmount,
+        profit: result.estimatedProfit,
+        jito_tip: CONFIG.JITO_TIP / LAMPORTS_PER_SOL,
+        status: "dry_run",
+        tx_signature: null,
+        trigger_tx: `scan_${result.strategy}_${Date.now()}`,
+        latency_ms: Date.now() - startTime,
+      });
+      return;
+    }
+
+    totalBundlesSent++;
+    const bundleResult = await submitJitoBundle(result);
+    const latencyMs = Date.now() - startTime;
+
+    const outcome = {
       route: result.route,
       entry_amount: result.entryAmount,
-      exit_amount: result.exitAmount,
-      profit: result.estimatedProfit,
+      exit_amount: bundleResult.success ? result.exitAmount : result.entryAmount,
+      profit: bundleResult.success ? result.estimatedProfit : 0,
       jito_tip: CONFIG.JITO_TIP / LAMPORTS_PER_SOL,
-      status: "dry_run",
-      tx_signature: null,
+      status: bundleResult.success ? "success" : "reverted",
+      tx_signature: bundleResult.bundleId || null,
       trigger_tx: `scan_${result.strategy}_${Date.now()}`,
-      latency_ms: Date.now() - startTime,
-    });
-    return;
+      latency_ms: latencyMs,
+    };
+
+    if (bundleResult.success) {
+      totalProfit += result.estimatedProfit;
+      usdcBalanceCache = 0;
+    }
+
+    await supabase.from("bundle_results").insert(outcome);
+    console.log(
+      `[BUNDLE] ${outcome.status.toUpperCase()} | ${result.route} | $${outcome.profit.toFixed(4)} | ${latencyMs}ms${
+        bundleResult.error ? ` | ${bundleResult.error}` : ""
+      }`
+    );
+  } finally {
+    executionInFlight = false;
   }
-
-  totalBundlesSent++;
-  const bundleResult = await submitJitoBundle(result);
-  const latencyMs = Date.now() - startTime;
-
-  const outcome = {
-    route: result.route,
-    entry_amount: result.entryAmount,
-    exit_amount: bundleResult.success ? result.exitAmount : result.entryAmount,
-    profit: bundleResult.success ? result.estimatedProfit : 0,
-    jito_tip: CONFIG.JITO_TIP / LAMPORTS_PER_SOL,
-    status: bundleResult.success ? "success" : "reverted",
-    tx_signature: bundleResult.bundleId || null,
-    trigger_tx: `scan_${result.strategy}_${Date.now()}`,
-    latency_ms: latencyMs,
-  };
-
-  if (bundleResult.success) {
-    totalProfit += result.estimatedProfit;
-    usdcBalanceCache = 0;
-  }
-
-  await supabase.from("bundle_results").insert(outcome);
-  console.log(
-    `[BUNDLE] ${outcome.status.toUpperCase()} | ${result.route} | $${outcome.profit.toFixed(4)} | ${latencyMs}ms${
-      bundleResult.error ? ` | ${bundleResult.error}` : ""
-    }`
-  );
 }
 
 // ── Whale signal scan ───────────────────────────────────
@@ -425,6 +440,7 @@ async function startScanner() {
     while (whaleQueue.length > 0) {
       const signal = whaleQueue.shift()!;
       if (Date.now() - signal.timestamp > 10_000) continue;
+      if (executionInFlight || Date.now() < jupiterCooldownUntil) break;
 
       console.log(`[SCANNER] Processing whale signal for ${signal.tokenSymbol}...`);
       const result = await scanFromWhaleSignal(signal);
@@ -435,6 +451,11 @@ async function startScanner() {
     }
 
     // ── PRIORITY 2: Background scanning ──
+    if (executionInFlight || Date.now() < jupiterCooldownUntil) {
+      await sleep(1000);
+      continue;
+    }
+
     const entryAmount = ENTRY_SIZES_USDC[entryIndex % ENTRY_SIZES_USDC.length];
     entryIndex++;
 
