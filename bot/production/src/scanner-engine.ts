@@ -20,16 +20,19 @@ import {
 } from "./constants";
 import {
   getDexPair,
-  probeDexSupport,
   ScanResult,
   scan3Leg,
-  SCANNER_DEX_LABELS,
   scanCrossStable,
   scanDexDifferential,
   scanDirect,
   scanDirectWithNearMiss,
 } from "./scanner-strategies";
-import { Signal, startWhaleMonitor, checkSpreadPulse, checkDepeg } from "./signals";
+import {
+  Signal,
+  startWhaleMonitor,
+  findSpreadOpportunities,
+  findDepegOpportunities,
+} from "./signals";
 import { sleep } from "./utils";
 
 const keypair = Keypair.fromSecretKey(bs58.decode(CONFIG.PRIVATE_KEY));
@@ -49,6 +52,8 @@ let totalDirect = 0;
 let totalDexDiff = 0;
 let total3Leg = 0;
 let totalCrossStable = 0;
+let totalSpread = 0;
+let totalDepeg = 0;
 let totalNearMisses = 0;
 let totalOpportunities = 0;
 let totalBundlesSent = 0;
@@ -59,25 +64,25 @@ let totalDepegSignals = 0;
 let usdcBalanceCache = 0;
 let lastBalanceCheck = 0;
 
-// ── Signal queue ────────────────────────────────────────
-const signalQueue: Signal[] = [];
-const MAX_SIGNAL_QUEUE = 50;
+// ── Whale signal queue (only for whale signals now) ─────
+const whaleQueue: Signal[] = [];
+const MAX_WHALE_QUEUE = 20;
 
 function onSignal(signal: Signal) {
-  // Dedupe: don't queue same token within 5 seconds
-  const recent = signalQueue.find(
-    (s) => s.tokenMint === signal.tokenMint && Date.now() - s.timestamp < 5_000
-  );
-  if (recent) return;
-
-  if (signalQueue.length >= MAX_SIGNAL_QUEUE) {
-    signalQueue.shift(); // Drop oldest
+  if (signal.type === "whale") {
+    totalWhaleSignals++;
+    const recent = whaleQueue.find(
+      (s) => s.tokenMint === signal.tokenMint && Date.now() - s.timestamp < 5_000
+    );
+    if (!recent) {
+      if (whaleQueue.length >= MAX_WHALE_QUEUE) whaleQueue.shift();
+      whaleQueue.push(signal);
+    }
+  } else if (signal.type === "spread") {
+    totalSpreadSignals++;
+  } else if (signal.type === "depeg") {
+    totalDepegSignals++;
   }
-  signalQueue.push(signal);
-
-  if (signal.type === "whale") totalWhaleSignals++;
-  else if (signal.type === "spread") totalSpreadSignals++;
-  else if (signal.type === "depeg") totalDepegSignals++;
 
   console.log(
     `[SIGNAL] ${signal.type.toUpperCase()} | ${signal.tokenSymbol} | strength=${signal.strength.toFixed(2)} | ${signal.detail}`
@@ -100,12 +105,10 @@ async function getUsdcBalance(): Promise<number> {
   try {
     const mint = new PublicKey(USDC_MINT);
     const parsedAccounts = await connection.getParsedTokenAccountsByOwner(keypair.publicKey, { mint });
-
     usdcBalanceCache = parsedAccounts.value.reduce((sum, { account }) => {
       return sum + Number(account.data.parsed.info.tokenAmount.amount || 0);
     }, 0);
     lastBalanceCheck = Date.now();
-
     console.log(`[BALANCE] USDC: $${(usdcBalanceCache / 1e6).toFixed(2)}`);
     return usdcBalanceCache;
   } catch (error) {
@@ -280,52 +283,26 @@ async function executeOpportunity(result: ScanResult) {
   );
 }
 
-// ── Signal-driven scan ──────────────────────────────────
-// When a signal fires, we immediately scan that specific token
-// at multiple entry sizes for an atomic arb opportunity.
-async function scanFromSignal(signal: Signal): Promise<ScanResult | null> {
-  const results: ScanResult[] = [];
-
-  // Spread/depeg signals = confirmed arb exists, use LARGER sizes to overcome Jito tip
-  // Whale signals = speculative, start small
-  let sizes: number[];
-  if (signal.type === "spread" || signal.type === "depeg") {
-    // Bigger sizes = more absolute profit from the % spread
-    sizes = [10_000_000, 25_000_000, 50_000_000];
-  } else if (signal.strength > 0.7) {
-    sizes = [5_000_000, 10_000_000, 25_000_000, 50_000_000];
-  } else {
-    sizes = [2_000_000, 5_000_000, 10_000_000, 25_000_000];
-  }
-
-  // Skip scanning stablecoins directly (USDC→USDC makes no sense)
+// ── Whale signal scan ───────────────────────────────────
+async function scanFromWhaleSignal(signal: Signal): Promise<ScanResult | null> {
   if (signal.tokenMint === USDC_MINT) return null;
 
-  const scanPromises = sizes.map((size) =>
-    scanDirect(signal.tokenMint, signal.tokenSymbol, size)
-  );
+  const sizes = signal.strength > 0.7
+    ? [5_000_000, 10_000_000, 25_000_000, 50_000_000]
+    : [2_000_000, 5_000_000, 10_000_000, 25_000_000];
 
-  const scanResults = await Promise.all(scanPromises);
+  const results: ScanResult[] = [];
+
+  const scanResults = await Promise.all(
+    sizes.map((size) => scanDirect(signal.tokenMint, signal.tokenSymbol, size))
+  );
   for (const result of scanResults) {
     if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
       results.push(result);
     }
   }
 
-  // Also try cross-stable for the signaled token
-  const crossResults = await Promise.all(
-    sizes.slice(0, 2).map((size) =>
-      scanCrossStable(signal.tokenMint, signal.tokenSymbol, size)
-    )
-  );
-  for (const result of crossResults) {
-    if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
-      results.push(result);
-    }
-  }
-
   if (results.length === 0) return null;
-
   results.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
   return results[0];
 }
@@ -336,41 +313,60 @@ async function startScanner() {
   const batchSize = CONFIG.SCANNER_BATCH_SIZE;
 
   console.log(`[SCANNER] ${ALL_SCAN_TOKENS.length} tokens (${ARB_INTERMEDIATE_TOKENS.length} blue-chip + ${ALL_SCAN_TOKENS.length - ARB_INTERMEDIATE_TOKENS.length} memecoin)`);
-  console.log(`[SCANNER] Strategies: signal-driven + direct, dex-diff, cross-stable, 3leg-tri`);
+  console.log(`[SCANNER] Strategies: spread-scan, depeg-scan, whale-signal, direct, dex-diff, cross-stable, 3leg`);
   console.log(`[SCANNER] ${allPairs.length} triangular pairs | Batch: ${batchSize}`);
   console.log(`[SCANNER] Entry sizes: ${ENTRY_SIZES_USDC.map((a) => `$${a / 1e6}`).join(", ")}`);
   console.log(`[SCANNER] Interval: ${CONFIG.SCANNER_INTERVAL_MS}ms`);
   console.log(`[SCANNER] RPC: ${CONFIG.HELIUS_HTTP.replace(/api-key=.*/, "api-key=***")}`);
   console.log(`[SCANNER] WS: ${CONFIG.HELIUS_WS.replace(/api-key=.*/, "api-key=***")}`);
 
-  // Startup balance check
   const startupBalance = await getUsdcBalance();
   console.log(`[SCANNER] Startup USDC balance: $${(startupBalance / 1e6).toFixed(2)}`);
 
-  // Start signal monitors
+  // Start whale WebSocket monitor
   startWhaleMonitor(connection, onSignal);
   console.log("[SCANNER] Whale signal monitor started");
 
-  // Start periodic spread + depeg checks
-  const spreadInterval = setInterval(async () => {
+  // ── Periodic spread + depeg scanners (return executable results) ──
+  setInterval(async () => {
     try {
-      await checkSpreadPulse(onSignal);
+      const spreadResults = await findSpreadOpportunities(onSignal);
+      if (spreadResults.length > 0) {
+        totalSpread += spreadResults.length;
+        spreadResults.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
+        console.log(`[SPREAD] Found ${spreadResults.length} profitable spread(s), best: $${spreadResults[0].estimatedProfit.toFixed(4)}`);
+        await executeOpportunity(spreadResults[0]);
+      }
     } catch (e) {
-      console.error(`[SIGNALS] Spread check error: ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`[SPREAD] Error: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, 15_000); // Every 15s
+  }, 12_000); // Every 12s
 
-  const depegInterval = setInterval(async () => {
+  setInterval(async () => {
     try {
-      await checkDepeg(onSignal);
+      const depegResults = await findDepegOpportunities(onSignal);
+      if (depegResults.length > 0) {
+        totalDepeg += depegResults.length;
+        depegResults.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
+        console.log(`[DEPEG] Found ${depegResults.length} depeg opp(s), best: $${depegResults[0].estimatedProfit.toFixed(4)}`);
+        await executeOpportunity(depegResults[0]);
+      }
     } catch (e) {
-      console.error(`[SIGNALS] Depeg check error: ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`[DEPEG] Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, 10_000); // Every 10s
 
-  // Initial spread + depeg check
-  checkSpreadPulse(onSignal).catch(() => {});
-  checkDepeg(onSignal).catch(() => {});
+  // Initial spread + depeg scan
+  findSpreadOpportunities(onSignal).then((r) => {
+    if (r.length > 0) {
+      totalSpread += r.length;
+      r.sort((a, b) => b.estimatedProfit - a.estimatedProfit);
+      console.log(`[SPREAD] Initial: ${r.length} profitable, best: $${r[0].estimatedProfit.toFixed(4)}`);
+      executeOpportunity(r[0]);
+    }
+  }).catch(() => {});
+
+  findDepegOpportunities(onSignal).catch(() => {});
 
   let pairIndex = 0;
   let tokenIndex = 0;
@@ -381,19 +377,15 @@ async function startScanner() {
   while (true) {
     totalScans++;
 
-    // ── PRIORITY 1: Process signal queue ──
-    while (signalQueue.length > 0) {
-      const signal = signalQueue.shift()!;
-
-      // Skip stale signals (> 10 seconds old)
+    // ── PRIORITY 1: Process whale signals ──
+    while (whaleQueue.length > 0) {
+      const signal = whaleQueue.shift()!;
       if (Date.now() - signal.timestamp > 10_000) continue;
 
-      console.log(`[SCANNER] Processing ${signal.type} signal for ${signal.tokenSymbol}...`);
-      const result = await scanFromSignal(signal);
+      console.log(`[SCANNER] Processing whale signal for ${signal.tokenSymbol}...`);
+      const result = await scanFromWhaleSignal(signal);
       if (result) {
-        if (signal.type === "whale") totalDirect++;
-        else if (signal.type === "spread") totalDirect++;
-        else if (signal.type === "depeg") totalCrossStable++;
+        totalDirect++;
         await executeOpportunity(result);
       }
     }
@@ -407,15 +399,12 @@ async function startScanner() {
     strategyRotation++;
 
     if (strategy === 0) {
-      // Direct scan with near-miss logging
       const directBatch: Promise<{ result: ScanResult | null; nearMiss?: { route: string; profitUsd: number; entryUsd: number } }>[] = [];
-
       for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
         const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
         tokenIndex++;
         directBatch.push(scanDirectWithNearMiss(token.mint, token.symbol, entryAmount));
       }
-
       const directResults = await Promise.all(directBatch);
       for (const { result, nearMiss } of directResults) {
         if (result && result.estimatedProfit >= CONFIG.MIN_PROFIT) {
@@ -423,21 +412,17 @@ async function startScanner() {
           allResults.push(result);
         } else if (nearMiss) {
           totalNearMisses++;
-          if (totalNearMisses <= 20 || totalNearMisses % 50 === 0) {
-            console.log(
-              `[NEAR-MISS] ${nearMiss.route} | $${nearMiss.entryUsd} | gap: $${nearMiss.profitUsd.toFixed(4)}`
-            );
+          if (totalNearMisses <= 10 || totalNearMisses % 100 === 0) {
+            console.log(`[NEAR-MISS] ${nearMiss.route} | $${nearMiss.entryUsd} | gap: $${nearMiss.profitUsd.toFixed(4)}`);
           }
         }
       }
     } else if (strategy === 1) {
-      // Dex differential
       const dexBatch: Promise<ScanResult | null>[] = [];
       for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
         const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
         tokenIndex++;
-        const pair = getDexPair(dexPairIndex++);
-        dexBatch.push(scanDexDifferential(token.mint, token.symbol, entryAmount, pair));
+        dexBatch.push(scanDexDifferential(token.mint, token.symbol, entryAmount, getDexPair(dexPairIndex++)));
       }
       const dexResults = await Promise.all(dexBatch);
       for (const result of dexResults) {
@@ -447,7 +432,6 @@ async function startScanner() {
         }
       }
     } else if (strategy === 2) {
-      // Cross-stable
       const crossBatch: Promise<ScanResult | null>[] = [];
       for (let i = 0; i < Math.min(batchSize, ALL_SCAN_TOKENS.length); i++) {
         const token = ALL_SCAN_TOKENS[tokenIndex % ALL_SCAN_TOKENS.length];
@@ -462,7 +446,6 @@ async function startScanner() {
         }
       }
     } else {
-      // 3-leg triangular
       const triBatch: Promise<ScanResult | null>[] = [];
       for (let i = 0; i < batchSize; i++) {
         const pair = allPairs[pairIndex % allPairs.length];
@@ -489,7 +472,7 @@ async function startScanner() {
 
 // ── Boot ────────────────────────────────────────────────
 console.log("═══════════════════════════════════════════════════");
-console.log("  RICKY TRADES — Signal-Driven Arb Scanner v6");
+console.log("  RICKY TRADES — Signal-Driven Arb Scanner v7");
 console.log("═══════════════════════════════════════════════════");
 console.log(`[SCANNER] Bot wallet: ${keypair.publicKey.toBase58()}`);
 console.log(`[SCANNER] Min profit: $${CONFIG.MIN_PROFIT}`);
@@ -501,6 +484,6 @@ startScanner();
 
 setInterval(() => {
   console.log(
-    `[HEARTBEAT] ${new Date().toISOString()} | scans=${totalScans} | signals: whale=${totalWhaleSignals} spread=${totalSpreadSignals} depeg=${totalDepegSignals} | direct=${totalDirect} | dexDiff=${totalDexDiff} | 3leg=${total3Leg} | xstable=${totalCrossStable} | nearMiss=${totalNearMisses} | opps=${totalOpportunities} | bundles=${totalBundlesSent} | profit=$${totalProfit.toFixed(4)}`
+    `[HEARTBEAT] ${new Date().toISOString()} | scans=${totalScans} | whale=${totalWhaleSignals} spread=${totalSpreadSignals}(${totalSpread} exec) depeg=${totalDepegSignals}(${totalDepeg} exec) | direct=${totalDirect} | dexDiff=${totalDexDiff} | 3leg=${total3Leg} | xstable=${totalCrossStable} | nearMiss=${totalNearMisses} | opps=${totalOpportunities} | bundles=${totalBundlesSent} | profit=$${totalProfit.toFixed(4)}`
   );
 }, 60_000);
