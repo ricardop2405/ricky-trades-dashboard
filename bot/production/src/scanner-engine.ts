@@ -123,10 +123,9 @@ async function getUsdcBalance(): Promise<number> {
 }
 
 // ── Jito bundle submission ──────────────────────────────
-const SWAP_ENDPOINTS = [
-  "https://api.jup.ag/swap/v1/swap",
-  "https://lite-api.jup.ag/swap/v1/swap",
-];
+const SWAP_ENDPOINTS = CONFIG.JUPITER_API_KEY
+  ? ["https://api.jup.ag/swap/v1/swap"]
+  : ["https://api.jup.ag/swap/v1/swap", "https://lite-api.jup.ag/swap/v1/swap"];
 
 async function getJupiterSwapTx(quote: any): Promise<Buffer | null> {
   const body = JSON.stringify({
@@ -629,6 +628,7 @@ console.log(`[SCANNER] Bot wallet: ${keypair.publicKey.toBase58()}`);
 console.log(`[SCANNER] Min profit: $${CONFIG.MIN_PROFIT}`);
 console.log(`[SCANNER] Jito tip: ${CONFIG.JITO_TIP} lamports`);
 console.log(`[SCANNER] Dry run: ${CONFIG.MEV_DRY_RUN}`);
+console.log(`[SCANNER] Jupiter paid key loaded: ${CONFIG.JUPITER_API_KEY ? "yes" : "no"}`);
 console.log("═══════════════════════════════════════════════════");
 
 startScanner();
