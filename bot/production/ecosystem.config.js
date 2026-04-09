@@ -104,5 +104,18 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
+    {
+      name: "ricky-drift-jup",
+      script: "./node_modules/.bin/ts-node",
+      args: "--transpile-only src/drift-jupiter-engine.ts",
+      cwd: __dirname,
+      interpreter: "node",
+      restart_delay: 5000,
+      max_restarts: 50,
+      autorestart: true,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
   ],
 };
