@@ -98,4 +98,11 @@ export const CONFIG = {
   GNOSIS_TRADE_SIZE_USD: parseFloat(process.env.GNOSIS_TRADE_SIZE_USD || "10"),
   GNOSIS_SCAN_INTERVAL_MS: parseInt(process.env.GNOSIS_SCAN_INTERVAL_MS || "5000"),
   GNOSIS_DRY_RUN: process.env.GNOSIS_DRY_RUN !== "false",
+
+  // ── Drift BET ↔ Jupiter Cross-Arb ─────────────────────
+  DRIFT_SCAN_INTERVAL_MS: parseInt(process.env.DRIFT_SCAN_INTERVAL_MS || "3000"),
+  DRIFT_MIN_SPREAD: parseFloat(process.env.DRIFT_MIN_SPREAD || "0.015"),
+  DRIFT_TRADE_SIZE_USD: parseFloat(process.env.DRIFT_TRADE_SIZE_USD || "5"),
+  DRIFT_DRY_RUN: process.env.DRIFT_DRY_RUN !== "false",
+  DRIFT_GATEWAY_URL: process.env.DRIFT_GATEWAY_URL || "",
 } as const;
