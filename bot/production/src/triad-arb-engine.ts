@@ -68,7 +68,8 @@ const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
 const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "100000"); // 100k lamports default
 const JITO_REQUEST_MIN_INTERVAL_MS = parseInt(process.env.TRIAD_JITO_MIN_INTERVAL_MS || "1100"); // Jito default rate limit is 1 req/sec/IP/region
 const SAFETY_MIN_PROFIT_USD = 0.05; // profit-or-revert guardrail
-const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
+const ALLOW_UNSAFE_TRIAD_LIVE = process.env.TRIAD_ALLOW_UNSAFE_LIVE === "true";
+const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false" || !ALLOW_UNSAFE_TRIAD_LIVE;
 const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
 const COOLDOWN_MS = 60_000;
 const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
