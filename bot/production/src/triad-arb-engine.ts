@@ -849,6 +849,8 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // Jupiter tx: the API returns an unsigned tx for our wallet to sign
     // Use try/catch since sign() can fail on pre-structured VersionedTransactions
+    // Jupiter tx: the API returns an unsigned tx for our wallet to sign
+    // Use try/catch since sign() can fail on pre-structured VersionedTransactions
     try {
       jupTx.sign([keypair]);
     } catch (signErr) {
@@ -861,11 +863,12 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
         marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
         return;
       }
-      const sig = require("tweetnacl").sign.detached(
+      const nacl = require("tweetnacl");
+      const sig = nacl.sign.detached(
         jupTx.message.serialize(),
         keypair.secretKey
       );
-      jupTx.signatures[signerIndex] = sig;
+      jupTx.signatures[signerIndex] = Buffer.from(sig);
     }
 
     // Log opportunity to DB
