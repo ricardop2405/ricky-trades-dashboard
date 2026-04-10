@@ -75,7 +75,7 @@ const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
 const COOLDOWN_MS = 60_000;
 const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
 const JUP_EXECUTION_BUFFER_USD = parseFloat(process.env.TRIAD_JUP_EXECUTION_BUFFER_USD || "0.01");
-const EXECUTION_BUNDLE_COUNT = 2; // Triad leg + Jupiter leg
+const EXECUTION_BUNDLE_COUNT = 1; // Single atomic bundle (Triad + Jupiter + Tip)
 const MIN_JUPITER_DEPOSIT_USD = parseFloat(process.env.TRIAD_MIN_JUP_DEPOSIT_USD || "1.0");
 const MIN_SOL_BALANCE = parseFloat(process.env.TRIAD_MIN_SOL_BALANCE || "0.05");
 const MIN_MARKET_SECONDS_REMAINING = parseInt(process.env.TRIAD_MIN_MARKET_SECONDS_REMAINING || "35");
@@ -1439,7 +1439,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    console.log(`[XARB] Building both legs in parallel (will execute sequentially)...`);
+    console.log(`[XARB] Building both legs in parallel (atomic single-bundle execution)...`);
 
     // Build both legs in parallel (saves time), but execute sequentially
     const [triadIxs, jupTxBase64] = await Promise.all([
@@ -1478,19 +1478,20 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     const oppId = oppRow?.id;
 
     // ════════════════════════════════════════════════════════
-    // STEP 1: Send Triad order FIRST (standalone tx via Jito for speed)
+    // ATOMIC EXECUTION: Triad + Jupiter + Tip in ONE Jito bundle
+    // Both legs land or both revert — zero unhedged risk
     // ════════════════════════════════════════════════════════
-    console.log(`[XARB] ── STEP 1: Submitting Triad ${triadDirection2} order...`);
+    console.log(`[XARB] ── Building atomic bundle: Triad ${triadDirection2} + Jupiter ${c.legB}...`);
 
-    const { blockhash: triadBlockhash } = await connection.getLatestBlockhash("processed");
+    const { blockhash: atomicBlockhash } = await connection.getLatestBlockhash("processed");
 
-    let triadTx: VersionedTransaction;
+    let triadTx!: VersionedTransaction;
     let trimmedIxs = triadIxs;
     try {
       let built = false;
       while (trimmedIxs.length >= 1) {
         try {
-          triadTx = await buildTriadTx(trimmedIxs, triadBlockhash);
+          triadTx = await buildTriadTx(trimmedIxs, atomicBlockhash);
           if (triadTx.serialize().length <= 1232) { built = true; break; }
           trimmedIxs = trimmedIxs.slice(0, trimmedIxs.length - 1);
         } catch { trimmedIxs = trimmedIxs.slice(0, trimmedIxs.length - 1); }
@@ -1507,176 +1508,12 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    // Build tip tx for Triad
-    let triadTipTx: VersionedTransaction;
-    try {
-      triadTipTx = await buildJitoTipTx(triadBlockhash, effectiveJitoTipLamports);
-      triadTipTx.sign([keypair]);
-    } catch (err) {
-      console.error("[XARB] Failed to build tip tx:", err instanceof Error ? err.message : err);
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
-      return;
-    }
-
-    // Simulate Triad tx
-    const triadSimOk = await simulateBundleTxs([triadTx!, triadTipTx]);
-    if (!triadSimOk) {
-      console.error("[XARB] ❌ Triad simulation failed — aborting (zero capital at risk)");
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
-          status: "failed", error_message: "Triad simulation failed — no funds lost",
-        });
-        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
-      }
-      return;
-    }
-
-    // Submit Triad via Jito bundle
-    console.log(`[XARB] 🚀 Sending Triad order via Jito...`);
-    console.log(`[XARB]    SUM-TO-ONE: $${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)} < $1.00`);
-    const triadBundleResult = await sendJitoBundle([triadTx!, triadTipTx]);
-
-    if (!triadBundleResult) {
-      console.error("[XARB] ❌ Triad bundle rejected — aborting. Zero capital at risk.");
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
-          status: "failed", error_message: "Triad Jito bundle rejected — no funds lost",
-        });
-        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
-      }
-      return;
-    }
-
-    const triadSig = bs58.encode(triadTx!.signatures[0]);
-    console.log(`[XARB] Triad bundle landed: ${triadBundleResult.bundleId}`);
-    console.log(`[XARB] Triad tx: ${triadSig}`);
-
-    // ── Verify Triad fill (wait 3s then check) ──
-    console.log(`[XARB] ⏳ Waiting 3s to verify Triad fill...`);
-    await sleep(3000);
-
-    const triadStillOpen = await isTriadOrderStillOpen(c.triadMarket.id, triadDirection2);
-    const triadFilled = !triadStillOpen;
-
-    if (!triadFilled) {
-      // Triad order is RESTING (not filled) — cancel it and abort. Do NOT send Jupiter.
-      console.error(`[XARB] ❌ Triad order RESTING (not immediately filled) — canceling and aborting`);
-      console.error(`[XARB]    Jupiter will NOT be sent — preventing unhedged position`);
-      const cancelOk = await cancelTriadOrder(c.triadMarket.id, triadDirection2);
-
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: 0,
-          realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "failed",
-          error_message: `Triad order resting (not taker-filled). ${cancelOk ? "Auto-canceled." : "CANCEL FAILED!"} Jupiter NOT sent.`,
-          side_a_tx: triadSig,
-        });
-        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
-      }
-
-      if (!cancelOk) {
-        console.error(`[XARB] 🚨 CRITICAL: Could not cancel Triad resting order! Manual cancel needed.`);
-      }
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
-      return;
-    }
-
-    console.log(`[XARB] ✅ Triad ${triadDirection2} FILLED as taker!`);
-
-    // ════════════════════════════════════════════════════════
-    // STEP 2: Triad confirmed → NOW send Jupiter
-    // ════════════════════════════════════════════════════════
-    console.log(`[XARB] ── STEP 2: Triad confirmed → sending Jupiter order...`);
-
-    const freshCandidate = await stabilizeExecutableCandidate(c, {
-      fixedContracts: c.contracts,
-      tipLamports: effectiveJitoTipLamports,
-      skipMinDeposit: true, // CRITICAL: After Triad fill, MUST hedge — don't block on min deposit
-    });
-    if (!freshCandidate) {
-      console.error(`[XARB] 🚨 Jupiter no longer executable at a guaranteed-profit price for the filled Triad size — refusing entry into an over-payout hedge`);
-      console.error(`[XARB]    Triad position exists UNHEDGED. Manual action needed. Sig: ${triadSig}`);
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.costA * c.contracts,
-          realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "partial_triad_only",
-          error_message: `Triad filled. Jupiter no longer profitable at the same contract size, so losing hedge was blocked. Sig: ${triadSig}`,
-          side_a_tx: triadSig,
-        });
-        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
-      }
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
-      return;
-    }
-    c = freshCandidate;
-
-    const postTriadFunding = await checkWalletFunding(c.costB * c.contracts, effectiveJitoTipLamports);
-    if (!postTriadFunding.ok) {
-      console.error(`[XARB] 🚨 Post-Triad funding check failed: ${postTriadFunding.reason}`);
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.costA * c.contracts,
-          realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "partial_triad_only",
-          error_message: `Triad filled. Insufficient wallet funding for Jupiter leg (${postTriadFunding.reason}). Sig: ${triadSig}`,
-          side_a_tx: triadSig,
-        });
-        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
-      }
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
-      return;
-    }
-
-    // Rebuild Jupiter order with fresh price (original jupTxBase64 may have stale price)
-    const jupMarketIdFresh = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
-    const jupDepositUsdFresh = c.costB * c.contracts;
-    const freshJupTxBase64 = await createJupBuyOrder(jupMarketIdFresh, c.contracts, jupDepositUsdFresh);
-    if (!freshJupTxBase64) {
-      console.error("[XARB] Failed to create fresh Jupiter order after Triad fill — unhedged!");
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId, amount_usd: c.costA * c.contracts, realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "partial_triad_only",
-          error_message: `Triad filled. Fresh Jupiter order creation failed. Sig: ${triadSig}`,
-          side_a_tx: triadSig,
-        });
-        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
-      }
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
-      return;
-    }
-
-    const { blockhash: jupBlockhash } = await connection.getLatestBlockhash("processed");
+    // Build Jupiter tx from API response
     let jupTx: VersionedTransaction;
     try {
-      jupTx = await buildAndSign(freshJupTxBase64);
+      jupTx = await buildAndSign(jupTxBase64);
     } catch (err) {
       console.error("[XARB] Failed to deserialize Jupiter tx:", err instanceof Error ? err.message : err);
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.costA * c.contracts,
-          realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "partial_triad_only",
-          error_message: `Triad filled but Jupiter tx build failed. Unhedged. Sig: ${triadSig}`,
-          side_a_tx: triadSig,
-        });
-        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
-      }
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
       return;
     }
@@ -1699,82 +1536,74 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       jupTx.signatures[signerIndex] = Buffer.from(sig);
     }
 
-    // Build Jupiter tip tx
-    let jupTipTx: VersionedTransaction;
+    // Build single tip tx
+    let tipTx: VersionedTransaction;
     try {
-      jupTipTx = await buildJitoTipTx(jupBlockhash, effectiveJitoTipLamports);
-      jupTipTx.sign([keypair]);
+      tipTx = await buildJitoTipTx(atomicBlockhash, effectiveJitoTipLamports);
+      tipTx.sign([keypair]);
     } catch (err) {
-      console.error("[XARB] Failed to build Jupiter tip tx:", err instanceof Error ? err.message : err);
+      console.error("[XARB] Failed to build tip tx:", err instanceof Error ? err.message : err);
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
       return;
     }
 
-    // Simulate Jupiter
-    const jupSimOk = await simulateBundleTxs([jupTx, jupTipTx]);
-    if (!jupSimOk) {
-      console.error("[XARB] ❌ Jupiter simulation failed after Triad fill — Triad position unhedged!");
+    // Simulate the full atomic bundle (all 3 txs)
+    const atomicSimOk = await simulateBundleTxs([triadTx!, jupTx, tipTx]);
+    if (!atomicSimOk) {
+      console.error("[XARB] ❌ Atomic bundle simulation failed — aborting (zero capital at risk)");
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
       if (oppId) {
         await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.costA * c.contracts,
-          realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "partial_triad_only",
-          error_message: `Triad filled. Jupiter sim failed — unhedged. Sig: ${triadSig}`,
-          side_a_tx: triadSig,
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed", error_message: "Atomic bundle simulation failed — no funds lost",
         });
-        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
       return;
     }
 
-    // Submit Jupiter via Jito
-    console.log(`[XARB] 🚀 Sending Jupiter order via Jito...`);
-    const jupBundleResult = await sendJitoBundle([jupTx, jupTipTx]);
+    // Submit atomic bundle: Triad + Jupiter + Tip in ONE Jito bundle
+    console.log(`[XARB] 🚀 Sending ATOMIC bundle (Triad + Jupiter + Tip) via Jito...`);
+    console.log(`[XARB]    SUM-TO-ONE: $${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)} < $1.00`);
+    const atomicBundleResult = await sendJitoBundle([triadTx!, jupTx, tipTx]);
+
+    const triadSig = bs58.encode(triadTx!.signatures[0]);
     const jupSig = bs58.encode(jupTx.signatures[0]);
 
-    if (!jupBundleResult) {
-      console.error("[XARB] ❌ Jupiter bundle rejected — Triad position unhedged!");
+    if (!atomicBundleResult) {
+      console.error("[XARB] ❌ Atomic bundle rejected — zero capital at risk.");
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
       if (oppId) {
         await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.costA * c.contracts,
-          realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "partial_triad_only",
-          error_message: `Triad filled. Jupiter bundle rejected — unhedged. Triad sig: ${triadSig}`,
-          side_a_tx: triadSig,
-          side_b_tx: jupSig,
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed", error_message: "Atomic Jito bundle rejected — no funds lost",
         });
-        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
-      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
       return;
     }
 
-    console.log(`[XARB] ✅ Jupiter bundle landed: ${jupBundleResult.bundleId}`);
+    console.log(`[XARB] ✅ Atomic bundle landed: ${atomicBundleResult.bundleId}`);
+    console.log(`[XARB] Triad tx: ${triadSig}`);
     console.log(`[XARB] Jupiter tx: ${jupSig}`);
 
-    // ════════════════════════════════════════════════════════
-    // STEP 3: Both legs submitted — verify Jupiter
-    // ════════════════════════════════════════════════════════
-    console.log(`[XARB] ⏳ Waiting 5s to verify Jupiter fill...`);
+    // Verify both legs (wait 5s for on-chain confirmation)
+    console.log(`[XARB] ⏳ Waiting 5s to verify both legs...`);
     await sleep(5000);
 
     const jupConfirmed = await isJupiterTxConfirmed(jupTx);
+    const triadStillOpen = await isTriadOrderStillOpen(c.triadMarket.id, triadDirection2);
+    const triadFilled = !triadStillOpen;
 
-    if (jupConfirmed) {
+    if (triadFilled && jupConfirmed) {
       console.log(`[XARB] ✅ BOTH LEGS CONFIRMED! Guaranteed profit: $${c.netProfit.toFixed(4)}`);
       console.log(`[XARB]    ${c.contracts}× ($${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)}) → $1.00 payout either side`);
-
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
           amount_usd: c.totalCost * c.contracts,
           realized_pnl: c.netProfit,
-          fees: (effectiveJitoTipLamports * 2) / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD, // 2 tips
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
           status: "filled",
           side_a_tx: triadSig,
           side_b_tx: jupSig,
@@ -1782,22 +1611,21 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
     } else {
-      // Jupiter tx landed but keeper hasn't filled yet — this is normal
-      console.warn(`[XARB] ⚠️ Jupiter order submitted, awaiting keeper fill. Triad is confirmed.`);
-      console.warn(`[XARB]    SUM-TO-ONE holds: once Jupiter fills, profit is locked in.`);
-
+      // Bundle landed but awaiting keeper confirmation
+      console.warn(`[XARB] ⚠️ Atomic bundle landed — Triad: ${triadFilled ? "FILLED" : "pending"} | Jupiter: ${jupConfirmed ? "CONFIRMED" : "awaiting keeper"}`);
+      console.warn(`[XARB]    SUM-TO-ONE holds: once both settle, profit is locked in.`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
           amount_usd: c.totalCost * c.contracts,
           realized_pnl: c.netProfit,
-          fees: (effectiveJitoTipLamports * 2) / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "pending_jup_fill",
-          error_message: `Both legs submitted. Triad filled. Jupiter awaiting keeper. Sigs: ${triadSig} / ${jupSig}`,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: triadFilled && jupConfirmed ? "filled" : "pending_jup_fill",
+          error_message: `Atomic bundle. Triad: ${triadFilled ? "filled" : "pending"}. Jupiter: ${jupConfirmed ? "confirmed" : "awaiting keeper"}. Sigs: ${triadSig} / ${jupSig}`,
           side_a_tx: triadSig,
           side_b_tx: jupSig,
         });
-        await supabase.from("arb_opportunities").update({ status: "executing" }).eq("id", oppId);
+        await supabase.from("arb_opportunities").update({ status: triadFilled && jupConfirmed ? "executed" : "executing" }).eq("id", oppId);
       }
     }
 
