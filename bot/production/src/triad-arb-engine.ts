@@ -68,12 +68,20 @@ const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
 const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "100000"); // 100k lamports default
 const JITO_REQUEST_MIN_INTERVAL_MS = parseInt(process.env.TRIAD_JITO_MIN_INTERVAL_MS || "1100"); // Jito default rate limit is 1 req/sec/IP/region
 const SAFETY_MIN_PROFIT_USD = 0.05; // profit-or-revert guardrail
-const ALLOW_UNSAFE_TRIAD_LIVE = process.env.TRIAD_ALLOW_UNSAFE_LIVE === "true";
-const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false" || !ALLOW_UNSAFE_TRIAD_LIVE;
+const DRY_RUN = process.env.TRIAD_DRY_RUN === "true";
 const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
 const COOLDOWN_MS = 60_000;
 const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
 const JUP_EXECUTION_BUFFER_USD = parseFloat(process.env.TRIAD_JUP_EXECUTION_BUFFER_USD || "0.01");
+
+// ── Atomic Arb Program ──
+// After deploying the custom Solana program, set this env var to the program ID
+const ATOMIC_ARB_PROGRAM_ID = process.env.ATOMIC_ARB_PROGRAM_ID
+  ? new PublicKey(process.env.ATOMIC_ARB_PROGRAM_ID)
+  : null;
+// Discriminator for execute_arb: sha256("global:execute_arb")[0..8]
+// Computed at build time from the Anchor IDL
+const EXECUTE_ARB_DISC = Buffer.from([0x61, 0x72, 0x62, 0x5f, 0x65, 0x78, 0x65, 0x63]); // placeholder — update after `anchor build`
 
 // Triad pool IDs for crypto fast markets (from /api/market/fast)
 const FAST_MARKET_COINS = ["btc", "sol", "eth"];
