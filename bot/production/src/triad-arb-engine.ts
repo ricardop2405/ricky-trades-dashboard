@@ -1131,6 +1131,22 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
   c = liveCandidate;
 
+  // ── PRE-FLIGHT: Verify Triad orderbook has enough ask liquidity ──
+  const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
+  const triadDepth = await fetchTriadAskDepth(c.triadMarket.id, triadDirection as "hype" | "flop", c.costA);
+  if (triadDepth.totalContracts < c.contracts) {
+    console.log(
+      `[XARB] ❌ FILL PROTECTION: Triad ${triadDirection} ask depth = ${triadDepth.totalContracts} contracts ` +
+      `at ≤$${c.costA.toFixed(4)}, need ${c.contracts} — SKIPPING (would create resting order)`
+    );
+    marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+    return;
+  }
+  console.log(
+    `[XARB] ✅ Triad ${triadDirection} ask depth: ${triadDepth.totalContracts} contracts ` +
+    `at avg $${triadDepth.avgPrice.toFixed(4)} (need ${c.contracts}) — sufficient for immediate fill`
+  );
+
   console.log(`\n[XARB] ═══ MERGE ARB OPPORTUNITY ══════════════════════`);
   console.log(`[XARB] ${c.coin.toUpperCase()} — ${c.legA} + ${c.legB}`);
   console.log(`[XARB] Cost: $${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)}`);
