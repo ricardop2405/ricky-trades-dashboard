@@ -810,95 +810,137 @@ async function getFinalBundleStatus(bundleId: string): Promise<{ confirmationSta
   }
 }
 
+// Submit to a single Jito region
+async function submitToRegion(region: string, encodedTxs: string[]): Promise<{ bundleId: string; region: string } | null> {
+  const baseUrl = JITO_REGION_URLS[region] || JITO_REGION_URLS.ny;
+  const url = `${baseUrl}/api/v1/bundles`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "sendBundle",
+        params: [encodedTxs, { encoding: "base64" }],
+      }),
+    });
+    const data = await res.json() as any;
+    if (data.error) {
+      const errMsg = JSON.stringify(data.error);
+      if (res.status === 429 || errMsg.includes("rate limited") || errMsg.includes("congested")) {
+        console.warn(`[JITO:${region}] Rate limited`);
+      } else {
+        console.warn(`[JITO:${region}] Error: ${errMsg.slice(0, 120)}`);
+      }
+      return null;
+    }
+    return { bundleId: data.result, region };
+  } catch (err) {
+    console.warn(`[JITO:${region}] Submit failed: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
 async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<{ bundleId: string; pending?: boolean } | null> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const encodedTxs = txs.map(tx => Buffer.from(tx.serialize()).toString("base64"));
-      const tipRecommendation = await fetchJitoTipRecommendationLamports();
-      if (tipRecommendation && tipRecommendation > JITO_TIP_LAMPORTS) {
-        console.log(`[JITO] Tip floor suggests ${tipRecommendation} lamports (current tx tip remains ${JITO_TIP_LAMPORTS})`);
-      }
 
-      await paceJitoRequests();
-      const res = await fetch(JITO_BUNDLE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "sendBundle",
-          params: [encodedTxs, { encoding: "base64" }],
-        }),
-      });
+      // ── Multi-region parallel submission ──
+      console.log(`[JITO] Submitting to ${JITO_REGIONS.length} regions: ${JITO_REGIONS.join(", ")}`);
+      const results = await Promise.allSettled(
+        JITO_REGIONS.map(region => submitToRegion(region, encodedTxs))
+      );
 
-      const data = await res.json() as any;
-      if (data.error) {
-        const errMsg = JSON.stringify(data.error);
-        if ((data.error.code === -32097 || res.status === 429 || errMsg.includes("rate limited") || errMsg.includes("congested")) && attempt < maxRetries - 1) {
-          const backoff = Math.max(JITO_REQUEST_MIN_INTERVAL_MS, (attempt + 1) * 2500);
-          console.warn(`[JITO] Rate limited (attempt ${attempt + 1}/${maxRetries}) — retrying in ${backoff}ms`);
+      const successes = results
+        .filter((r): r is PromiseFulfilledResult<{ bundleId: string; region: string } | null> => r.status === "fulfilled")
+        .map(r => r.value)
+        .filter(Boolean) as { bundleId: string; region: string }[];
+
+      if (successes.length === 0) {
+        if (attempt < maxRetries - 1) {
+          const backoff = (attempt + 1) * 2500;
+          console.warn(`[JITO] All regions rejected (attempt ${attempt + 1}/${maxRetries}) — retrying in ${backoff}ms`);
           await sleep(backoff);
           continue;
         }
-        console.error(`[JITO] Bundle error: ${errMsg}`);
+        console.error("[JITO] All regions rejected after all retries");
         return null;
       }
 
-      const bundleId = data.result;
-      console.log(`[JITO] Bundle submitted: ${bundleId}`);
+      console.log(`[JITO] ✅ Submitted to ${successes.length}/${JITO_REGIONS.length} regions`);
+      for (const s of successes) {
+        console.log(`[JITO]   ${s.region}: ${s.bundleId}`);
+      }
 
+      // Use primary bundle ID for status polling
+      const primaryBundleId = successes[0].bundleId;
+      const allBundleIds = [...new Set(successes.map(s => s.bundleId))];
+
+      // ── Status polling (check all bundle IDs) ──
       let sawPendingLikeSignal = false;
       let invalidInflightCount = 0;
 
       for (let i = 0; i < 12; i++) {
-        await sleep(2500);
+        await sleep(2000); // slightly faster polling
 
-        const inflightStatus = await getInflightBundleStatus(bundleId);
+        // Check inflight on primary region
+        const inflightStatus = await getInflightBundleStatus(primaryBundleId);
         if (inflightStatus) {
           console.log(`[JITO] Inflight: ${inflightStatus}`);
 
-          if (inflightStatus === "Landed") return { bundleId };
+          if (inflightStatus === "Landed") return { bundleId: primaryBundleId };
 
           if (inflightStatus === "Pending") {
             sawPendingLikeSignal = true;
             invalidInflightCount = 0;
           } else if (inflightStatus === "Failed") {
-            return null;
+            // Check other bundle IDs before giving up
+            for (const altId of allBundleIds.slice(1)) {
+              const altStatus = await getInflightBundleStatus(altId);
+              if (altStatus === "Landed") return { bundleId: altId };
+              if (altStatus === "Pending") { sawPendingLikeSignal = true; break; }
+            }
+            if (!sawPendingLikeSignal) return null;
           } else if (inflightStatus === "Invalid") {
             invalidInflightCount += 1;
             if (i === 0) {
-              console.warn("[JITO] Inflight returned Invalid immediately after submission — treating as propagation lag, not failure");
+              console.warn("[JITO] Inflight returned Invalid immediately — propagation lag");
             }
           }
         }
 
-        const finalStatus = await getFinalBundleStatus(bundleId);
+        // Check final status
+        const finalStatus = await getFinalBundleStatus(primaryBundleId);
         if (finalStatus) {
           sawPendingLikeSignal = true;
           console.log(`[JITO] Final status: ${finalStatus.confirmationStatus || "unknown"}`);
           if (finalStatus.confirmationStatus === "confirmed" || finalStatus.confirmationStatus === "finalized") {
-            return { bundleId };
+            return { bundleId: primaryBundleId };
           }
           if (finalStatus.err) return null;
         }
 
         if (inflightStatus === "Invalid" && !finalStatus && invalidInflightCount >= 3 && !sawPendingLikeSignal) {
-          console.warn("[JITO] Bundle not visible in status APIs yet — keeping it as pending instead of false-failing");
-          return { bundleId, pending: true };
+          console.warn("[JITO] Bundle not visible in status APIs — keeping as pending");
+          return { bundleId: primaryBundleId, pending: true };
         }
       }
 
-      console.warn("[JITO] Status unknown after inflight/final polling — marking as submitted/pending");
-      return { bundleId, pending: true };
+      console.warn("[JITO] Status unknown after polling — marking as submitted/pending");
+      return { bundleId: primaryBundleId, pending: true };
     } catch (err) {
       console.error("[JITO] Submission error:", err instanceof Error ? err.message : err);
       if (attempt < maxRetries - 1) {
-        await sleep(Math.max(JITO_REQUEST_MIN_INTERVAL_MS, 2500));
+        await sleep(2500);
         continue;
       }
       return null;
     }
   }
+  return null;
+}
   return null;
 }
 
