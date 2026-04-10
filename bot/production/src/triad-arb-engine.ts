@@ -1099,6 +1099,14 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
+    // Pre-flight simulation — catch errors before burning Jito rate limit quota
+    const simOk = await simulateBundleTxs([triadTx!, jupTx, tipTx]);
+    if (!simOk) {
+      console.error("[XARB] ❌ Pre-flight simulation failed — skipping Jito submission (zero capital at risk)");
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
     // Log opportunity to DB
     const { data: oppRow } = await supabase.from("arb_opportunities").insert({
       market_a_id: c.triadMarket.id,
