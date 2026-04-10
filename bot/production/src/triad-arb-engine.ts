@@ -1480,11 +1480,30 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     }
     c = freshCandidate;
 
-    // Rebuild Jupiter tx with fresh blockhash
+    // Rebuild Jupiter order with fresh price (original jupTxBase64 may have stale price)
+    const jupMarketIdFresh = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
+    const jupDepositUsdFresh = c.costB * c.contracts;
+    const freshJupTxBase64 = await createJupBuyOrder(jupMarketIdFresh, c.contracts, jupDepositUsdFresh);
+    if (!freshJupTxBase64) {
+      console.error("[XARB] Failed to create fresh Jupiter order after Triad fill — unhedged!");
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: c.costA * c.contracts, realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "partial_triad_only",
+          error_message: `Triad filled. Fresh Jupiter order creation failed. Sig: ${triadSig}`,
+          side_a_tx: triadSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
+      }
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
     const { blockhash: jupBlockhash } = await connection.getLatestBlockhash("processed");
     let jupTx: VersionedTransaction;
     try {
-      jupTx = await buildAndSign(jupTxBase64);
+      jupTx = await buildAndSign(freshJupTxBase64);
     } catch (err) {
       console.error("[XARB] Failed to deserialize Jupiter tx:", err instanceof Error ? err.message : err);
       if (oppId) {
