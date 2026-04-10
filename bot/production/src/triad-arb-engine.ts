@@ -634,10 +634,30 @@ async function createTriadBuyInstruction(
   }
 }
 
+// Vote program — Jito rejects bundles that lock vote accounts
+const VOTE_PROGRAM_ID = "Vote111111111111111111111111111111111111111";
+
 // ── Build, Sign & Bundle ────────────────────────────────
 async function buildAndSign(base64Tx: string): Promise<VersionedTransaction> {
   const txBuf = Buffer.from(base64Tx, "base64");
   const tx = VersionedTransaction.deserialize(txBuf);
+
+  // Check all account keys (static + lookup tables) for vote program
+  const staticKeys = tx.message.staticAccountKeys.map(k => k.toBase58());
+  if (staticKeys.includes(VOTE_PROGRAM_ID)) {
+    throw new Error("Jupiter tx references Vote program — Jito will reject");
+  }
+
+  // Also check address lookup table keys if V0
+  if ("addressTableLookups" in tx.message) {
+    const lookups = (tx.message as any).addressTableLookups || [];
+    for (const lookup of lookups) {
+      if (lookup.accountKey?.toBase58() === VOTE_PROGRAM_ID) {
+        throw new Error("Jupiter tx lookup table references Vote program — Jito will reject");
+      }
+    }
+  }
+
   return tx;
 }
 
