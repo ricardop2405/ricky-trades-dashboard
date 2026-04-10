@@ -805,9 +805,9 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     return;
   }
 
-  // Require minimum $0.10 net profit to justify tip cost
-  if (c.netProfit < 0.10) {
-    console.log(`[XARB] Net profit $${c.netProfit.toFixed(4)} too thin — skipping`);
+  // Require minimum net profit to justify tip cost
+  if (c.netProfit < MIN_NET_PROFIT) {
+    console.log(`[XARB] Net profit $${c.netProfit.toFixed(4)} < min $${MIN_NET_PROFIT} — skipping`);
     return;
   }
 
