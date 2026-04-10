@@ -53,12 +53,15 @@ let bestSpreadSeen = -Infinity;
 // ── Proxy for Jupiter (region-blocked) ──────────────────
 const PROXY_URL = process.env.PROXY_URL || "";
 let proxyAgent: any = null;
-if (PROXY_URL) {
+if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("placeholder")) {
   if (PROXY_URL.startsWith("socks")) {
     proxyAgent = new SocksProxyAgent(PROXY_URL);
   } else {
     proxyAgent = new HttpsProxyAgent(PROXY_URL);
   }
+  console.log(`[XARB] Proxy: ${PROXY_URL.replace(/\/\/.*@/, "//***@")}`);
+} else {
+  console.log("[XARB] No valid proxy — Jupiter calls go direct");
 }
 
 async function jupFetch(url: string, init?: RequestInit): Promise<Response> {
