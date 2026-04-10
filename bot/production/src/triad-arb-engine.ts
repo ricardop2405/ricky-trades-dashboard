@@ -447,26 +447,25 @@ async function main() {
     console.log(`[XARB] Triad API: ${triadTest.ok ? "✅" : "❌ " + triadTest.status}`);
 
     // Verify Jupiter API
-    const jupTest = await jupFetch(`${JUP_TIMED_API}?subcategory=btc&tags=5m`, { headers: jupHeaders() });
-    if (!jupTest.ok) {
-      const body = await jupTest.text();
-      if (body.includes("unsupported_region")) {
-        console.error("[XARB] ❌ Jupiter API region-blocked — set PROXY_URL");
+    let jupOk = false;
+    try {
+      const jupTest = await jupFetch(`${JUP_TIMED_API}?subcategory=btc&tags=5m`, { headers: jupHeaders() });
+      if (!jupTest.ok) {
+        const body = await jupTest.text();
+        if (body.includes("unsupported_region")) {
+          console.warn("[XARB] ⚠️ Jupiter API region-blocked — set PROXY_URL. Will scan Triad-only spreads.");
+        } else {
+          console.warn(`[XARB] ⚠️ Jupiter API error: ${jupTest.status}. Will retry in scan loop.`);
+        }
       } else {
-        console.error(`[XARB] ❌ Jupiter API error: ${jupTest.status}`);
+        const testData = await jupTest.json() as any;
+        const testEvents = Array.isArray(testData) ? testData : testData.data || testData.events || [];
+        console.log(`[XARB] Jupiter API: ✅ (${testEvents.length} BTC/5m events)`);
+        jupOk = true;
       }
-    } else {
-      const testData = await jupTest.json() as any;
-      const testEvents = Array.isArray(testData) ? testData : testData.data || testData.events || [];
-      console.log(`[XARB] Jupiter API: ✅ (${testEvents.length} BTC/5m events)`);
+    } catch (err: any) {
+      console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry in scan loop.`);
     }
-
-    console.log("[XARB] Starting cross-platform scan...\n");
-    await scanLoop();
-  } catch (err) {
-    console.error("[XARB] Fatal error:", err);
-    process.exit(1);
-  }
 }
 
 main().catch(console.error);
