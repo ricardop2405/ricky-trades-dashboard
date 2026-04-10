@@ -1000,8 +1000,13 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
+    const effectiveJitoTipLamports = (await fetchJitoTipRecommendationLamports()) ?? JITO_TIP_LAMPORTS;
+    if (effectiveJitoTipLamports !== JITO_TIP_LAMPORTS) {
+      console.log(`[JITO] Using boosted tip: ${effectiveJitoTipLamports} lamports (base ${JITO_TIP_LAMPORTS})`);
+    }
+
     try {
-      tipTx = await buildJitoTipTx(blockhash);
+      tipTx = await buildJitoTipTx(blockhash, effectiveJitoTipLamports);
     } catch (err) {
       console.error("[XARB] Failed to build tip tx:", err instanceof Error ? err.message : err);
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
