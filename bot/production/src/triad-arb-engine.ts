@@ -380,21 +380,15 @@ async function findMergeArbs(): Promise<MergeArbCandidate[]> {
     const cooldownKey = `${triad.coin}-${triad.id}`;
     if (marketCooldowns.has(cooldownKey) && Date.now() - marketCooldowns.get(cooldownKey)! < COOLDOWN_MS) continue;
 
-    // Get orderbook for real bid/ask
-    const ob = await fetchTriadOrderbook(triad.id);
-    if (!ob) {
-      if (verbose) console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: orderbook unavailable`);
-      continue;
-    }
-
-    const triadHypeAsk = ob.hypeAsk;
-    const triadFlopAsk = ob.flopAsk;
+    // Use market prices directly (Triad Fast Markets are position-based, not orderbook)
+    const triadHypeAsk = triad.hypePrice > 0 ? triad.hypePrice : null;
+    const triadFlopAsk = triad.flopPrice > 0 ? triad.flopPrice : null;
 
     if (verbose && triadHypeAsk === null) {
-      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no executable hype asks`);
+      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no hype price`);
     }
     if (verbose && triadFlopAsk === null) {
-      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no executable flop asks`);
+      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no flop price`);
     }
     if (triadHypeAsk === null && triadFlopAsk === null) continue;
 
@@ -532,104 +526,87 @@ async function createJupBuyOrder(
   }
 }
 
-// ── Triad Order Creation via SDK ────────────────────────
-// We build instructions directly using the Triad program's Anchor IDL
-// marketBidOrder: takes from ask side of orderbook (market buy)
-// orderDirection: { hype: {} } or { flop: {} }
+// ── Triad Order Creation ────────────────────────────────
+// Uses the on-chain program's `open_position` instruction (not orderbook).
+// Triad Fast Markets are position-based: deposit USDC, pick long/short (hype/flop).
+// hype = long (Up/YES), flop = short (Down/NO)
 async function createTriadBuyInstruction(
-  marketId: string,
+  marketAddress: string,
   direction: "hype" | "flop",
   amountUsd: number,
 ): Promise<TransactionInstruction[] | null> {
   try {
-    // Dynamic import of the Triad SDK
-    const { default: TriadProtocol } = await import("@triadxyz/triad-protocol");
-    const { AnchorProvider, Wallet } = await import("@coral-xyz/anchor");
+    const { default: TriadProtocolClient } = await import("@triadxyz/triad-protocol");
+    const { AnchorProvider, Wallet, BN } = await import("@coral-xyz/anchor");
+    const { getAssociatedTokenAddress } = await import("@solana/spl-token");
 
     const wallet = new Wallet(keypair);
     const provider = new AnchorProvider(connection, wallet, { commitment: "confirmed" });
-    const triad = new TriadProtocol(connection, wallet, {
-      payer: keypair.publicKey,
-      skipPreflight: true,
-    });
+    const client = new TriadProtocolClient(connection, wallet);
+    const program = client.program;
+    const programId = program.programId;
 
-    const marketIdNum = parseInt(marketId);
-    const orderDirection = direction === "hype" ? { hype: {} } : { flop: {} };
+    const tickerPDA = new PublicKey(marketAddress);
+    const mint = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC
 
-    // Use the SDK's trade module to get the instruction
-    // The marketBidOrder method builds instructions that match against ask orders
-    const program = (triad as any).program;
-    if (!program) {
-      console.error("[TRIAD-ORDER] Cannot access program from SDK");
-      return null;
-    }
-
-    // Get orderbook to find asks to match against
-    const orderBook = await triad.trade.getOrderBook(marketIdNum);
-    const asks = direction === "hype" ? orderBook.hype.ask : orderBook.flop.ask;
-
-    if (asks.length === 0) {
-      console.log(`[TRIAD-ORDER] No asks on ${direction} side for market ${marketId}`);
-      return null;
-    }
+    // Derive PDAs using same logic as SDK helpers
+    const [vaultPDA] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), tickerPDA.toBuffer()],
+      programId,
+    );
+    const [userPositionPDA] = PublicKey.findProgramAddressSync(
+      [Buffer.from("user_position"), keypair.publicKey.toBuffer(), tickerPDA.toBuffer()],
+      programId,
+    );
+    const userTokenAccount = await getAssociatedTokenAddress(mint, keypair.publicKey);
 
     const ixs: TransactionInstruction[] = [];
-    const BN = (await import("bn.js")).default;
-    const { getMarketPDA, getOrderBookPDA, getOrderPDA, getCustomerPDA } = await import("@triadxyz/triad-protocol");
 
-    let remainingAmount = new BN(Math.floor(amountUsd * 1_000_000));
-    const programId = program.programId;
-    const oppositeDirection = direction === "hype" ? { flop: {} } : { hype: {} };
-    const customerId = 7; // Default Triadmarkets customer
+    // Check if user position account exists; create if needed
+    let hasUserPosition = false;
+    try {
+      await program.account.userPosition.fetch(userPositionPDA);
+      hasUserPosition = true;
+    } catch {
+      // Position account doesn't exist yet
+    }
 
-    const sortedAsks = asks.sort((a: any, b: any) => Number(a.price) - Number(b.price));
-
-    for (const ask of sortedAsks) {
-      if (remainingAmount.lte(new BN(0))) break;
-      if (ask.authority === WALLET) continue;
-
-      const askPrice = new BN(ask.price);
-      const availableShares = new BN(ask.totalShares).sub(new BN(ask.filledShares));
-      const maxSharesForAmount = remainingAmount.mul(new BN(1_000_000)).div(askPrice);
-      const sharesToBuy = BN.min(maxSharesForAmount, availableShares);
-
-      if (sharesToBuy.lte(new BN(0))) continue;
-
-      const usdcAmount = sharesToBuy.mul(askPrice).div(new BN(1_000_000));
-
+    if (!hasUserPosition) {
+      console.log(`[TRIAD-ORDER] Creating user position for market ${marketAddress}`);
       ixs.push(
         await program.methods
-          .marketBidOrder({
-            amount: usdcAmount,
-            marketId: new BN(marketIdNum),
-            orderDirection,
-            bookOrderAskId: new BN(ask.id),
-            oppositeOrderDirection: oppositeDirection,
-          })
+          .createUserPosition()
           .accounts({
             signer: keypair.publicKey,
-            payer: keypair.publicKey,
-            market: getMarketPDA(programId, marketIdNum),
-            orderBook: getOrderBookPDA(programId, marketIdNum),
-            bookOrderAskAuthority: new PublicKey(ask.authority),
-            order: getOrderPDA(programId, keypair.publicKey, marketIdNum, direction === "hype" ? "Hype" : "Flop"),
-            oppositeOrder: getOrderPDA(programId, new PublicKey(ask.authority), marketIdNum, direction === "hype" ? "Flop" : "Hype"),
-            customer: getCustomerPDA(programId, customerId),
+            ticker: tickerPDA,
           })
           .instruction()
       );
-
-      remainingAmount = remainingAmount.sub(usdcAmount);
     }
 
-    if (ixs.length === 0) {
-      console.log(`[TRIAD-ORDER] No matching asks to fill for ${direction} market ${marketId}`);
-      return null;
-    }
+    // Build open_position instruction
+    const amountRaw = Math.floor(amountUsd * 1_000_000);
+    const isLong = direction === "hype";
 
+    ixs.push(
+      await program.methods
+        .openPosition({
+          amount: new BN(amountRaw),
+          isLong,
+        })
+        .accounts({
+          userPosition: userPositionPDA,
+          ticker: tickerPDA,
+          vault: vaultPDA,
+          userTokenAccount,
+        })
+        .instruction()
+    );
+
+    console.log(`[TRIAD-ORDER] Built ${ixs.length} ixs for ${direction} on ${marketAddress} ($${amountUsd.toFixed(2)})`);
     return ixs;
   } catch (err) {
-    console.error("[TRIAD-ORDER] Error building instruction:", err instanceof Error ? err.message : err);
+    console.error("[TRIAD-ORDER] Error building instruction:", err instanceof Error ? err.stack || err.message : err);
     return null;
   }
 }
@@ -876,7 +853,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // Build both legs in parallel
     const [triadIxs, jupTxBase64] = await Promise.all([
-      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts),
+      createTriadBuyInstruction(c.triadMarket.marketAddress, triadDirection, c.costA * c.contracts),
       createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd),
     ]);
 
