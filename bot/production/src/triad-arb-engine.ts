@@ -721,8 +721,8 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
       } catch { /* retry */ }
     }
 
-    console.warn("[JITO] Status unknown after 30s — marking as submitted/pending");
-    return bundleId;
+    console.warn("[JITO] Status unknown after 30s — treating as FAILED (no on-chain confirmation)");
+    return null;
   } catch (err) {
     console.error("[JITO] Submission error:", err instanceof Error ? err.message : err);
     if (attempt < maxRetries - 1) {
