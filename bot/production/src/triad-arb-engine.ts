@@ -322,11 +322,16 @@ async function fetchTriadAskDepth(
 
     for (const level of levels) {
       const price = Number(level.price);
-      const size = Number(level.size || level.quantity || level.amount || level.total || 0);
+      // Triad uses totalShares/filledShares, not size/quantity
+      const totalShares = Number(level.totalShares || level.size || level.quantity || level.amount || 0);
+      const filledShares = Number(level.filledShares || 0);
+      const availableShares = totalShares - filledShares;
       if (!Number.isFinite(price) || price <= 0 || price > maxPriceRaw) continue;
-      if (!Number.isFinite(size) || size <= 0) continue;
-      totalContracts += size;
-      totalCost += (price / 1_000_000) * size;
+      if (!Number.isFinite(availableShares) || availableShares <= 0) continue;
+      // Convert shares to contracts (shares are in raw units, 1 contract = 1_000_000 shares)
+      const contracts = availableShares / 1_000_000;
+      totalContracts += contracts;
+      totalCost += (price / 1_000_000) * contracts;
     }
 
     const avgPrice = totalContracts > 0 ? totalCost / totalContracts : 0;
@@ -1175,7 +1180,8 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
   // ── PRE-FLIGHT: Verify Triad orderbook has enough ask liquidity ──
   const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
-  const triadDepth = await fetchTriadAskDepth(c.triadMarket.id, triadDirection as "hype" | "flop", c.costA);
+  // Use costA + 10% buffer for depth check — the sum-to-one guard already ensures profitability
+  const triadDepth = await fetchTriadAskDepth(c.triadMarket.id, triadDirection as "hype" | "flop", Math.min(c.costA * 1.1, 0.99));
   if (triadDepth.totalContracts < c.contracts) {
     console.log(
       `[XARB] ❌ FILL PROTECTION: Triad ${triadDirection} ask depth = ${triadDepth.totalContracts} contracts ` +
