@@ -47,7 +47,17 @@ const WALLET = keypair.publicKey.toBase58();
 
 const TRIAD_API = "https://beta.triadfi.co/api";
 const JUP_TIMED_API = "https://prediction-market-api.jup.ag/api/v1/events/crypto/timed";
-const JITO_BLOCK_ENGINE = process.env.TRIAD_JITO_URL || "https://ny.mainnet.block-engine.jito.wtf";
+
+// Multi-region Jito endpoints for parallel submission (1 req/s/IP/region)
+const JITO_REGIONS = (process.env.TRIAD_JITO_REGIONS || "ny,amsterdam,frankfurt,tokyo").split(",").map(r => r.trim());
+const JITO_REGION_URLS: Record<string, string> = {
+  ny: "https://ny.mainnet.block-engine.jito.wtf",
+  amsterdam: "https://amsterdam.mainnet.block-engine.jito.wtf",
+  frankfurt: "https://frankfurt.mainnet.block-engine.jito.wtf",
+  tokyo: "https://tokyo.mainnet.block-engine.jito.wtf",
+  mainnet: "https://mainnet.block-engine.jito.wtf",
+};
+const JITO_BLOCK_ENGINE = process.env.TRIAD_JITO_URL || JITO_REGION_URLS[JITO_REGIONS[0]] || "https://ny.mainnet.block-engine.jito.wtf";
 const JITO_BUNDLE_URL = `${JITO_BLOCK_ENGINE}/api/v1/bundles`;
 const JITO_INFLIGHT_STATUS_URL = `${JITO_BLOCK_ENGINE}/api/v1/getInflightBundleStatuses`;
 const JITO_FINAL_STATUS_URL = `${JITO_BLOCK_ENGINE}/api/v1/getBundleStatuses`;
