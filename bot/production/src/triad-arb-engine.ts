@@ -1413,7 +1413,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   try {
     const triadDirection2 = c.legA === "triad_hype" ? "hype" as const : "flop" as const;
     const effectiveJitoTipLamports = await fetchJitoTipRecommendationLamports().then(tip => tip ?? JITO_TIP_LAMPORTS);
-    const executionCandidate = await stabilizeExecutableCandidate(c, { tipLamports: effectiveJitoTipLamports });
+    const executionCandidate = await stabilizeExecutableCandidate(c, { tipLamports: effectiveJitoTipLamports, skipMinDeposit: true });
     if (!executionCandidate) {
       console.log(`[XARB] Live executable price + two-tip fee no longer support profitable entry — aborting before Triad`);
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
