@@ -877,15 +877,31 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     // Dynamically trim Triad instructions to fit under 1232B tx limit
     let trimmedIxs = triadIxs;
     try {
-      triadTx = await buildTriadTx(trimmedIxs, blockhash);
-      while (triadTx.serialize().length > 1232 && trimmedIxs.length > 1) {
-        trimmedIxs = trimmedIxs.slice(0, trimmedIxs.length - 1);
-        triadTx = await buildTriadTx(trimmedIxs, blockhash);
+      // Try building, trimming on any error (encoding overflow or size > 1232B)
+      let built = false;
+      while (trimmedIxs.length >= 1) {
+        try {
+          triadTx = await buildTriadTx(trimmedIxs, blockhash);
+          if (triadTx.serialize().length <= 1232) {
+            built = true;
+            break;
+          }
+          // Too large, trim one instruction
+          trimmedIxs = trimmedIxs.slice(0, trimmedIxs.length - 1);
+        } catch {
+          // Build/serialize failed, trim and retry
+          trimmedIxs = trimmedIxs.slice(0, trimmedIxs.length - 1);
+        }
+      }
+      if (!built || trimmedIxs.length === 0) {
+        console.error("[XARB] Cannot fit Triad tx under 1232B even with 1 ix — aborting");
+        marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+        return;
       }
       if (trimmedIxs.length < triadIxs.length) {
-        console.log(`[XARB] Trimmed Triad ixs: ${triadIxs.length} → ${trimmedIxs.length} (${triadTx.serialize().length}B)`);
+        console.log(`[XARB] Trimmed Triad ixs: ${triadIxs.length} → ${trimmedIxs.length} (${triadTx!.serialize().length}B)`);
       }
-      triadTx.sign([keypair]);
+      triadTx!.sign([keypair]);
     } catch (err) {
       console.error("[XARB] Failed to build Triad tx:", err instanceof Error ? err.message : err);
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
