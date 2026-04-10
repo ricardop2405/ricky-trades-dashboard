@@ -380,21 +380,15 @@ async function findMergeArbs(): Promise<MergeArbCandidate[]> {
     const cooldownKey = `${triad.coin}-${triad.id}`;
     if (marketCooldowns.has(cooldownKey) && Date.now() - marketCooldowns.get(cooldownKey)! < COOLDOWN_MS) continue;
 
-    // Get orderbook for real bid/ask
-    const ob = await fetchTriadOrderbook(triad.id);
-    if (!ob) {
-      if (verbose) console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: orderbook unavailable`);
-      continue;
-    }
-
-    const triadHypeAsk = ob.hypeAsk;
-    const triadFlopAsk = ob.flopAsk;
+    // Use market prices directly (Triad Fast Markets are position-based, not orderbook)
+    const triadHypeAsk = triad.hypePrice > 0 ? triad.hypePrice : null;
+    const triadFlopAsk = triad.flopPrice > 0 ? triad.flopPrice : null;
 
     if (verbose && triadHypeAsk === null) {
-      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no executable hype asks`);
+      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no hype price`);
     }
     if (verbose && triadFlopAsk === null) {
-      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no executable flop asks`);
+      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no flop price`);
     }
     if (triadHypeAsk === null && triadFlopAsk === null) continue;
 
