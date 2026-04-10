@@ -651,6 +651,32 @@ async function buildAndSign(base64Tx: string): Promise<VersionedTransaction> {
   return tx;
 }
 
+async function simulateBundleTxs(txs: VersionedTransaction[]): Promise<boolean> {
+  // Simulate each tx individually to catch errors before Jito submission
+  for (let i = 0; i < txs.length; i++) {
+    const label = ["Triad", "Jupiter", "Tip"][i] || `Tx${i}`;
+    try {
+      const sim = await connection.simulateTransaction(txs[i], {
+        sigVerify: false,
+        replaceRecentBlockhash: true,
+      });
+      if (sim.value.err) {
+        console.error(`[SIM] ❌ ${label} simulation FAILED:`, JSON.stringify(sim.value.err));
+        if (sim.value.logs) {
+          const errorLogs = sim.value.logs.filter(l => l.includes("Error") || l.includes("failed") || l.includes("insufficient"));
+          if (errorLogs.length > 0) console.error(`[SIM] ${label} logs:`, errorLogs.join(" | "));
+        }
+        return false;
+      }
+      console.log(`[SIM] ✅ ${label} simulation OK (${sim.value.unitsConsumed || "?"} CU)`);
+    } catch (err) {
+      console.error(`[SIM] ${label} simulation threw:`, err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+  return true;
+}
+
 async function buildTriadTx(ixs: TransactionInstruction[], blockhash: string): Promise<VersionedTransaction> {
   const msg = new TransactionMessage({
     payerKey: keypair.publicKey,
@@ -1069,6 +1095,14 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       }
     } catch (serErr) {
       console.error("[XARB] Serialization check failed:", serErr instanceof Error ? serErr.message : serErr);
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
+    // Pre-flight simulation — catch errors before burning Jito rate limit quota
+    const simOk = await simulateBundleTxs([triadTx!, jupTx, tipTx]);
+    if (!simOk) {
+      console.error("[XARB] ❌ Pre-flight simulation failed — skipping Jito submission (zero capital at risk)");
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
       return;
     }
