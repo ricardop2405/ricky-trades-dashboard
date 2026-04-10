@@ -134,10 +134,10 @@ interface TriadFastMarket {
 }
 
 interface TriadOrderbook {
-  hypeBid: number;
-  hypeAsk: number;
-  flopBid: number;
-  flopAsk: number;
+  hypeBid: number | null;
+  hypeAsk: number | null;
+  flopBid: number | null;
+  flopAsk: number | null;
 }
 
 interface JupSide {
@@ -211,10 +211,23 @@ async function fetchTriadOrderbook(marketId: string): Promise<TriadOrderbook | n
     if (!res.ok) return null;
     const ob = await res.json();
 
-    const hypeAsk = ob.hype?.ask?.length > 0 ? Math.min(...ob.hype.ask.map((l: any) => l.price)) / 1_000_000 : 0.5;
-    const hypeBid = ob.hype?.bid?.length > 0 ? Math.max(...ob.hype.bid.map((l: any) => l.price)) / 1_000_000 : 0.5;
-    const flopAsk = ob.flop?.ask?.length > 0 ? Math.min(...ob.flop.ask.map((l: any) => l.price)) / 1_000_000 : 0.5;
-    const flopBid = ob.flop?.bid?.length > 0 ? Math.max(...ob.flop.bid.map((l: any) => l.price)) / 1_000_000 : 0.5;
+    const bestPrice = (levels: any[] | undefined, side: "ask" | "bid"): number | null => {
+      if (!Array.isArray(levels) || levels.length === 0) return null;
+
+      const prices = levels
+        .map((level: any) => Number(level.price))
+        .filter((price: number) => Number.isFinite(price) && price > 0);
+
+      if (prices.length === 0) return null;
+
+      const raw = side === "ask" ? Math.min(...prices) : Math.max(...prices);
+      return raw / 1_000_000;
+    };
+
+    const hypeAsk = bestPrice(ob.hype?.ask, "ask");
+    const hypeBid = bestPrice(ob.hype?.bid, "bid");
+    const flopAsk = bestPrice(ob.flop?.ask, "ask");
+    const flopBid = bestPrice(ob.flop?.bid, "bid");
 
     return { hypeBid, hypeAsk, flopBid, flopAsk };
   } catch {
@@ -323,8 +336,21 @@ async function findMergeArbs(): Promise<MergeArbCandidate[]> {
 
     // Get orderbook for real bid/ask
     const ob = await fetchTriadOrderbook(triad.id);
-    const triadHypeAsk = ob?.hypeAsk ?? triad.hypePrice;
-    const triadFlopAsk = ob?.flopAsk ?? triad.flopPrice;
+    if (!ob) {
+      if (verbose) console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: orderbook unavailable`);
+      continue;
+    }
+
+    const triadHypeAsk = ob.hypeAsk;
+    const triadFlopAsk = ob.flopAsk;
+
+    if (verbose && triadHypeAsk === null) {
+      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no executable hype asks`);
+    }
+    if (verbose && triadFlopAsk === null) {
+      console.log(`  [TRIAD] ${triad.coin.toUpperCase()} ${triad.id}: no executable flop asks`);
+    }
+    if (triadHypeAsk === null && triadFlopAsk === null) continue;
 
     const jupEvents = jupByCoin.get(triad.coin) || [];
 
@@ -339,7 +365,7 @@ async function findMergeArbs(): Promise<MergeArbCandidate[]> {
       // If price goes UP  → Triad Hype wins $1
       // If price goes DOWN → Jup Down wins $1
       // Either way we get $1 per contract
-      {
+      if (triadHypeAsk !== null) {
         const totalCost = triadHypeAsk + jup.down.buyYes;
         const profitPerContract = 1 - totalCost;
         const contracts = Math.floor(TRADE_SIZE_USD / totalCost);
@@ -375,7 +401,7 @@ async function findMergeArbs(): Promise<MergeArbCandidate[]> {
       // ── Merge 2: Buy Triad Flop (Down) + Buy Jup Up YES ──
       // If price goes DOWN → Triad Flop wins $1
       // If price goes UP   → Jup Up wins $1
-      {
+      if (triadFlopAsk !== null) {
         const totalCost = triadFlopAsk + jup.up.buyYes;
         const profitPerContract = 1 - totalCost;
         const contracts = Math.floor(TRADE_SIZE_USD / totalCost);
