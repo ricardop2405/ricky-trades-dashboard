@@ -37,7 +37,7 @@ export default function Login() {
           </div>
           <CardTitle className="text-xl font-mono">Ricky Trades</CardTitle>
           <p className="text-sm text-muted-foreground">
-            {isSignUp ? "Crea tu cuenta" : "Inicia sesión para acceder al dashboard"}
+            Inicia sesión para acceder al dashboard
           </p>
         </CardHeader>
         <CardContent>
