@@ -118,9 +118,9 @@ module.exports = {
       },
     },
     {
-      name: "ricky-dflow",
+      name: "ricky-triad",
       script: "./node_modules/.bin/ts-node",
-      args: "--transpile-only src/dflow-arb-engine.ts",
+      args: "--transpile-only src/triad-arb-engine.ts",
       cwd: __dirname,
       interpreter: "node",
       restart_delay: 5000,
