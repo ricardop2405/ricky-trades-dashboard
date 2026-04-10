@@ -322,11 +322,16 @@ async function fetchTriadAskDepth(
 
     for (const level of levels) {
       const price = Number(level.price);
-      const size = Number(level.size || level.quantity || level.amount || level.total || 0);
+      // Triad uses totalShares/filledShares, not size/quantity
+      const totalShares = Number(level.totalShares || level.size || level.quantity || level.amount || 0);
+      const filledShares = Number(level.filledShares || 0);
+      const availableShares = totalShares - filledShares;
       if (!Number.isFinite(price) || price <= 0 || price > maxPriceRaw) continue;
-      if (!Number.isFinite(size) || size <= 0) continue;
-      totalContracts += size;
-      totalCost += (price / 1_000_000) * size;
+      if (!Number.isFinite(availableShares) || availableShares <= 0) continue;
+      // Convert shares to contracts (shares are in raw units, 1 contract = 1_000_000 shares)
+      const contracts = availableShares / 1_000_000;
+      totalContracts += contracts;
+      totalCost += (price / 1_000_000) * contracts;
     }
 
     const avgPrice = totalContracts > 0 ? totalCost / totalContracts : 0;
