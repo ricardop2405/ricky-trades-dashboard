@@ -381,6 +381,10 @@ async function findCrossArbCandidates(): Promise<CrossArbCandidate[]> {
           }
         }
       }
+
+      if (!matched && verbose) {
+        console.log(`    ❌ Triad "${triad.question}" (closes ${new Date(triad.marketEnd * 1000).toISOString().slice(11,19)}) — no Jupiter match within 2min`);
+      }
     }
   }
 
