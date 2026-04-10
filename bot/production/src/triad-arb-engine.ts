@@ -1584,7 +1584,11 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    console.log(`[XARB] ✅ Atomic bundle landed: ${atomicBundleResult.bundleId}`);
+    if (atomicBundleResult.pending) {
+      console.warn(`[XARB] ⏳ Atomic bundle submitted/pending: ${atomicBundleResult.bundleId}`);
+    } else {
+      console.log(`[XARB] ✅ Atomic bundle landed: ${atomicBundleResult.bundleId}`);
+    }
     console.log(`[XARB] Triad tx: ${triadSig}`);
     console.log(`[XARB] Jupiter tx: ${jupSig}`);
 
@@ -1612,8 +1616,8 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
     } else {
-      // Bundle landed but awaiting keeper confirmation
-      console.warn(`[XARB] ⚠️ Atomic bundle landed — Triad: ${triadFilled ? "FILLED" : "pending"} | Jupiter: ${jupConfirmed ? "CONFIRMED" : "awaiting keeper"}`);
+      // Bundle submitted/landed but awaiting keeper confirmation
+      console.warn(`[XARB] ⚠️ Atomic bundle ${atomicBundleResult.pending ? "pending" : "landed"} — Triad: ${triadFilled ? "FILLED" : "pending"} | Jupiter: ${jupConfirmed ? "CONFIRMED" : "awaiting keeper"}`);
       console.warn(`[XARB]    SUM-TO-ONE holds: once both settle, profit is locked in.`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
