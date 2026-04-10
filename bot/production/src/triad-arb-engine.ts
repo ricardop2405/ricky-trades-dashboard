@@ -244,6 +244,7 @@ async function fetchJupiterEvents(coin: string): Promise<JupEvent[]> {
 async function findCrossArbCandidates(): Promise<CrossArbCandidate[]> {
   const candidates: CrossArbCandidate[] = [];
   const now = Date.now() / 1000;
+  const verbose = scanCount % 10 === 0;
 
   // Fetch Triad + Jupiter in parallel for all coins
   const coinData = await Promise.all(
@@ -257,6 +258,10 @@ async function findCrossArbCandidates(): Promise<CrossArbCandidate[]> {
   );
 
   for (const { coin, triadMarkets, jupEvents } of coinData) {
+    if (verbose) {
+      console.log(`  [${coin.toUpperCase()}] Triad: ${triadMarkets.length} open markets | Jupiter: ${jupEvents.length} events`);
+    }
+
     if (triadMarkets.length === 0 || jupEvents.length === 0) continue;
 
     for (const triad of triadMarkets) {
@@ -268,17 +273,39 @@ async function findCrossArbCandidates(): Promise<CrossArbCandidate[]> {
 
       // Get Triad orderbook for real bid/ask
       const ob = await fetchTriadOrderbook(triad.id);
-      const triadHypeAsk = ob?.hypeAsk ?? triad.hypePrice;  // Cost to buy Hype (Up) on Triad
-      const triadHypeBid = ob?.hypeBid ?? triad.hypePrice;  // Proceeds selling Hype (Up) on Triad
-      const triadFlopAsk = ob?.flopAsk ?? triad.flopPrice;  // Cost to buy Flop (Down) on Triad
-      const triadFlopBid = ob?.flopBid ?? triad.flopPrice;  // Proceeds selling Flop (Down) on Triad
+      const triadHypeAsk = ob?.hypeAsk ?? triad.hypePrice;
+      const triadHypeBid = ob?.hypeBid ?? triad.hypePrice;
+      const triadFlopAsk = ob?.flopAsk ?? triad.flopPrice;
+      const triadFlopBid = ob?.flopBid ?? triad.flopPrice;
+
+      const hasOB = ob && (ob.hypeAsk !== 0.5 || ob.hypeBid !== 0.5 || ob.flopAsk !== 0.5 || ob.flopBid !== 0.5);
 
       // Match with Jupiter events by close time (within 2 min window)
+      let matched = false;
       for (const jup of jupEvents) {
         const timeDiff = Math.abs(triad.marketEnd - jup.closeTime);
-        if (timeDiff > 120) continue; // Must close within 2 min of each other
+        if (timeDiff > 120) continue;
+        matched = true;
 
-        const txFee = 0.002 * CONFIG.SOL_PRICE_USD; // ~$0.30
+        if (verbose) {
+          console.log(
+            `    🔗 MATCH ${coin.toUpperCase()} close±${Math.round(timeDiff)}s | ` +
+            `Triad: hype=$${triadHypeAsk.toFixed(4)}/${triadHypeBid.toFixed(4)} flop=$${triadFlopAsk.toFixed(4)}/${triadFlopBid.toFixed(4)}${hasOB ? " 📖" : ""} | ` +
+            `Jup: up=$${jup.up.buyYes.toFixed(4)}/${jup.up.sellYes.toFixed(4)} down=$${jup.down.buyYes.toFixed(4)}/${jup.down.sellYes.toFixed(4)}`
+          );
+
+          // Show all 4 spread calculations
+          const s1 = jup.up.sellYes - triadHypeAsk;
+          const s2 = triadHypeBid - jup.up.buyYes;
+          const s3 = jup.down.sellYes - triadFlopAsk;
+          const s4 = triadFlopBid - jup.down.buyYes;
+          console.log(
+            `    📊 Spreads: buyTriad/sellJup(Up)=${(s1*100).toFixed(2)}% buyJup/sellTriad(Up)=${(s2*100).toFixed(2)}% ` +
+            `buyTriad/sellJup(Dn)=${(s3*100).toFixed(2)}% buyJup/sellTriad(Dn)=${(s4*100).toFixed(2)}%`
+          );
+        }
+
+        const txFee = 0.002 * CONFIG.SOL_PRICE_USD;
 
         // Strategy 1: Buy Up on Triad (cheap), Sell Up on Jupiter (expensive)
         // Profit = jupSellYes(Up) - triadHypeAsk - fees
@@ -353,6 +380,10 @@ async function findCrossArbCandidates(): Promise<CrossArbCandidate[]> {
             });
           }
         }
+      }
+
+      if (!matched && verbose) {
+        console.log(`    ❌ Triad "${triad.question}" (closes ${new Date(triad.marketEnd * 1000).toISOString().slice(11,19)}) — no Jupiter match within 2min`);
       }
     }
   }
