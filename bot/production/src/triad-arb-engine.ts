@@ -1337,59 +1337,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
     bundleInFlight.delete(marketKey);
 
-    if (bundleResult && !bundleResult.pending) {
-      console.log(`[XARB] ✅ Bundle landed! ${bundleResult.bundleId}`);
-      console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
-
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.totalCost * c.contracts,
-          realized_pnl: c.netProfit,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "filled",
-          side_a_tx: bs58.encode(triadTx.signatures[0]),
-          side_b_tx: bs58.encode(jupTx.signatures[0]),
-        });
-        await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
-      }
-    } else if (bundleResult?.pending) {
-      console.warn(`[XARB] ⏳ Bundle pending: ${bundleResult.bundleId}`);
-      // Check on-chain if the first tx (Triad) actually landed
-      try {
-        const triadSig = bs58.encode(triadTx.signatures[0]);
-        console.log(`[XARB] Checking on-chain for Triad tx: ${triadSig}`);
-        await sleep(5000);
-        const status = await connection.getSignatureStatus(triadSig);
-        if (status?.value?.confirmationStatus === "confirmed" || status?.value?.confirmationStatus === "finalized") {
-          console.log(`[XARB] ✅ Bundle CONFIRMED on-chain! Triad tx: ${triadSig}`);
-          console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
-          if (oppId) {
-            await supabase.from("arb_executions").update({ status: "filled", realized_pnl: c.netProfit }).eq("opportunity_id", oppId);
-            await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
-          }
-        } else if (status?.value?.err) {
-          console.warn(`[XARB] ❌ Triad tx failed on-chain:`, JSON.stringify(status.value.err));
-        } else {
-          console.warn(`[XARB] ⏳ Triad tx not yet confirmed — check manually: ${triadSig}`);
-        }
-      } catch (checkErr) {
-        console.warn(`[XARB] Could not verify on-chain status:`, checkErr instanceof Error ? checkErr.message : checkErr);
-      }
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.totalCost * c.contracts,
-          realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "submitted",
-          error_message: "Bundle submitted; pending confirmation after inflight/final polling",
-          side_a_tx: bs58.encode(triadTx.signatures[0]),
-          side_b_tx: bs58.encode(jupTx.signatures[0]),
-        });
-        await supabase.from("arb_opportunities").update({ status: "executing" }).eq("id", oppId);
-      }
-    } else {
+    if (!bundleResult) {
       console.error("[XARB] ❌ Bundle failed — zero capital at risk (atomic revert)");
       if (oppId) {
         await supabase.from("arb_executions").insert({
@@ -1401,6 +1349,110 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
           error_message: "Jito bundle rejected — atomic revert, no funds lost",
         });
         await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      }
+      return;
+    }
+
+    // ── DUAL FILL VERIFICATION ──────────────────────────────
+    // Both legs must confirm filled. If either didn't, auto-cancel the other.
+    console.log(`[XARB] 🔍 Verifying BOTH legs filled (bundle: ${bundleResult.bundleId})...`);
+    await sleep(5000); // wait for on-chain confirmation
+
+    const triadSig = bs58.encode(triadTx.signatures[0]);
+    const jupSig = bs58.encode(jupTx.signatures[0]);
+
+    // Check Jupiter on-chain confirmation
+    const jupConfirmed = await isJupiterTxConfirmed(jupTx);
+    console.log(`[XARB] Jupiter tx ${jupSig.slice(0, 12)}...: ${jupConfirmed ? "✅ CONFIRMED" : "❌ NOT CONFIRMED"}`);
+
+    // Check Triad order fill status (if order PDA still exists, it's unfilled/resting)
+    const triadStillOpen = await isTriadOrderStillOpen(c.triadMarket.id, triadDirection2);
+    const triadFilled = !triadStillOpen;
+    console.log(`[XARB] Triad order ${triadDirection2} on ${c.triadMarket.id}: ${triadFilled ? "✅ FILLED" : "❌ UNFILLED (resting)"}`);
+
+    if (jupConfirmed && triadFilled) {
+      // ── BOTH FILLED — SUCCESS ──
+      console.log(`[XARB] ✅ BOTH LEGS FILLED! Bundle: ${bundleResult.bundleId}`);
+      console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.totalCost * c.contracts,
+          realized_pnl: c.netProfit,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "filled",
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+      }
+    } else if (!triadFilled && jupConfirmed) {
+      // ── TRIAD UNFILLED, JUPITER FILLED — CANCEL TRIAD ORDER ──
+      console.error(`[XARB] ⚠️ FILL MISMATCH: Jupiter filled but Triad order is resting!`);
+      console.log(`[XARB] 🔄 Auto-canceling Triad ${triadDirection2} order on market ${c.triadMarket.id}...`);
+
+      const cancelOk = await cancelTriadOrder(c.triadMarket.id, triadDirection2);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.costB * c.contracts, // only Jupiter cost is at risk
+          realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "partial_unwind",
+          error_message: `Triad order unfilled — ${cancelOk ? "auto-canceled" : "CANCEL FAILED — manual intervention needed"}. Jupiter leg filled ($${(c.costB * c.contracts).toFixed(2)} exposed).`,
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "partial_unwind" }).eq("id", oppId);
+      }
+
+      if (!cancelOk) {
+        console.error(`[XARB] 🚨 CRITICAL: Could not cancel Triad order! Manual cancel needed on triadfi.co`);
+        console.error(`[XARB] 🚨 Market: ${c.triadMarket.id}, Direction: ${triadDirection2}`);
+      }
+    } else if (triadFilled && !jupConfirmed) {
+      // ── TRIAD FILLED, JUPITER NOT CONFIRMED ──
+      console.error(`[XARB] ⚠️ FILL MISMATCH: Triad filled but Jupiter not confirmed!`);
+      console.error(`[XARB] 🚨 Triad position is UNHEDGED. Check Jupiter tx manually: ${jupSig}`);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.costA * c.contracts,
+          realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "partial_unwind",
+          error_message: `Triad filled but Jupiter not confirmed — UNHEDGED. Manual check: ${jupSig}`,
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "partial_unwind" }).eq("id", oppId);
+      }
+    } else {
+      // ── NEITHER CONFIRMED — likely bundle didn't land ──
+      console.warn(`[XARB] ⚠️ Neither leg confirmed on-chain. Bundle may not have landed.`);
+
+      // Double-check: try to cancel Triad order just in case it was placed
+      const triadStillOpen2 = await isTriadOrderStillOpen(c.triadMarket.id, triadDirection2);
+      if (triadStillOpen2) {
+        console.log(`[XARB] 🔄 Triad order found on-chain — canceling as safety measure...`);
+        await cancelTriadOrder(c.triadMarket.id, triadDirection2);
+      }
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: 0,
+          realized_pnl: 0,
+          fees: 0,
+          status: bundleResult.pending ? "submitted" : "failed",
+          error_message: "Neither leg confirmed — bundle likely reverted or still pending",
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: bundleResult.pending ? "executing" : "failed" }).eq("id", oppId);
       }
     }
   } catch (err) {
