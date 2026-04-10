@@ -1168,7 +1168,7 @@ async function submitToRegion(region: string, encodedTxs: string[]): Promise<{ b
   }
 }
 
-async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<{ bundleId: string; pending?: boolean } | null> {
+async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<{ bundleId: string; confirmed?: boolean } | null> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const encodedTxs = txs.map(tx => Buffer.from(tx.serialize()).toString("base64"));
@@ -1584,10 +1584,10 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    if (atomicBundleResult.pending) {
-      console.warn(`[XARB] ⏳ Atomic bundle submitted/pending: ${atomicBundleResult.bundleId}`);
+    if (atomicBundleResult.confirmed) {
+      console.log(`[XARB] ✅ Atomic bundle CONFIRMED on-chain: ${atomicBundleResult.bundleId}`);
     } else {
-      console.log(`[XARB] ✅ Atomic bundle landed: ${atomicBundleResult.bundleId}`);
+      console.warn(`[XARB] ⏳ Atomic bundle submitted but NOT confirmed (pending): ${atomicBundleResult.bundleId}`);
     }
     console.log(`[XARB] Triad tx: ${triadSig}`);
     console.log(`[XARB] Jupiter tx: ${jupSig}`);
@@ -1617,7 +1617,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       }
     } else {
       // Bundle submitted/landed but awaiting keeper confirmation
-      console.warn(`[XARB] ⚠️ Atomic bundle ${atomicBundleResult.pending ? "pending" : "landed"} — Triad: ${triadFilled ? "FILLED" : "pending"} | Jupiter: ${jupConfirmed ? "CONFIRMED" : "awaiting keeper"}`);
+      console.warn(`[XARB] ⚠️ Atomic bundle ${atomicBundleResult.confirmed ? "CONFIRMED" : "PENDING"} — Triad: ${triadFilled ? "FILLED" : "pending"} | Jupiter: ${jupConfirmed ? "CONFIRMED" : "awaiting keeper"}`);
       console.warn(`[XARB]    SUM-TO-ONE holds: once both settle, profit is locked in.`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
