@@ -836,17 +836,14 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    // Build transactions — all must share the same blockhash for Jito bundle
+    // Build transactions
     const { blockhash } = await connection.getLatestBlockhash();
 
     const triadTx = await buildTriadTx(triadIxs, blockhash);
     const jupTx = await buildAndSign(jupTxBase64);
     const tipTx = await buildJitoTipTx(blockhash);
 
-    // Re-set blockhash on Jupiter tx so it matches the bundle
-    jupTx.message.recentBlockhash = blockhash;
-
-    // Sign all txs with our keypair
+    // Sign Triad + tip txs (Jupiter tx is already signed by their API, we co-sign)
     triadTx.sign([keypair]);
     jupTx.sign([keypair]);
     tipTx.sign([keypair]);
