@@ -53,12 +53,15 @@ let bestSpreadSeen = -Infinity;
 // ── Proxy for Jupiter (region-blocked) ──────────────────
 const PROXY_URL = process.env.PROXY_URL || "";
 let proxyAgent: any = null;
-if (PROXY_URL) {
+if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("placeholder")) {
   if (PROXY_URL.startsWith("socks")) {
     proxyAgent = new SocksProxyAgent(PROXY_URL);
   } else {
     proxyAgent = new HttpsProxyAgent(PROXY_URL);
   }
+  console.log(`[XARB] Proxy: ${PROXY_URL.replace(/\/\/.*@/, "//***@")}`);
+} else {
+  console.log("[XARB] No valid proxy — Jupiter calls go direct");
 }
 
 async function jupFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -447,18 +450,24 @@ async function main() {
     console.log(`[XARB] Triad API: ${triadTest.ok ? "✅" : "❌ " + triadTest.status}`);
 
     // Verify Jupiter API
-    const jupTest = await jupFetch(`${JUP_TIMED_API}?subcategory=btc&tags=5m`, { headers: jupHeaders() });
-    if (!jupTest.ok) {
-      const body = await jupTest.text();
-      if (body.includes("unsupported_region")) {
-        console.error("[XARB] ❌ Jupiter API region-blocked — set PROXY_URL");
+    let jupOk = false;
+    try {
+      const jupTest = await jupFetch(`${JUP_TIMED_API}?subcategory=btc&tags=5m`, { headers: jupHeaders() });
+      if (!jupTest.ok) {
+        const body = await jupTest.text();
+        if (body.includes("unsupported_region")) {
+          console.warn("[XARB] ⚠️ Jupiter API region-blocked — set PROXY_URL. Will scan Triad-only spreads.");
+        } else {
+          console.warn(`[XARB] ⚠️ Jupiter API error: ${jupTest.status}. Will retry in scan loop.`);
+        }
       } else {
-        console.error(`[XARB] ❌ Jupiter API error: ${jupTest.status}`);
+        const testData = await jupTest.json() as any;
+        const testEvents = Array.isArray(testData) ? testData : testData.data || testData.events || [];
+        console.log(`[XARB] Jupiter API: ✅ (${testEvents.length} BTC/5m events)`);
+        jupOk = true;
       }
-    } else {
-      const testData = await jupTest.json() as any;
-      const testEvents = Array.isArray(testData) ? testData : testData.data || testData.events || [];
-      console.log(`[XARB] Jupiter API: ✅ (${testEvents.length} BTC/5m events)`);
+    } catch (err: any) {
+      console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry in scan loop.`);
     }
 
     console.log("[XARB] Starting cross-platform scan...\n");
