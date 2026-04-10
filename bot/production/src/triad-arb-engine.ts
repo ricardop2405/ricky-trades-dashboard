@@ -74,6 +74,8 @@ const COOLDOWN_MS = 60_000;
 const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
 const JUP_EXECUTION_BUFFER_USD = parseFloat(process.env.TRIAD_JUP_EXECUTION_BUFFER_USD || "0.01");
 const EXECUTION_BUNDLE_COUNT = 2; // Triad leg + Jupiter leg
+const MIN_JUPITER_DEPOSIT_USD = parseFloat(process.env.TRIAD_MIN_JUP_DEPOSIT_USD || "1.0");
+const MIN_SOL_BALANCE = parseFloat(process.env.TRIAD_MIN_SOL_BALANCE || "0.2");
 
 // ── SUM-TO-ONE HARD CEILING ──
 // CRITICAL SAFETY: costA + costB must be STRICTLY below this per contract.
@@ -213,6 +215,10 @@ function getJupSideForLeg(event: JupEvent, leg: MergeArbCandidate["legB"]): JupS
 
 function estimateExecutionFeesUsd(tipLamports: number, bundleCount = EXECUTION_BUNDLE_COUNT): number {
   return ((tipLamports * bundleCount) / LAMPORTS_PER_SOL) * CONFIG.SOL_PRICE_USD;
+}
+
+function estimateRequiredSolBalance(tipLamports: number, bundleCount = EXECUTION_BUNDLE_COUNT): number {
+  return Math.max(MIN_SOL_BALANCE, ((tipLamports * bundleCount) / LAMPORTS_PER_SOL) + 0.02);
 }
 
 // ── Triad API ───────────────────────────────────────────
@@ -506,14 +512,21 @@ async function refreshJupCandidate(
   const totalCost = c.costA + bufferedCostB;
   const profitPerContract = 1 - totalCost;
   const contracts = options.fixedContracts ?? Math.floor(TRADE_SIZE_USD / totalCost);
+  const jupDepositUsd = bufferedCostB * contracts;
   const txFee = estimateExecutionFeesUsd(options.tipLamports ?? JITO_TIP_LAMPORTS);
   const netProfit = (profitPerContract * contracts) - txFee;
   const remaining = Math.max(0, latestEvent.closeTime - Date.now() / 1000);
 
-  if (contracts <= 0 || totalCost >= 1 || profitPerContract <= 0 || netProfit <= MIN_NET_PROFIT) {
+  if (
+    contracts <= 0 ||
+    totalCost >= 1 ||
+    profitPerContract <= 0 ||
+    netProfit <= MIN_NET_PROFIT ||
+    jupDepositUsd < MIN_JUPITER_DEPOSIT_USD
+  ) {
     console.log(
       `[XARB] ⚠️ Jupiter repriced out: live=$${latestSide.buyYes.toFixed(4)} buffer=$${JUP_EXECUTION_BUFFER_USD.toFixed(4)} ` +
-      `=> total=$${totalCost.toFixed(4)} contracts=${contracts} net=$${netProfit.toFixed(4)}`
+      `=> total=$${totalCost.toFixed(4)} contracts=${contracts} jupDeposit=$${jupDepositUsd.toFixed(4)} net=$${netProfit.toFixed(4)}`
     );
     return null;
   }
@@ -686,8 +699,8 @@ async function createJupBuyOrder(
 ): Promise<string | null> {
   try {
     // Jupiter requires minimum $1 deposit
-    if (depositUsd < 1.0) {
-      console.log(`[JUP-ORDER] Deposit $${depositUsd.toFixed(2)} below $1 minimum — skipping`);
+    if (depositUsd < MIN_JUPITER_DEPOSIT_USD) {
+      console.log(`[JUP-ORDER] Deposit $${depositUsd.toFixed(2)} below $${MIN_JUPITER_DEPOSIT_USD.toFixed(2)} minimum — skipping`);
       return null;
     }
 
@@ -780,6 +793,68 @@ function getATA(owner: PublicKey, mint: PublicKey, tokenProgram: PublicKey = TOK
     [owner.toBuffer(), tokenProgram.toBuffer(), mint.toBuffer()],
     ASSOCIATED_TOKEN_PROGRAM_ID,
   )[0];
+}
+
+async function getWalletFundingSnapshot(): Promise<{ solBalance: number; usdcBalance: number }> {
+  const [solLamports, usdcBalance] = await Promise.all([
+    connection.getBalance(keypair.publicKey),
+    (async () => {
+      try {
+        const userAta = getATA(keypair.publicKey, USDC_MINT);
+        const balance = await connection.getTokenAccountBalance(userAta);
+        return Number(balance.value.uiAmountString || balance.value.uiAmount || 0);
+      } catch {
+        return 0;
+      }
+    })(),
+  ]);
+
+  return {
+    solBalance: solLamports / LAMPORTS_PER_SOL,
+    usdcBalance,
+  };
+}
+
+async function checkWalletFunding(requiredUsdc: number, tipLamports: number): Promise<{
+  ok: boolean;
+  solBalance: number;
+  usdcBalance: number;
+  requiredSol: number;
+  requiredUsdc: number;
+  reason?: string;
+}> {
+  const funding = await getWalletFundingSnapshot();
+  const requiredSol = estimateRequiredSolBalance(tipLamports);
+
+  if (funding.usdcBalance + 0.000001 < requiredUsdc) {
+    return {
+      ok: false,
+      solBalance: funding.solBalance,
+      usdcBalance: funding.usdcBalance,
+      requiredSol,
+      requiredUsdc,
+      reason: `USDC $${funding.usdcBalance.toFixed(2)} < required $${requiredUsdc.toFixed(2)}`,
+    };
+  }
+
+  if (funding.solBalance + 0.000001 < requiredSol) {
+    return {
+      ok: false,
+      solBalance: funding.solBalance,
+      usdcBalance: funding.usdcBalance,
+      requiredSol,
+      requiredUsdc,
+      reason: `SOL ${funding.solBalance.toFixed(4)} < required ${requiredSol.toFixed(4)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    solBalance: funding.solBalance,
+    usdcBalance: funding.usdcBalance,
+    requiredSol,
+    requiredUsdc,
+  };
 }
 
 async function createTriadBuyInstruction(
@@ -1270,6 +1345,15 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     c = executionCandidate;
     const jupMarketId = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
     const jupDepositUsd = c.costB * c.contracts;
+    const entryFunding = await checkWalletFunding(c.totalCost * c.contracts, effectiveJitoTipLamports);
+    if (!entryFunding.ok) {
+      console.log(
+        `[XARB] Funding guard blocked trade: ${entryFunding.reason} ` +
+        `| wallet SOL=${entryFunding.solBalance.toFixed(4)} USDC=$${entryFunding.usdcBalance.toFixed(2)}`
+      );
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
 
     console.log(`[XARB] Building both legs in parallel (will execute sequentially)...`);
 
@@ -1450,6 +1534,25 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
     c = freshCandidate;
+
+    const postTriadFunding = await checkWalletFunding(c.costB * c.contracts, effectiveJitoTipLamports);
+    if (!postTriadFunding.ok) {
+      console.error(`[XARB] 🚨 Post-Triad funding check failed: ${postTriadFunding.reason}`);
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.costA * c.contracts,
+          realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "partial_triad_only",
+          error_message: `Triad filled. Insufficient wallet funding for Jupiter leg (${postTriadFunding.reason}). Sig: ${triadSig}`,
+          side_a_tx: triadSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
+      }
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
 
     // Rebuild Jupiter order with fresh price (original jupTxBase64 may have stale price)
     const jupMarketIdFresh = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
@@ -1671,8 +1774,9 @@ async function scanLoop() {
 // ── Start ───────────────────────────────────────────────
 async function main() {
   try {
-    const balance = await connection.getBalance(keypair.publicKey);
-    console.log(`[XARB] SOL balance: ${(balance / LAMPORTS_PER_SOL).toFixed(4)}`);
+    const funding = await getWalletFundingSnapshot();
+    console.log(`[XARB] SOL balance: ${funding.solBalance.toFixed(4)}`);
+    console.log(`[XARB] USDC balance: $${funding.usdcBalance.toFixed(2)}`);
 
     // Verify Triad API
     const triadTest = await fetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS });
