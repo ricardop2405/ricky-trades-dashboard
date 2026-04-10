@@ -21,7 +21,7 @@
     "@solana/spl-token": "^0.4.6",
     "@solana/web3.js": "^1.95.0",
     "@supabase/supabase-js": "^2.49.1",
-    "@triadxyz/triad-protocol": "^0.4.0",
+    "@triadxyz/triad-protocol": "^0.1.2-alpha.9",
     "bn.js": "^5.2.1",
     "bs58": "^5.0.0",
     "dotenv": "^16.4.5",
