@@ -129,6 +129,7 @@ console.log(`[XARB] Scan:         ${SCAN_INTERVAL_MS}ms`);
 console.log(`[XARB] Dry run:      ${DRY_RUN}`);
 console.log(`[XARB] Max concurrent: ${MAX_CONCURRENT} positions`);
 console.log(`[XARB] Proxy:        ${PROXY_URL && !PROXY_URL.includes("your-proxy") ? "YES" : "NONE"}`);
+console.log(`[XARB] Jito regions: ${JITO_REGIONS.join(", ")} (multi-region parallel)`);
 console.log(`[XARB] Strategy:     YES_A + NO_B < $1 (outcome-independent)`);
 console.log(`[XARB] Safety:       profit-or-revert via Jito bundle`);
 console.log(`[XARB] Kill switch:  touch ${STOP_FILE} to emergency stop`);
