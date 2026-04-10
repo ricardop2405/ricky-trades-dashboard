@@ -75,6 +75,7 @@ let executionsInFlight = 0;
 let bundleInFlight = new Set<string>(); // prevent duplicate submissions for same market
 let executionLock = false;
 let emergencyStopped = false;
+let lastJitoRequestAt = 0;
 
 // ── Proxy for Jupiter (region-blocked) ──────────────────
 const PROXY_URL = process.env.PROXY_URL || "";
