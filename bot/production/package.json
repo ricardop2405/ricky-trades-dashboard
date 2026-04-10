@@ -11,8 +11,9 @@
     "cow": "ts-node --transpile-only src/cow-polymarket-engine.ts",
     "cow-limitless": "ts-node --transpile-only src/cow-limitless-engine.ts",
     "drift-jup": "ts-node --transpile-only src/drift-jupiter-engine.ts",
+    "triad": "ts-node --transpile-only src/triad-arb-engine.ts",
     "both": "concurrently \"npm run mev\" \"npm run scanner\"",
-    "all": "concurrently \"npm run mev\" \"npm run scanner\" \"npm run arb\" \"npm run limitless\" \"npm run cow\" \"npm run cow-limitless\" \"npm run drift-jup\"",
+    "all": "concurrently \"npm run mev\" \"npm run scanner\" \"npm run arb\" \"npm run limitless\" \"npm run cow\" \"npm run cow-limitless\" \"npm run drift-jup\" \"npm run triad\"",
     "start": "npm run both"
   },
   "dependencies": {
