@@ -109,15 +109,38 @@ if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("place
   }
 }
 
-async function jupFetch(url: string, init?: RequestInit): Promise<Response> {
+async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 5000): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    if (!proxyAgent) return fetch(url, init);
-    const nodeFetch = (await import("node-fetch")).default;
-    return nodeFetch(url, { ...init, agent: proxyAgent } as any) as unknown as Response;
-  } catch (err) {
-    console.error(`[JUP-FETCH] Error: ${err instanceof Error ? err.message : err}`);
-    throw err;
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
   }
+}
+
+async function jupFetch(url: string, init?: RequestInit): Promise<Response> {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if (!proxyAgent) return await timedFetch(url, init, 5000);
+      const nodeFetch = (await import("node-fetch")).default;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      try {
+        return await nodeFetch(url, { ...init, agent: proxyAgent, signal: controller.signal } as any) as unknown as Response;
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (err) {
+      lastError = err;
+      if (attempt === 0) await sleep(250);
+    }
+  }
+
+  console.error(`[JUP-FETCH] Error: ${lastError instanceof Error ? lastError.message : lastError}`);
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function jupHeaders(): Record<string, string> {
@@ -268,7 +291,7 @@ const TRIAD_HEADERS: Record<string, string> = {
 
 async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
   try {
-    const res = await fetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS });
+    const res = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 5000);
     if (!res.ok) return [];
     const pools = await res.json() as any[];
     const markets: TriadFastMarket[] = [];
@@ -292,7 +315,7 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
 
 async function fetchTriadOrderbook(marketId: string): Promise<TriadOrderbook | null> {
   try {
-    const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS });
+    const res = await timedFetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS }, 5000);
     if (!res.ok) return null;
     const ob = await res.json();
 
@@ -327,7 +350,7 @@ async function fetchTriadAskDepth(
   maxPriceUsd: number,
 ): Promise<{ totalContracts: number; avgPrice: number }> {
   try {
-    const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS });
+    const res = await timedFetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS }, 5000);
     if (!res.ok) {
       // Triad Fast Markets are position-based — if orderbook endpoint is down (500),
       // assume liquidity exists at market price since these are AMM-style pools
@@ -1812,7 +1835,7 @@ async function main() {
     console.log(`[XARB] USDC balance: $${funding.usdcBalance.toFixed(2)}`);
 
     // Verify Triad API
-    const triadTest = await fetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS });
+    const triadTest = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 5000);
     if (triadTest.ok) {
       const pools = await triadTest.json() as any[];
       const cryptoPools = pools.filter((p: any) => FAST_MARKET_COINS.includes((p.coin || "").toLowerCase()));
