@@ -74,14 +74,11 @@ const COOLDOWN_MS = 60_000;
 const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
 const JUP_EXECUTION_BUFFER_USD = parseFloat(process.env.TRIAD_JUP_EXECUTION_BUFFER_USD || "0.01");
 
-// ── Atomic Arb Program ──
-// After deploying the custom Solana program, set this env var to the program ID
-const ATOMIC_ARB_PROGRAM_ID = process.env.ATOMIC_ARB_PROGRAM_ID
-  ? new PublicKey(process.env.ATOMIC_ARB_PROGRAM_ID)
-  : null;
-// Discriminator for execute_arb: sha256("global:execute_arb")[0..8]
-// Computed at build time from the Anchor IDL
-const EXECUTE_ARB_DISC = Buffer.from([0x61, 0x72, 0x62, 0x5f, 0x65, 0x78, 0x65, 0x63]); // placeholder — update after `anchor build`
+// ── SUM-TO-ONE HARD CEILING ──
+// CRITICAL SAFETY: costA + costB must be STRICTLY below this per contract.
+// Since each contract pays out $1.00 on the winning side, any total cost < $1.00
+// guarantees profit regardless of outcome. We enforce this with a hard cap.
+const MAX_COMBINED_COST_PER_CONTRACT = 0.99; // $0.99 ceiling — minimum $0.01 profit per contract guaranteed
 
 // Triad pool IDs for crypto fast markets (from /api/market/fast)
 const FAST_MARKET_COINS = ["btc", "sol", "eth"];
