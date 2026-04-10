@@ -19,10 +19,12 @@ export const ControlPanel = ({
   onToggle,
 }: ControlPanelProps) => {
   return (
-    <div className="glass rounded-lg p-4 space-y-5">
+    <div className="glass rounded-xl p-4 space-y-5 gradient-border">
       <div className="flex items-center gap-2">
-        <Settings2 className="h-4 w-4 text-accent" />
-        <h2 className="text-sm font-mono font-semibold text-accent text-glow-accent">
+        <div className="h-6 w-6 rounded-md bg-accent/10 flex items-center justify-center">
+          <Settings2 className="h-3.5 w-3.5 text-accent" />
+        </div>
+        <h2 className="text-sm font-mono font-semibold text-accent">
           CONTROLS
         </h2>
       </div>
@@ -30,8 +32,8 @@ export const ControlPanel = ({
       <div className="space-y-4">
         <div>
           <div className="flex justify-between mb-2">
-            <label className="text-xs font-mono text-muted-foreground">Min Profit Threshold</label>
-            <span className="text-xs font-mono text-primary font-semibold">${minProfit.toFixed(2)}</span>
+            <label className="text-xs font-mono text-muted-foreground">Min Profit</label>
+            <span className="text-xs font-mono text-primary font-semibold tabular-nums">${minProfit.toFixed(2)}</span>
           </div>
           <Slider
             value={[minProfit]}
@@ -45,8 +47,8 @@ export const ControlPanel = ({
 
         <div>
           <div className="flex justify-between mb-2">
-            <label className="text-xs font-mono text-muted-foreground">Jito Tip Amount</label>
-            <span className="text-xs font-mono text-primary font-semibold">{jitoTip.toFixed(4)} SOL</span>
+            <label className="text-xs font-mono text-muted-foreground">Jito Tip</label>
+            <span className="text-xs font-mono text-primary font-semibold tabular-nums">{jitoTip.toFixed(4)} SOL</span>
           </div>
           <Slider
             value={[jitoTip]}
@@ -59,24 +61,24 @@ export const ControlPanel = ({
         </div>
       </div>
 
-      <div className="pt-2 border-t border-border/30">
-        <div className="flex items-center gap-2 mb-3">
+      <div className="pt-3 border-t border-border/30">
+        <div className="flex items-center gap-2 mb-2">
           <Shield className="h-3 w-3 text-success" />
-          <span className="text-[10px] font-mono text-success">
-            PROFIT CHECK GUARDRAIL ACTIVE
+          <span className="text-[10px] font-mono text-success/80 tracking-wider">
+            GUARDRAIL ACTIVE
           </span>
         </div>
-        <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
-          Tx reverts if final USDC {"<"} start + tip + $0.05. Reverted bundles = $0 cost.
+        <p className="text-[10px] font-mono text-muted-foreground/50 leading-relaxed">
+          Tx reverts if final USDC {"<"} start + tip + $0.05
         </p>
       </div>
 
       <button
         onClick={onToggle}
-        className={`w-full py-2.5 rounded-md font-mono text-xs font-bold tracking-wider transition-all ${
+        className={`w-full py-2.5 rounded-lg font-mono text-xs font-bold tracking-wider transition-all ${
           isRunning
-            ? "bg-destructive/20 border border-destructive/40 text-destructive hover:bg-destructive/30"
-            : "bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30 glow-primary"
+            ? "bg-destructive/15 border border-destructive/30 text-destructive hover:bg-destructive/25"
+            : "bg-primary/15 border border-primary/30 text-primary hover:bg-primary/25 glow-primary"
         }`}
       >
         {isRunning ? "■ STOP ENGINE" : "▶ START ENGINE"}

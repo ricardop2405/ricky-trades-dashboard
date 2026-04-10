@@ -13,19 +13,21 @@ export const PerformanceLog = ({ bundles, onBundleClick }: PerformanceLogProps) 
   const totalProfit = bundles.reduce((sum, b) => sum + b.profit, 0);
 
   return (
-    <div className="glass rounded-lg overflow-hidden h-full flex flex-col">
+    <div className="glass rounded-xl overflow-hidden h-full flex flex-col gradient-border">
       <div className="px-4 py-3 border-b border-border/30">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-primary" />
-            <h2 className="text-sm font-mono font-semibold text-primary text-glow-primary">
-              PERFORMANCE LOG
+            <div className="h-6 w-6 rounded-md bg-primary/10 flex items-center justify-center">
+              <Activity className="h-3.5 w-3.5 text-primary" />
+            </div>
+            <h2 className="text-sm font-mono font-semibold text-primary">
+              PERFORMANCE
             </h2>
           </div>
           <div className="flex gap-3 text-[10px] font-mono">
-            <span className="text-success">✓ {successCount}</span>
-            <span className="text-destructive">✗ {revertedCount}</span>
-            <span className="text-primary">+${totalProfit.toFixed(2)}</span>
+            <span className="text-success tabular-nums">✓ {successCount}</span>
+            <span className="text-destructive tabular-nums">✗ {revertedCount}</span>
+            <span className="text-primary font-semibold tabular-nums">+${totalProfit.toFixed(2)}</span>
           </div>
         </div>
       </div>
@@ -35,13 +37,13 @@ export const PerformanceLog = ({ bundles, onBundleClick }: PerformanceLogProps) 
           {bundles.map((bundle) => (
             <motion.div
               key={bundle.id}
-              initial={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0, y: -8 }}
               animate={{ opacity: 1, y: 0 }}
               onClick={() => onBundleClick?.(bundle)}
-              className={`rounded px-3 py-2 font-mono text-xs cursor-pointer hover:ring-1 hover:ring-primary/30 transition-all ${
+              className={`rounded-lg px-3 py-2 font-mono text-xs cursor-pointer transition-all hover:translate-x-0.5 ${
                 bundle.status === "success"
-                  ? "bg-success/5 border border-success/15"
-                  : "bg-destructive/5 border border-destructive/15"
+                  ? "bg-success/[0.04] border border-success/10 hover:border-success/25"
+                  : "bg-destructive/[0.04] border border-destructive/10 hover:border-destructive/25"
               }`}
             >
               <div className="flex items-center justify-between">
@@ -54,19 +56,19 @@ export const PerformanceLog = ({ bundles, onBundleClick }: PerformanceLogProps) 
                   <span className="text-foreground">{bundle.route}</span>
                 </div>
                 <span
-                  className={`font-bold ${
+                  className={`font-bold tabular-nums ${
                     bundle.status === "success" ? "text-success" : "text-muted-foreground"
                   }`}
                 >
                   {bundle.status === "success"
                     ? `+$${bundle.profit.toFixed(4)}`
-                    : "$0.00 (reverted)"}
+                    : "$0.00"}
                 </span>
               </div>
-              <div className="flex items-center gap-3 mt-1 text-muted-foreground text-[10px]">
+              <div className="flex items-center gap-3 mt-1 text-muted-foreground/60 text-[10px]">
                 <span>Entry: ${bundle.entryAmount.toFixed(2)}</span>
                 <span>Tip: {bundle.jitoTip.toFixed(4)} SOL</span>
-                <span>Latency: {bundle.latencyMs}ms</span>
+                <span>⚡ {bundle.latencyMs}ms</span>
                 <span className="ml-auto">{bundle.timestamp.toLocaleTimeString()}</span>
               </div>
             </motion.div>
