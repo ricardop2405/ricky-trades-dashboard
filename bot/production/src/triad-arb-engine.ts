@@ -942,8 +942,6 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
   }
   return null;
 }
-  return null;
-}
 
 // ── Execute Atomic Merge Arb ────────────────────────────
 function checkEmergencyStop(): boolean {
