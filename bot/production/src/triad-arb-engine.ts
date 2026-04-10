@@ -263,6 +263,123 @@ async function fetchTriadOrderbook(marketId: string): Promise<TriadOrderbook | n
   }
 }
 
+// Returns fillable depth on the ask side at or below maxPrice (USD)
+async function fetchTriadAskDepth(
+  marketId: string,
+  side: "hype" | "flop",
+  maxPriceUsd: number,
+): Promise<{ totalContracts: number; avgPrice: number }> {
+  try {
+    const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS });
+    if (!res.ok) return { totalContracts: 0, avgPrice: 0 };
+    const ob = await res.json();
+
+    const askLevels: any[] = ob[side]?.ask || [];
+    let totalContracts = 0;
+    let totalCost = 0;
+    const maxPriceRaw = maxPriceUsd * 1_000_000;
+
+    for (const level of askLevels) {
+      const price = Number(level.price);
+      const size = Number(level.size || level.quantity || level.amount || 0);
+      if (!Number.isFinite(price) || price <= 0 || price > maxPriceRaw) continue;
+      if (!Number.isFinite(size) || size <= 0) continue;
+      totalContracts += size;
+      totalCost += (price / 1_000_000) * size;
+    }
+
+    const avgPrice = totalContracts > 0 ? totalCost / totalContracts : 0;
+    return { totalContracts, avgPrice };
+  } catch {
+    return { totalContracts: 0, avgPrice: 0 };
+  }
+}
+
+// Cancel an open Triad order to recover locked funds
+async function cancelTriadOrder(marketId: string, direction: "hype" | "flop"): Promise<boolean> {
+  try {
+    const mId = BigInt(marketId);
+    const orderPDA = getOrderPDA(keypair.publicKey, mId, direction);
+    const marketPDA = getMarketPDA(mId);
+    const orderBookPDA = getOrderBookPDA(mId);
+    const userAta = getATA(keypair.publicKey, USDC_MINT);
+    const marketAta = getATA(marketPDA, USDC_MINT);
+
+    // cancel_order discriminator: sha256("global:cancel_order")[0..8]
+    const CANCEL_ORDER_DISC = Buffer.from([95, 129, 237, 240, 8, 49, 223, 132]);
+    // CancelOrderArgs: { market_id: u64, order_direction: enum }
+    const argsBuf = Buffer.alloc(9);
+    argsBuf.writeBigUInt64LE(mId, 0);
+    argsBuf.writeUInt8(direction === "hype" ? 0 : 1, 8);
+    const data = Buffer.concat([CANCEL_ORDER_DISC, argsBuf]);
+
+    const cancelIx = new TransactionInstruction({
+      programId: TRIAD_PROGRAM_ID,
+      keys: [
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: marketPDA, isSigner: false, isWritable: true },
+        { pubkey: orderBookPDA, isSigner: false, isWritable: true },
+        { pubkey: orderPDA, isSigner: false, isWritable: true },
+        { pubkey: USDC_MINT, isSigner: false, isWritable: true },
+        { pubkey: userAta, isSigner: false, isWritable: true },
+        { pubkey: marketAta, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const { blockhash } = await connection.getLatestBlockhash("confirmed");
+    const msg = new TransactionMessage({
+      payerKey: keypair.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5000 }),
+        cancelIx,
+      ],
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([keypair]);
+
+    const sig = await connection.sendTransaction(tx, { skipPreflight: false });
+    console.log(`[TRIAD-CANCEL] ✅ Cancel tx sent: ${sig}`);
+    await connection.confirmTransaction(sig, "confirmed");
+    console.log(`[TRIAD-CANCEL] ✅ Cancel confirmed for ${direction} on market ${marketId}`);
+    return true;
+  } catch (err) {
+    console.error(`[TRIAD-CANCEL] ❌ Failed to cancel ${direction} order on market ${marketId}:`, err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+// Check if a Triad order is still open (unfilled) by checking order account on-chain
+async function isTriadOrderStillOpen(marketId: string, direction: "hype" | "flop"): Promise<boolean> {
+  try {
+    const mId = BigInt(marketId);
+    const orderPDA = getOrderPDA(keypair.publicKey, mId, direction);
+    const accountInfo = await connection.getAccountInfo(orderPDA);
+    // If account exists and has data, order is still open (resting)
+    return accountInfo !== null && accountInfo.data.length > 0;
+  } catch {
+    return false; // can't determine, assume closed
+  }
+}
+
+// Verify Jupiter fill by checking on-chain signature status
+async function isJupiterTxConfirmed(jupTx: VersionedTransaction): Promise<boolean> {
+  try {
+    const sig = bs58.encode(jupTx.signatures[0]);
+    const status = await connection.getSignatureStatus(sig);
+    const cs = status?.value?.confirmationStatus;
+    return (cs === "confirmed" || cs === "finalized") && !status?.value?.err;
+  } catch {
+    return false;
+  }
+}
+
 // ── Jupiter Predict API ─────────────────────────────────
 async function fetchJupiterEvents(coin: string): Promise<JupEvent[]> {
   const events: JupEvent[] = [];
@@ -1014,6 +1131,22 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
   c = liveCandidate;
 
+  // ── PRE-FLIGHT: Verify Triad orderbook has enough ask liquidity ──
+  const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
+  const triadDepth = await fetchTriadAskDepth(c.triadMarket.id, triadDirection as "hype" | "flop", c.costA);
+  if (triadDepth.totalContracts < c.contracts) {
+    console.log(
+      `[XARB] ❌ FILL PROTECTION: Triad ${triadDirection} ask depth = ${triadDepth.totalContracts} contracts ` +
+      `at ≤$${c.costA.toFixed(4)}, need ${c.contracts} — SKIPPING (would create resting order)`
+    );
+    marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+    return;
+  }
+  console.log(
+    `[XARB] ✅ Triad ${triadDirection} ask depth: ${triadDepth.totalContracts} contracts ` +
+    `at avg $${triadDepth.avgPrice.toFixed(4)} (need ${c.contracts}) — sufficient for immediate fill`
+  );
+
   console.log(`\n[XARB] ═══ MERGE ARB OPPORTUNITY ══════════════════════`);
   console.log(`[XARB] ${c.coin.toUpperCase()} — ${c.legA} + ${c.legB}`);
   console.log(`[XARB] Cost: $${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)}`);
@@ -1056,7 +1189,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   executionsInFlight++;
   bundleInFlight.add(marketKey);
   try {
-    const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
+    const triadDirection2 = c.legA === "triad_hype" ? "hype" as const : "flop" as const;
     const jupMarketId = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
     const jupDepositUsd = c.costB * c.contracts;
 
@@ -1064,7 +1197,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // Build both legs in parallel
     const [triadIxs, jupTxBase64] = await Promise.all([
-      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts, c.costA),
+      createTriadBuyInstruction(c.triadMarket.id, triadDirection2, c.costA * c.contracts, c.costA),
       createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd),
     ]);
 
@@ -1204,59 +1337,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
     bundleInFlight.delete(marketKey);
 
-    if (bundleResult && !bundleResult.pending) {
-      console.log(`[XARB] ✅ Bundle landed! ${bundleResult.bundleId}`);
-      console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
-
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.totalCost * c.contracts,
-          realized_pnl: c.netProfit,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "filled",
-          side_a_tx: bs58.encode(triadTx.signatures[0]),
-          side_b_tx: bs58.encode(jupTx.signatures[0]),
-        });
-        await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
-      }
-    } else if (bundleResult?.pending) {
-      console.warn(`[XARB] ⏳ Bundle pending: ${bundleResult.bundleId}`);
-      // Check on-chain if the first tx (Triad) actually landed
-      try {
-        const triadSig = bs58.encode(triadTx.signatures[0]);
-        console.log(`[XARB] Checking on-chain for Triad tx: ${triadSig}`);
-        await sleep(5000);
-        const status = await connection.getSignatureStatus(triadSig);
-        if (status?.value?.confirmationStatus === "confirmed" || status?.value?.confirmationStatus === "finalized") {
-          console.log(`[XARB] ✅ Bundle CONFIRMED on-chain! Triad tx: ${triadSig}`);
-          console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
-          if (oppId) {
-            await supabase.from("arb_executions").update({ status: "filled", realized_pnl: c.netProfit }).eq("opportunity_id", oppId);
-            await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
-          }
-        } else if (status?.value?.err) {
-          console.warn(`[XARB] ❌ Triad tx failed on-chain:`, JSON.stringify(status.value.err));
-        } else {
-          console.warn(`[XARB] ⏳ Triad tx not yet confirmed — check manually: ${triadSig}`);
-        }
-      } catch (checkErr) {
-        console.warn(`[XARB] Could not verify on-chain status:`, checkErr instanceof Error ? checkErr.message : checkErr);
-      }
-      if (oppId) {
-        await supabase.from("arb_executions").insert({
-          opportunity_id: oppId,
-          amount_usd: c.totalCost * c.contracts,
-          realized_pnl: 0,
-          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "submitted",
-          error_message: "Bundle submitted; pending confirmation after inflight/final polling",
-          side_a_tx: bs58.encode(triadTx.signatures[0]),
-          side_b_tx: bs58.encode(jupTx.signatures[0]),
-        });
-        await supabase.from("arb_opportunities").update({ status: "executing" }).eq("id", oppId);
-      }
-    } else {
+    if (!bundleResult) {
       console.error("[XARB] ❌ Bundle failed — zero capital at risk (atomic revert)");
       if (oppId) {
         await supabase.from("arb_executions").insert({
@@ -1268,6 +1349,110 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
           error_message: "Jito bundle rejected — atomic revert, no funds lost",
         });
         await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      }
+      return;
+    }
+
+    // ── DUAL FILL VERIFICATION ──────────────────────────────
+    // Both legs must confirm filled. If either didn't, auto-cancel the other.
+    console.log(`[XARB] 🔍 Verifying BOTH legs filled (bundle: ${bundleResult.bundleId})...`);
+    await sleep(5000); // wait for on-chain confirmation
+
+    const triadSig = bs58.encode(triadTx.signatures[0]);
+    const jupSig = bs58.encode(jupTx.signatures[0]);
+
+    // Check Jupiter on-chain confirmation
+    const jupConfirmed = await isJupiterTxConfirmed(jupTx);
+    console.log(`[XARB] Jupiter tx ${jupSig.slice(0, 12)}...: ${jupConfirmed ? "✅ CONFIRMED" : "❌ NOT CONFIRMED"}`);
+
+    // Check Triad order fill status (if order PDA still exists, it's unfilled/resting)
+    const triadStillOpen = await isTriadOrderStillOpen(c.triadMarket.id, triadDirection2);
+    const triadFilled = !triadStillOpen;
+    console.log(`[XARB] Triad order ${triadDirection2} on ${c.triadMarket.id}: ${triadFilled ? "✅ FILLED" : "❌ UNFILLED (resting)"}`);
+
+    if (jupConfirmed && triadFilled) {
+      // ── BOTH FILLED — SUCCESS ──
+      console.log(`[XARB] ✅ BOTH LEGS FILLED! Bundle: ${bundleResult.bundleId}`);
+      console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.totalCost * c.contracts,
+          realized_pnl: c.netProfit,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "filled",
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+      }
+    } else if (!triadFilled && jupConfirmed) {
+      // ── TRIAD UNFILLED, JUPITER FILLED — CANCEL TRIAD ORDER ──
+      console.error(`[XARB] ⚠️ FILL MISMATCH: Jupiter filled but Triad order is resting!`);
+      console.log(`[XARB] 🔄 Auto-canceling Triad ${triadDirection2} order on market ${c.triadMarket.id}...`);
+
+      const cancelOk = await cancelTriadOrder(c.triadMarket.id, triadDirection2);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.costB * c.contracts, // only Jupiter cost is at risk
+          realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "partial_unwind",
+          error_message: `Triad order unfilled — ${cancelOk ? "auto-canceled" : "CANCEL FAILED — manual intervention needed"}. Jupiter leg filled ($${(c.costB * c.contracts).toFixed(2)} exposed).`,
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "partial_unwind" }).eq("id", oppId);
+      }
+
+      if (!cancelOk) {
+        console.error(`[XARB] 🚨 CRITICAL: Could not cancel Triad order! Manual cancel needed on triadfi.co`);
+        console.error(`[XARB] 🚨 Market: ${c.triadMarket.id}, Direction: ${triadDirection2}`);
+      }
+    } else if (triadFilled && !jupConfirmed) {
+      // ── TRIAD FILLED, JUPITER NOT CONFIRMED ──
+      console.error(`[XARB] ⚠️ FILL MISMATCH: Triad filled but Jupiter not confirmed!`);
+      console.error(`[XARB] 🚨 Triad position is UNHEDGED. Check Jupiter tx manually: ${jupSig}`);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.costA * c.contracts,
+          realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "partial_unwind",
+          error_message: `Triad filled but Jupiter not confirmed — UNHEDGED. Manual check: ${jupSig}`,
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "partial_unwind" }).eq("id", oppId);
+      }
+    } else {
+      // ── NEITHER CONFIRMED — likely bundle didn't land ──
+      console.warn(`[XARB] ⚠️ Neither leg confirmed on-chain. Bundle may not have landed.`);
+
+      // Double-check: try to cancel Triad order just in case it was placed
+      const triadStillOpen2 = await isTriadOrderStillOpen(c.triadMarket.id, triadDirection2);
+      if (triadStillOpen2) {
+        console.log(`[XARB] 🔄 Triad order found on-chain — canceling as safety measure...`);
+        await cancelTriadOrder(c.triadMarket.id, triadDirection2);
+      }
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: 0,
+          realized_pnl: 0,
+          fees: 0,
+          status: bundleResult.pending ? "submitted" : "failed",
+          error_message: "Neither leg confirmed — bundle likely reverted or still pending",
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: bundleResult.pending ? "executing" : "failed" }).eq("id", oppId);
       }
     }
   } catch (err) {
