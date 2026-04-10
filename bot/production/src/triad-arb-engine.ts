@@ -58,6 +58,7 @@ const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
 const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
 const COOLDOWN_MS = 60_000;
 const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
+const JUP_EXECUTION_BUFFER_USD = parseFloat(process.env.TRIAD_JUP_EXECUTION_BUFFER_USD || "0.02");
 
 // Triad pool IDs for crypto fast markets (from /api/market/fast)
 const FAST_MARKET_COINS = ["btc", "sol", "eth"];
@@ -171,6 +172,10 @@ interface MergeArbCandidate {
   remaining: number;   // seconds to close
   triadMarket: TriadFastMarket;
   jupEvent: JupEvent;
+}
+
+function getJupSideForLeg(event: JupEvent, leg: MergeArbCandidate["legB"]): JupSide {
+  return leg === "jup_down" ? event.down : event.up;
 }
 
 // ── Triad API ───────────────────────────────────────────
@@ -289,6 +294,45 @@ async function fetchJupiterEvents(coin: string): Promise<JupEvent[]> {
   }
 
   return events;
+}
+
+async function refreshJupCandidate(c: MergeArbCandidate): Promise<MergeArbCandidate | null> {
+  const latestEvents = await fetchJupiterEvents(c.coin);
+  const targetMarketId = getJupSideForLeg(c.jupEvent, c.legB).marketId;
+  const latestEvent = latestEvents.find((event) => getJupSideForLeg(event, c.legB).marketId === targetMarketId);
+
+  if (!latestEvent) {
+    console.log(`[XARB] ⚠️ Jupiter market ${targetMarketId} is no longer quoteable — aborting.`);
+    return null;
+  }
+
+  const latestSide = getJupSideForLeg(latestEvent, c.legB);
+  const bufferedCostB = latestSide.buyYes + JUP_EXECUTION_BUFFER_USD;
+  const totalCost = c.costA + bufferedCostB;
+  const profitPerContract = 1 - totalCost;
+  const contracts = Math.floor(TRADE_SIZE_USD / totalCost);
+  const txFee = JITO_TIP_LAMPORTS / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD;
+  const netProfit = (profitPerContract * contracts) - txFee;
+  const remaining = Math.max(0, latestEvent.closeTime - Date.now() / 1000);
+
+  if (contracts <= 0 || totalCost >= 1 || profitPerContract <= 0 || netProfit <= MIN_NET_PROFIT) {
+    console.log(
+      `[XARB] ⚠️ Jupiter repriced out: live=$${latestSide.buyYes.toFixed(4)} buffer=$${JUP_EXECUTION_BUFFER_USD.toFixed(4)} ` +
+      `=> total=$${totalCost.toFixed(4)} net=$${netProfit.toFixed(4)}`
+    );
+    return null;
+  }
+
+  return {
+    ...c,
+    costB: bufferedCostB,
+    totalCost,
+    profitPerContract,
+    netProfit,
+    contracts,
+    remaining,
+    jupEvent: latestEvent,
+  };
 }
 
 // ── Cross-Platform Merge Arb Detection ──────────────────
@@ -452,7 +496,7 @@ async function createJupBuyOrder(
       isYes: true,
       isBuy: true,
       contracts,
-      depositAmount: String(Math.floor(depositUsd * 1_000_000)),
+      depositAmount: String(Math.ceil(depositUsd * 1_000_000)),
       depositMint: CONFIG.JUP_USD_MINT,
     };
 
@@ -697,6 +741,21 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     console.log(`[XARB] ${executionsInFlight}/${MAX_CONCURRENT} positions in flight — skipping`);
     return;
   }
+
+  const liveCandidate = await refreshJupCandidate(c);
+  if (!liveCandidate) {
+    marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+    return;
+  }
+
+  if (Math.abs(liveCandidate.costB - c.costB) >= 0.01 || liveCandidate.contracts !== c.contracts) {
+    console.log(
+      `[XARB] Repriced Jupiter leg: $${c.costB.toFixed(4)} → $${liveCandidate.costB.toFixed(4)} ` +
+      `| contracts ${c.contracts} → ${liveCandidate.contracts}`
+    );
+  }
+
+  c = liveCandidate;
 
   console.log(`\n[XARB] ═══ MERGE ARB OPPORTUNITY ══════════════════════`);
   console.log(`[XARB] ${c.coin.toUpperCase()} — ${c.legA} + ${c.legB}`);
