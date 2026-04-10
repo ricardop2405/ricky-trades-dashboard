@@ -38,11 +38,11 @@ const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
 const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
 const COOLDOWN_MS = 60_000;
 
-// Triad pool IDs for crypto fast markets
+// Triad pool IDs for crypto fast markets (correct IDs from /api/market/fast)
 const FAST_MARKET_POOLS = [
+  { poolId: "163", coin: "btc" },
+  { poolId: "164", coin: "sol" },
   { poolId: "165", coin: "eth" },
-  { poolId: "166", coin: "btc" },
-  { poolId: "167", coin: "sol" },
 ];
 
 // State
@@ -149,10 +149,14 @@ const TRIAD_HEADERS: Record<string, string> = {
 
 async function fetchTriadMarkets(coin: string, poolId: string): Promise<TriadMarket[]> {
   try {
-    const res = await fetch(`${TRIAD_API}/market/${poolId}?lang=en-US`, { headers: TRIAD_HEADERS });
+    // Use the /api/market/fast endpoint which returns all fast market pools
+    const res = await fetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS });
     if (!res.ok) return [];
-    const data = await res.json();
-    const markets: TriadMarket[] = data.markets || [];
+    const pools = await res.json() as any[];
+    // Find the pool matching our coin's poolId
+    const pool = pools.find((p: any) => String(p.id) === poolId);
+    if (!pool) return [];
+    const markets: TriadMarket[] = pool.markets || [];
     return markets.filter(m => m.winningDirection === "None" && m.isFast);
   } catch {
     return [];
