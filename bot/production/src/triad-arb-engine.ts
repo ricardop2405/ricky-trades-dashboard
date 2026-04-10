@@ -69,6 +69,7 @@ let scanCount = 0;
 let bestSpreadSeen = -Infinity;
 let executionsInFlight = 0;
 let bundleInFlight = new Set<string>(); // prevent duplicate submissions for same market
+let executionLock = false;
 let emergencyStopped = false;
 
 // ── Proxy for Jupiter (region-blocked) ──────────────────
@@ -761,6 +762,11 @@ function checkEmergencyStop(): boolean {
 async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   if (checkEmergencyStop()) return;
 
+  if (executionLock) {
+    console.log("[XARB] Execution lock active — skipping");
+    return;
+  }
+
   if (executionsInFlight >= MAX_CONCURRENT) {
     console.log(`[XARB] ${executionsInFlight}/${MAX_CONCURRENT} positions in flight — skipping`);
     return;
@@ -838,6 +844,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   }
 
   // ── LIVE EXECUTION ────────────────────────────────────
+  executionLock = true;
   executionsInFlight++;
   bundleInFlight.add(marketKey);
   try {
@@ -992,6 +999,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   } catch (err) {
     console.error("[XARB] Execution error:", err instanceof Error ? err.message : err);
   } finally {
+    executionLock = false;
     executionsInFlight = Math.max(0, executionsInFlight - 1);
     bundleInFlight.delete(marketKey);
   }
