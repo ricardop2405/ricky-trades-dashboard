@@ -793,11 +793,9 @@ async function createTriadBuyInstruction(
     // amount = USDC amount in raw (6 decimals)
     // price = price per share in raw (6 decimals) — must be < 1_000_000 (< $1.00)
     const amountRaw = BigInt(Math.floor(amountUsd * 10 ** BASE_DECIMALS));
-    // Price AGGRESSIVELY at $0.99 to guarantee immediate taker fill.
-    // We're paying costA per contract (checked by sum-to-one guard), but pricing
-    // the order at max ensures we sweep all asks up to our price — preventing resting orders.
-    // The actual fill price will be at the best ask, not at $0.99.
-    const priceRaw = BigInt(999_999); // $0.999999 — max allowed by Triad
+    // Price at market price (Triad validates price against market bounds — InvalidPrice error 6003 if too far).
+    // Sequential execution means if this creates a resting order, we detect it and cancel before sending Jupiter.
+    const priceRaw = BigInt(Math.min(Math.floor(pricePerShare * 10 ** BASE_DECIMALS), 999_999));
     const data = Buffer.concat([PLACE_BID_ORDER_DISC, serializePlaceBidOrderArgs(amountRaw, priceRaw, marketId, direction)]);
 
     ixs.push(new TransactionInstruction({
