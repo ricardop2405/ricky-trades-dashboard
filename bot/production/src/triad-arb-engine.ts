@@ -558,7 +558,7 @@ async function fetchJupiterEvents(coin: string): Promise<JupEvent[]> {
 
 async function refreshJupCandidate(
   c: MergeArbCandidate,
-  options: { fixedContracts?: number; tipLamports?: number } = {}
+  options: { fixedContracts?: number; tipLamports?: number; skipMinDeposit?: boolean } = {}
 ): Promise<MergeArbCandidate | null> {
   const latestEvents = await fetchJupiterEvents(c.coin);
   const targetMarketId = getJupSideForLeg(c.jupEvent, c.legB).marketId;
@@ -583,12 +583,19 @@ async function refreshJupCandidate(
     contracts <= 0 ||
     totalCost >= 1 ||
     profitPerContract <= 0 ||
-    netProfit <= MIN_NET_PROFIT ||
-    jupDepositUsd < MIN_JUPITER_DEPOSIT_USD
+    netProfit <= MIN_NET_PROFIT
   ) {
     console.log(
       `[XARB] ⚠️ Jupiter repriced out: live=$${latestSide.buyYes.toFixed(4)} buffer=$${JUP_EXECUTION_BUFFER_USD.toFixed(4)} ` +
       `=> total=$${totalCost.toFixed(4)} contracts=${contracts} jupDeposit=$${jupDepositUsd.toFixed(4)} net=$${netProfit.toFixed(4)}`
+    );
+    return null;
+  }
+
+  // Min deposit check only applies pre-execution; after Triad fill we MUST hedge
+  if (!options.skipMinDeposit && jupDepositUsd < MIN_JUPITER_DEPOSIT_USD) {
+    console.log(
+      `[XARB] ⚠️ Jupiter deposit $${jupDepositUsd.toFixed(4)} below minimum $${MIN_JUPITER_DEPOSIT_USD.toFixed(2)} — skipping (pre-exec only)`
     );
     return null;
   }
@@ -1591,6 +1598,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     const freshCandidate = await stabilizeExecutableCandidate(c, {
       fixedContracts: c.contracts,
       tipLamports: effectiveJitoTipLamports,
+      skipMinDeposit: true, // CRITICAL: After Triad fill, MUST hedge — don't block on min deposit
     });
     if (!freshCandidate) {
       console.error(`[XARB] 🚨 Jupiter no longer executable at a guaranteed-profit price for the filled Triad size — refusing entry into an over-payout hedge`);
