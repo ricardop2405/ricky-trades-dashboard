@@ -125,7 +125,7 @@ function jupHeaders(): Record<string, string> {
 }
 
 console.log("═══════════════════════════════════════════════════════");
-console.log("  RICKY TRADES — Triad ↔ Jupiter Cross-Arb v2 (Atomic)");
+console.log("  RICKY TRADES — Triad ↔ Jupiter Cross-Arb v3 (Sum-to-One)");
 console.log("═══════════════════════════════════════════════════════");
 console.log(`[XARB] Wallet:       ${WALLET}`);
 console.log(`[XARB] Amount/trade: $${TRADE_SIZE_USD}`);
@@ -133,17 +133,15 @@ console.log(`[XARB] Min profit:   $${MIN_NET_PROFIT}`);
 console.log(`[XARB] Jito tip:     ${JITO_TIP_LAMPORTS} lamports`);
 console.log(`[XARB] Scan:         ${SCAN_INTERVAL_MS}ms`);
 console.log(`[XARB] Dry run:      ${DRY_RUN}`);
-console.log(`[XARB] Atomic program: ${ATOMIC_ARB_PROGRAM_ID ? ATOMIC_ARB_PROGRAM_ID.toBase58() : "NOT DEPLOYED — using legacy bundle mode"}`);
+console.log(`[XARB] Max combined: $${MAX_COMBINED_COST_PER_CONTRACT} per contract (hard ceiling)`);
 console.log(`[XARB] Max concurrent: ${MAX_CONCURRENT} positions`);
 console.log(`[XARB] Proxy:        ${PROXY_URL && !PROXY_URL.includes("your-proxy") ? "YES" : "NONE"}`);
 console.log(`[XARB] Jito regions: ${JITO_REGIONS.join(", ")} (multi-region parallel)`);
-console.log(`[XARB] Strategy:     YES_A + NO_B < $1 (outcome-independent)`);
-console.log(`[XARB] Safety:       ${ATOMIC_ARB_PROGRAM_ID ? "ATOMIC — both fill or entire tx reverts (zero risk)" : "legacy bundle mode (fill mismatch possible)"}`);
+console.log(`[XARB] Strategy:     costA + costB < $${MAX_COMBINED_COST_PER_CONTRACT} → payout $1.00 → guaranteed profit`);
+console.log(`[XARB] Safety:       SUM-TO-ONE enforced at scan, pre-exec, and re-quote`);
+console.log(`[XARB]               Triad: aggressive taker pricing + depth check`);
+console.log(`[XARB]               Jupiter: keeper-filled at quoted price`);
 console.log(`[XARB] Kill switch:  touch ${STOP_FILE} to emergency stop`);
-if (!ATOMIC_ARB_PROGRAM_ID) {
-  console.log(`[XARB] ⚠️  Set ATOMIC_ARB_PROGRAM_ID after deploying the program for true atomic execution`);
-  console.log(`[XARB]    Without it, Triad limit orders may create resting (unfilled) orders`);
-}
 console.log("═══════════════════════════════════════════════════════");
 
 // ── Types ───────────────────────────────────────────────
