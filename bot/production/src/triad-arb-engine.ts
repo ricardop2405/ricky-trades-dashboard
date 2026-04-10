@@ -1007,7 +1007,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // Build both legs in parallel
     const [triadIxs, jupTxBase64] = await Promise.all([
-      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts),
+      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts, c.costA),
       createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd),
     ]);
 
