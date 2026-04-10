@@ -790,23 +790,44 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
       const bundleId = data.result;
       console.log(`[JITO] Bundle submitted: ${bundleId}`);
 
+      let sawPendingLikeSignal = false;
+      let invalidInflightCount = 0;
+
       for (let i = 0; i < 12; i++) {
         await sleep(2500);
 
         const inflightStatus = await getInflightBundleStatus(bundleId);
         if (inflightStatus) {
           console.log(`[JITO] Inflight: ${inflightStatus}`);
+
           if (inflightStatus === "Landed") return { bundleId };
-          if (inflightStatus === "Failed" || inflightStatus === "Invalid") return null;
+
+          if (inflightStatus === "Pending") {
+            sawPendingLikeSignal = true;
+            invalidInflightCount = 0;
+          } else if (inflightStatus === "Failed") {
+            return null;
+          } else if (inflightStatus === "Invalid") {
+            invalidInflightCount += 1;
+            if (i === 0) {
+              console.warn("[JITO] Inflight returned Invalid immediately after submission — treating as propagation lag, not failure");
+            }
+          }
         }
 
         const finalStatus = await getFinalBundleStatus(bundleId);
         if (finalStatus) {
+          sawPendingLikeSignal = true;
           console.log(`[JITO] Final status: ${finalStatus.confirmationStatus || "unknown"}`);
           if (finalStatus.confirmationStatus === "confirmed" || finalStatus.confirmationStatus === "finalized") {
             return { bundleId };
           }
           if (finalStatus.err) return null;
+        }
+
+        if (inflightStatus === "Invalid" && !finalStatus && invalidInflightCount >= 3 && !sawPendingLikeSignal) {
+          console.warn("[JITO] Bundle not visible in status APIs yet — keeping it as pending instead of false-failing");
+          return { bundleId, pending: true };
         }
       }
 
