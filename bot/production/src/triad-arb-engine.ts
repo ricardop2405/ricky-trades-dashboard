@@ -1180,8 +1180,8 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
   // ── PRE-FLIGHT: Verify Triad orderbook has enough ask liquidity ──
   const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
-  // Use costA + 10% buffer for depth check — the sum-to-one guard already ensures profitability
-  const triadDepth = await fetchTriadAskDepth(c.triadMarket.id, triadDirection as "hype" | "flop", Math.min(c.costA * 1.1, 0.99));
+  // Accept any ask up to $0.99 — the sum-to-one guard already ensures combined cost < $0.99
+  const triadDepth = await fetchTriadAskDepth(c.triadMarket.id, triadDirection as "hype" | "flop", 0.99);
   if (triadDepth.totalContracts < c.contracts) {
     console.log(
       `[XARB] ❌ FILL PROTECTION: Triad ${triadDirection} ask depth = ${triadDepth.totalContracts} contracts ` +
