@@ -626,12 +626,10 @@ async function createTriadBuyInstruction(
 async function buildAndSign(base64Tx: string): Promise<VersionedTransaction> {
   const txBuf = Buffer.from(base64Tx, "base64");
   const tx = VersionedTransaction.deserialize(txBuf);
-  tx.sign([keypair]);
   return tx;
 }
 
-async function buildTriadTx(ixs: TransactionInstruction[]): Promise<VersionedTransaction> {
-  const { blockhash } = await connection.getLatestBlockhash();
+async function buildTriadTx(ixs: TransactionInstruction[], blockhash: string): Promise<VersionedTransaction> {
   const msg = new TransactionMessage({
     payerKey: keypair.publicKey,
     recentBlockhash: blockhash,
@@ -642,12 +640,10 @@ async function buildTriadTx(ixs: TransactionInstruction[]): Promise<VersionedTra
     ],
   }).compileToV0Message();
   const tx = new VersionedTransaction(msg);
-  tx.sign([keypair]);
   return tx;
 }
 
-async function buildJitoTipTx(): Promise<VersionedTransaction> {
-  const { blockhash } = await connection.getLatestBlockhash();
+async function buildJitoTipTx(blockhash: string): Promise<VersionedTransaction> {
   const tipIx = SystemProgram.transfer({
     fromPubkey: keypair.publicKey,
     toPubkey: JITO_TIP_ACCOUNT,
@@ -659,11 +655,11 @@ async function buildJitoTipTx(): Promise<VersionedTransaction> {
     instructions: [tipIx],
   }).compileToV0Message();
   const tx = new VersionedTransaction(msg);
-  tx.sign([keypair]);
   return tx;
 }
 
-async function sendJitoBundle(txs: VersionedTransaction[]): Promise<string | null> {
+async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<string | null> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
   try {
     const encodedTxs = txs.map(tx => bs58.encode(tx.serialize()));
     const res = await fetch(JITO_BUNDLE_URL, {
@@ -677,7 +673,15 @@ async function sendJitoBundle(txs: VersionedTransaction[]): Promise<string | nul
 
     const data = await res.json() as any;
     if (data.error) {
-      console.error(`[JITO] Bundle error: ${JSON.stringify(data.error)}`);
+      const errMsg = JSON.stringify(data.error);
+      // Retry on rate limit / congestion
+      if ((data.error.code === -32097 || errMsg.includes("rate limited") || errMsg.includes("congested")) && attempt < maxRetries - 1) {
+        const backoff = (attempt + 1) * 2000;
+        console.warn(`[JITO] Rate limited (attempt ${attempt + 1}/${maxRetries}) — retrying in ${backoff}ms`);
+        await sleep(backoff);
+        continue;
+      }
+      console.error(`[JITO] Bundle error: ${errMsg}`);
       return null;
     }
 
@@ -711,8 +715,14 @@ async function sendJitoBundle(txs: VersionedTransaction[]): Promise<string | nul
     return bundleId;
   } catch (err) {
     console.error("[JITO] Submission error:", err instanceof Error ? err.message : err);
+    if (attempt < maxRetries - 1) {
+      await sleep(2000);
+      continue;
+    }
     return null;
   }
+  }
+  return null;
 }
 
 // ── Execute Atomic Merge Arb ────────────────────────────
@@ -816,12 +826,20 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    // Build transactions
-    const [triadTx, jupTx, tipTx] = await Promise.all([
-      buildTriadTx(triadIxs),
-      buildAndSign(jupTxBase64),
-      buildJitoTipTx(),
-    ]);
+    // Build transactions — all must share the same blockhash for Jito bundle
+    const { blockhash } = await connection.getLatestBlockhash();
+
+    const triadTx = await buildTriadTx(triadIxs, blockhash);
+    const jupTx = await buildAndSign(jupTxBase64);
+    const tipTx = await buildJitoTipTx(blockhash);
+
+    // Re-set blockhash on Jupiter tx so it matches the bundle
+    jupTx.message.recentBlockhash = blockhash;
+
+    // Sign all txs with our keypair
+    triadTx.sign([keypair]);
+    jupTx.sign([keypair]);
+    tipTx.sign([keypair]);
 
     // Log opportunity to DB
     const { data: oppRow } = await supabase.from("arb_opportunities").insert({
