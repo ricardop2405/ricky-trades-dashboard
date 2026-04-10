@@ -836,17 +836,84 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    // Build transactions
+    // Build transactions with detailed error tracking
     const { blockhash } = await connection.getLatestBlockhash();
 
-    const triadTx = await buildTriadTx(triadIxs, blockhash);
-    const jupTx = await buildAndSign(jupTxBase64);
-    const tipTx = await buildJitoTipTx(blockhash);
+    // Limit Triad instructions to avoid oversized transactions
+    const maxTriadIxs = Math.min(triadIxs.length, 3);
+    if (triadIxs.length > maxTriadIxs) {
+      console.log(`[XARB] Trimming Triad ixs: ${triadIxs.length} → ${maxTriadIxs}`);
+    }
+    const trimmedIxs = triadIxs.slice(0, maxTriadIxs);
 
-    // Sign Triad + tip txs (Jupiter tx is already signed by their API, we co-sign)
+    let triadTx: VersionedTransaction;
+    let jupTx: VersionedTransaction;
+    let tipTx: VersionedTransaction;
+
+    try {
+      triadTx = await buildTriadTx(trimmedIxs, blockhash);
+    } catch (err) {
+      console.error("[XARB] Failed to build Triad tx:", err instanceof Error ? err.message : err);
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
+    try {
+      jupTx = await buildAndSign(jupTxBase64);
+    } catch (err) {
+      console.error("[XARB] Failed to deserialize Jupiter tx:", err instanceof Error ? err.message : err);
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
+    try {
+      tipTx = await buildJitoTipTx(blockhash);
+    } catch (err) {
+      console.error("[XARB] Failed to build tip tx:", err instanceof Error ? err.message : err);
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
+    // Sign Triad + tip txs
     triadTx.sign([keypair]);
-    jupTx.sign([keypair]);
     tipTx.sign([keypair]);
+
+    // Sign Jupiter tx (may need fallback for pre-structured V0 txs)
+    try {
+      jupTx.sign([keypair]);
+    } catch (signErr) {
+      console.warn(`[XARB] Jupiter sign() failed: ${signErr instanceof Error ? signErr.message : signErr}`);
+      // Fallback: manually inject signature at the correct index
+      const signerIndex = jupTx.message.staticAccountKeys.findIndex(
+        (key) => key.equals(keypair.publicKey)
+      );
+      if (signerIndex === -1) {
+        console.error("[XARB] Wallet not found in Jupiter tx account keys — cannot sign");
+        marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+        return;
+      }
+      const nacl = require("tweetnacl");
+      const sig = nacl.sign.detached(
+        jupTx.message.serialize(),
+        keypair.secretKey
+      );
+      jupTx.signatures[signerIndex] = Buffer.from(sig);
+    }
+
+    // Verify serialization before submitting
+    try {
+      const sizes = [triadTx, jupTx, tipTx].map(tx => tx.serialize().length);
+      console.log(`[XARB] Tx sizes: Triad=${sizes[0]}B, Jupiter=${sizes[1]}B, Tip=${sizes[2]}B`);
+      if (sizes.some(s => s > 1232)) {
+        console.error(`[XARB] ❌ Transaction exceeds 1232B limit — aborting`);
+        marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+        return;
+      }
+    } catch (serErr) {
+      console.error("[XARB] Serialization check failed:", serErr instanceof Error ? serErr.message : serErr);
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
 
     // Log opportunity to DB
     const { data: oppRow } = await supabase.from("arb_opportunities").insert({
