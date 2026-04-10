@@ -757,12 +757,13 @@ async function fetchJitoTipRecommendationLamports(): Promise<number | null> {
     const latest = rows?.[0];
     if (!latest) return null;
 
-    // API returns SOL values; choose >=95th percentile for competitive landing.
-    const solTip = latest.landed_tips_95th_percentile || latest.landed_tips_99th_percentile || latest.landed_tips_75th_percentile;
+    // Use 99th percentile for maximum landing rate
+    const solTip = latest.landed_tips_99th_percentile || latest.landed_tips_95th_percentile || latest.landed_tips_75th_percentile;
     if (!solTip || !Number.isFinite(solTip)) return null;
 
     const lamports = Math.ceil(solTip * LAMPORTS_PER_SOL);
-    return Math.max(JITO_TIP_LAMPORTS, lamports);
+    // Minimum 100k lamports, cap at 500k to avoid overpaying
+    return Math.max(JITO_TIP_LAMPORTS, Math.min(lamports, 500_000));
   } catch {
     return null;
   }
