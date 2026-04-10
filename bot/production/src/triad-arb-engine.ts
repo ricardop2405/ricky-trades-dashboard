@@ -132,9 +132,20 @@ interface ArbCandidate {
 }
 
 // ── Triad API helpers ───────────────────────────────────
+const TRIAD_HEADERS: Record<string, string> = {
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Referer": "https://triadfi.co/",
+  "Origin": "https://triadfi.co",
+  "sec-ch-ua": '"Chromium";v="125", "Not-A.Brand";v="24", "Google Chrome";v="125"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"macOS"',
+};
+
 async function fetchPool(poolId: string): Promise<TriadPool | null> {
   try {
-    const res = await fetch(`${TRIAD_API}/market/${poolId}?lang=en-US`);
+    const res = await fetch(`${TRIAD_API}/market/${poolId}?lang=en-US`, { headers: TRIAD_HEADERS });
     if (!res.ok) {
       console.error(`[TRIAD] Pool ${poolId} fetch failed: ${res.status}`);
       return null;
@@ -148,7 +159,7 @@ async function fetchPool(poolId: string): Promise<TriadPool | null> {
 
 async function fetchOrderbook(marketId: string): Promise<TriadOrderbook | null> {
   try {
-    const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`);
+    const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS });
     if (!res.ok) return null;
     return await res.json();
   } catch {
