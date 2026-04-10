@@ -159,6 +159,11 @@ interface TriadOrderbook {
   flopAsk: number | null;
 }
 
+interface TriadOrderbookDepth {
+  hypeAskLevels: { price: number; size: number }[];
+  flopAskLevels: { price: number; size: number }[];
+}
+
 interface JupSide {
   marketId: string;
   buyYes: number;   // cost to buy YES (ask)
