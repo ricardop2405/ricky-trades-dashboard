@@ -62,10 +62,10 @@ const JITO_BUNDLE_URL = `${JITO_BLOCK_ENGINE}/api/v1/bundles`;
 const JITO_INFLIGHT_STATUS_URL = `${JITO_BLOCK_ENGINE}/api/v1/getInflightBundleStatuses`;
 const JITO_FINAL_STATUS_URL = `${JITO_BLOCK_ENGINE}/api/v1/getBundleStatuses`;
 
-const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "1500");
+const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "800");
 const TRADE_SIZE_USD = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
 const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
-const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "250000"); // 250k lamports default — competitive for April 2026
+const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "200000"); // 200k lamports — aggressive for Friday volatility
 const JITO_REQUEST_MIN_INTERVAL_MS = parseInt(process.env.TRIAD_JITO_MIN_INTERVAL_MS || "1100");
 const JITO_INVALID_RETRY_DELAY_MS = 1500; // Wait before re-polling on "Invalid" (propagation lag)
 const JITO_INVALID_MAX_RETRIES = 4; // Max times to retry-poll on consecutive Invalid before giving up
@@ -85,7 +85,7 @@ const PREHEDGE_REQUOTE_ATTEMPTS = parseInt(process.env.TRIAD_PREHEDGE_REQUOTE_AT
 // CRITICAL SAFETY: costA + costB must be STRICTLY below this per contract.
 // Since each contract pays out $1.00 on the winning side, any total cost < $1.00
 // guarantees profit regardless of outcome. We enforce this with a hard cap.
-const MAX_COMBINED_COST_PER_CONTRACT = 0.99; // $0.99 ceiling — minimum $0.01 profit per contract guaranteed
+const MAX_COMBINED_COST_PER_CONTRACT = 0.95; // $0.95 ceiling — minimum $0.05 profit per contract guaranteed
 
 // Triad pool IDs for crypto fast markets (from /api/market/fast)
 const FAST_MARKET_COINS = ["btc", "sol", "eth"];
@@ -1219,7 +1219,7 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
         if (inflightStatus) {
           console.log(`[JITO] Inflight: ${inflightStatus}`);
 
-          if (inflightStatus === "Landed") return { bundleId: primaryBundleId };
+          if (inflightStatus === "Landed") return { bundleId: primaryBundleId, confirmed: true };
 
           if (inflightStatus === "Pending") {
             sawPendingLikeSignal = true;
@@ -1228,7 +1228,7 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
             // Check other bundle IDs before giving up
             for (const altId of allBundleIds.slice(1)) {
               const altStatus = await getInflightBundleStatus(altId);
-              if (altStatus === "Landed") return { bundleId: altId };
+              if (altStatus === "Landed") return { bundleId: altId, confirmed: true };
               if (altStatus === "Pending") { sawPendingLikeSignal = true; break; }
             }
             if (!sawPendingLikeSignal) return null;
@@ -1251,7 +1251,7 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
           sawPendingLikeSignal = true;
           console.log(`[JITO] Final status: ${finalStatus.confirmationStatus || "unknown"}`);
           if (finalStatus.confirmationStatus === "confirmed" || finalStatus.confirmationStatus === "finalized") {
-            return { bundleId: primaryBundleId };
+            return { bundleId: primaryBundleId, confirmed: true };
           }
           if (finalStatus.err) return null;
         }
@@ -1260,11 +1260,11 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
           // Check ALL bundle IDs from other regions before giving up
           for (const altId of allBundleIds.slice(1)) {
             const altInflight = await getInflightBundleStatus(altId);
-            if (altInflight === "Landed") return { bundleId: altId };
+            if (altInflight === "Landed") return { bundleId: altId, confirmed: true };
             if (altInflight === "Pending") { sawPendingLikeSignal = true; break; }
             const altFinal = await getFinalBundleStatus(altId);
             if (altFinal?.confirmationStatus === "confirmed" || altFinal?.confirmationStatus === "finalized") {
-              return { bundleId: altId };
+              return { bundleId: altId, confirmed: true };
             }
           }
           if (sawPendingLikeSignal) continue;
