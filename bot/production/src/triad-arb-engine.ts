@@ -68,6 +68,7 @@ const marketCooldowns = new Map<string, number>();
 let scanCount = 0;
 let bestSpreadSeen = -Infinity;
 let executionsInFlight = 0;
+let bundleInFlight = new Set<string>(); // prevent duplicate submissions for same market
 let emergencyStopped = false;
 
 // ── Proxy for Jupiter (region-blocked) ──────────────────
@@ -765,6 +766,25 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     return;
   }
 
+  // Prevent duplicate bundle for same market
+  const marketKey = `${c.coin}-${c.triadMarket.id}-${c.legA}`;
+  if (bundleInFlight.has(marketKey)) {
+    console.log(`[XARB] Bundle already in flight for ${marketKey} — skipping duplicate`);
+    return;
+  }
+
+  // Require minimum 60s remaining to avoid expired-market bundles
+  if (c.remaining < 60) {
+    console.log(`[XARB] Only ${Math.round(c.remaining)}s remaining — too late, skipping`);
+    return;
+  }
+
+  // Require minimum $0.10 net profit to justify tip cost
+  if (c.netProfit < 0.10) {
+    console.log(`[XARB] Net profit $${c.netProfit.toFixed(4)} too thin — skipping`);
+    return;
+  }
+
   const liveCandidate = await refreshJupCandidate(c);
   if (!liveCandidate) {
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
@@ -819,6 +839,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
   // ── LIVE EXECUTION ────────────────────────────────────
   executionsInFlight++;
+  bundleInFlight.add(marketKey);
   try {
     const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
     const jupMarketId = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
@@ -936,6 +957,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     console.log(`[XARB] 🚀 Submitting atomic Jito bundle (3 txs)...`);
     const bundleResult = await sendJitoBundle([triadTx, jupTx, tipTx]);
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+    bundleInFlight.delete(marketKey);
 
     if (bundleResult) {
       console.log(`[XARB] ✅ Bundle landed! ${bundleResult}`);
@@ -971,6 +993,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     console.error("[XARB] Execution error:", err instanceof Error ? err.message : err);
   } finally {
     executionsInFlight = Math.max(0, executionsInFlight - 1);
+    bundleInFlight.delete(marketKey);
   }
 }
 
@@ -1004,8 +1027,9 @@ async function runScan(): Promise<void> {
     }
 
     // Execute top candidates concurrently (up to MAX_CONCURRENT)
-    const toExecute = candidates.slice(0, MAX_CONCURRENT - executionsInFlight);
-    await Promise.all(toExecute.map(c => executeMergeArb(c)));
+    // Only execute the BEST candidate per scan to avoid duplicate bundles
+    const best = candidates[0];
+    await executeMergeArb(best);
   } catch (err) {
     console.error("[SCAN] Error:", err);
   }
