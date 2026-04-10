@@ -839,19 +839,22 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     // Build transactions with detailed error tracking
     const { blockhash } = await connection.getLatestBlockhash();
 
-    // Limit Triad instructions to avoid oversized transactions
-    const maxTriadIxs = Math.min(triadIxs.length, 3);
-    if (triadIxs.length > maxTriadIxs) {
-      console.log(`[XARB] Trimming Triad ixs: ${triadIxs.length} → ${maxTriadIxs}`);
-    }
-    const trimmedIxs = triadIxs.slice(0, maxTriadIxs);
-
     let triadTx: VersionedTransaction;
     let jupTx: VersionedTransaction;
     let tipTx: VersionedTransaction;
 
+    // Dynamically trim Triad instructions to fit under 1232B tx limit
+    let trimmedIxs = triadIxs;
     try {
       triadTx = await buildTriadTx(trimmedIxs, blockhash);
+      while (triadTx.serialize().length > 1232 && trimmedIxs.length > 1) {
+        trimmedIxs = trimmedIxs.slice(0, trimmedIxs.length - 1);
+        triadTx = await buildTriadTx(trimmedIxs, blockhash);
+      }
+      if (trimmedIxs.length < triadIxs.length) {
+        console.log(`[XARB] Trimmed Triad ixs: ${triadIxs.length} → ${trimmedIxs.length} (${triadTx.serialize().length}B)`);
+      }
+      triadTx.sign([keypair]);
     } catch (err) {
       console.error("[XARB] Failed to build Triad tx:", err instanceof Error ? err.message : err);
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
@@ -874,8 +877,6 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    // Sign Triad + tip txs
-    triadTx.sign([keypair]);
     tipTx.sign([keypair]);
 
     // Sign Jupiter tx (may need fallback for pre-structured V0 txs)
