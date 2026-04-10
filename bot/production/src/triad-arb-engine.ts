@@ -522,6 +522,56 @@ async function refreshJupCandidate(c: MergeArbCandidate): Promise<MergeArbCandid
   };
 }
 
+// Emergency hedge refresh: when Triad is already filled, accept ANY Jupiter price
+// up to maxAcceptableLoss. An unhedged position is worse than a small loss on the hedge.
+const MAX_EMERGENCY_HEDGE_LOSS_USD = 0.50; // max acceptable loss to complete the hedge
+async function emergencyRefreshJupCandidate(c: MergeArbCandidate): Promise<MergeArbCandidate | null> {
+  const latestEvents = await fetchJupiterEvents(c.coin);
+  const targetMarketId = getJupSideForLeg(c.jupEvent, c.legB).marketId;
+  const latestEvent = latestEvents.find((event) => getJupSideForLeg(event, c.legB).marketId === targetMarketId);
+
+  if (!latestEvent) {
+    console.error(`[XARB] 🚨 EMERGENCY: Jupiter market ${targetMarketId} no longer available — cannot hedge!`);
+    return null;
+  }
+
+  const latestSide = getJupSideForLeg(latestEvent, c.legB);
+  const bufferedCostB = latestSide.buyYes + JUP_EXECUTION_BUFFER_USD;
+  const totalCost = c.costA + bufferedCostB;
+  const profitPerContract = 1 - totalCost;
+  const contracts = Math.max(1, Math.floor(TRADE_SIZE_USD / Math.max(totalCost, 0.01)));
+  const txFee = JITO_TIP_LAMPORTS / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD;
+  const netProfit = (profitPerContract * contracts) - txFee;
+  const remaining = Math.max(0, latestEvent.closeTime - Date.now() / 1000);
+
+  // Accept even negative profit up to MAX_EMERGENCY_HEDGE_LOSS_USD
+  if (totalCost >= 1 + MAX_EMERGENCY_HEDGE_LOSS_USD / contracts) {
+    console.error(
+      `[XARB] 🚨 EMERGENCY: Jupiter price too far gone. total=$${totalCost.toFixed(4)} ` +
+      `loss would exceed $${MAX_EMERGENCY_HEDGE_LOSS_USD} — cannot hedge safely`
+    );
+    return null;
+  }
+
+  if (netProfit < 0) {
+    console.warn(
+      `[XARB] ⚠️ EMERGENCY HEDGE: accepting loss. total=$${totalCost.toFixed(4)} ` +
+      `net=$${netProfit.toFixed(4)} — better than unhedged exposure`
+    );
+  }
+
+  return {
+    ...c,
+    costB: bufferedCostB,
+    totalCost,
+    profitPerContract,
+    netProfit,
+    contracts,
+    remaining,
+    jupEvent: latestEvent,
+  };
+}
+
 // ── Cross-Platform Merge Arb Detection ──────────────────
 // Core formula: buy YES_A on platform A + buy NO_B on platform B
 // If costA + costB < $1 → one of them pays $1, guaranteed profit
@@ -1404,11 +1454,15 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     // ════════════════════════════════════════════════════════
     console.log(`[XARB] ── STEP 2: Triad confirmed → sending Jupiter order...`);
 
-    // Re-check Jupiter price before sending (market may have moved in 3s)
-    const freshCandidate = await refreshJupCandidate(c);
+    // First try normal refresh (profitable), then emergency hedge (accept loss to avoid unhedged)
+    let freshCandidate = await refreshJupCandidate(c);
     if (!freshCandidate) {
-      console.error(`[XARB] ⚠️ Jupiter price moved out of range after Triad fill!`);
-      console.error(`[XARB]    Triad position exists but Jupiter cannot be sent. Manual hedge needed.`);
+      console.warn(`[XARB] ⚠️ Normal refresh failed — attempting EMERGENCY HEDGE (accept loss to avoid unhedged)...`);
+      freshCandidate = await emergencyRefreshJupCandidate(c);
+    }
+    if (!freshCandidate) {
+      console.error(`[XARB] 🚨 EMERGENCY HEDGE ALSO FAILED — Jupiter price moved too far or market closed`);
+      console.error(`[XARB]    Triad position exists UNHEDGED. Manual action needed. Sig: ${triadSig}`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
@@ -1416,7 +1470,28 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
           realized_pnl: 0,
           fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
           status: "partial_triad_only",
-          error_message: `Triad filled but Jupiter price moved. Triad position unhedged. Sig: ${triadSig}`,
+          error_message: `Triad filled. Emergency hedge failed — price moved >$${MAX_EMERGENCY_HEDGE_LOSS_USD}. UNHEDGED. Sig: ${triadSig}`,
+          side_a_tx: triadSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
+      }
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+    c = freshCandidate;
+
+    // Rebuild Jupiter order with fresh price (original jupTxBase64 may have stale price)
+    const jupMarketIdFresh = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
+    const jupDepositUsdFresh = c.costB * c.contracts;
+    const freshJupTxBase64 = await createJupBuyOrder(jupMarketIdFresh, c.contracts, jupDepositUsdFresh);
+    if (!freshJupTxBase64) {
+      console.error("[XARB] Failed to create fresh Jupiter order after Triad fill — unhedged!");
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: c.costA * c.contracts, realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "partial_triad_only",
+          error_message: `Triad filled. Fresh Jupiter order creation failed. Sig: ${triadSig}`,
           side_a_tx: triadSig,
         });
         await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
@@ -1425,11 +1500,10 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    // Rebuild Jupiter tx with fresh blockhash
     const { blockhash: jupBlockhash } = await connection.getLatestBlockhash("processed");
     let jupTx: VersionedTransaction;
     try {
-      jupTx = await buildAndSign(jupTxBase64);
+      jupTx = await buildAndSign(freshJupTxBase64);
     } catch (err) {
       console.error("[XARB] Failed to deserialize Jupiter tx:", err instanceof Error ? err.message : err);
       if (oppId) {
