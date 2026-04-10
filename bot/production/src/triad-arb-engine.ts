@@ -665,14 +665,14 @@ async function buildTriadTx(ixs: TransactionInstruction[], blockhash: string): P
   return tx;
 }
 
-async function buildJitoTipTx(blockhash: string): Promise<VersionedTransaction> {
+async function buildJitoTipTx(blockhash: string, lamports: number): Promise<VersionedTransaction> {
   const tipAccount = new PublicKey(
     JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]
   );
   const tipIx = SystemProgram.transfer({
     fromPubkey: keypair.publicKey,
     toPubkey: tipAccount,
-    lamports: JITO_TIP_LAMPORTS,
+    lamports,
   });
   const msg = new TransactionMessage({
     payerKey: keypair.publicKey,
