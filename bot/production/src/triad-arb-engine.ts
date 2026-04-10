@@ -36,6 +36,7 @@ import bs58 from "bs58";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { CONFIG } from "./config";
+import { JITO_TIP_ACCOUNTS } from "./constants";
 import { sleep } from "./utils";
 
 // ── Config ──────────────────────────────────────────────
@@ -47,7 +48,6 @@ const WALLET = keypair.publicKey.toBase58();
 const TRIAD_API = "https://beta.triadfi.co/api";
 const JUP_TIMED_API = "https://prediction-market-api.jup.ag/api/v1/events/crypto/timed";
 const JITO_BUNDLE_URL = `${CONFIG.JITO_BLOCK_ENGINE_URL}/api/v1/bundles`;
-const JITO_TIP_ACCOUNT = new PublicKey("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5");
 
 const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "3000");
 const TRADE_SIZE_USD = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
@@ -654,9 +654,12 @@ async function buildTriadTx(ixs: TransactionInstruction[], blockhash: string): P
 }
 
 async function buildJitoTipTx(blockhash: string): Promise<VersionedTransaction> {
+  const tipAccount = new PublicKey(
+    JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]
+  );
   const tipIx = SystemProgram.transfer({
     fromPubkey: keypair.publicKey,
-    toPubkey: JITO_TIP_ACCOUNT,
+    toPubkey: tipAccount,
     lamports: JITO_TIP_LAMPORTS,
   });
   const msg = new TransactionMessage({
