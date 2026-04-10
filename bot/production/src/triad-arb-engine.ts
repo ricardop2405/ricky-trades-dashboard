@@ -1071,8 +1071,12 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    // Build transactions with detailed error tracking
-    const { blockhash } = await connection.getLatestBlockhash();
+    // Get fresh blockhash with "processed" for speed + fetch dynamic tip in parallel
+    const [{ blockhash }, effectiveJitoTipLamports] = await Promise.all([
+      connection.getLatestBlockhash("processed"),
+      fetchJitoTipRecommendationLamports().then(tip => tip ?? JITO_TIP_LAMPORTS),
+    ]);
+    console.log(`[XARB] Fresh blockhash: ${blockhash.slice(0, 12)}... | Tip: ${effectiveJitoTipLamports} lamports`);
 
     let triadTx: VersionedTransaction;
     let jupTx: VersionedTransaction;
