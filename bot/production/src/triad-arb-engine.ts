@@ -843,10 +843,30 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     const jupTx = await buildAndSign(jupTxBase64);
     const tipTx = await buildJitoTipTx(blockhash);
 
-    // Sign Triad + tip txs (Jupiter tx is already signed by their API, we co-sign)
+    // Sign Triad + tip txs
     triadTx.sign([keypair]);
-    jupTx.sign([keypair]);
     tipTx.sign([keypair]);
+
+    // Jupiter tx: the API returns an unsigned tx for our wallet to sign
+    // Use try/catch since sign() can fail on pre-structured VersionedTransactions
+    try {
+      jupTx.sign([keypair]);
+    } catch (signErr) {
+      // Fallback: manually inject signature at the correct index
+      const signerIndex = jupTx.message.staticAccountKeys.findIndex(
+        (key) => key.equals(keypair.publicKey)
+      );
+      if (signerIndex === -1) {
+        console.error("[XARB] Wallet not found in Jupiter tx account keys — cannot sign");
+        marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+        return;
+      }
+      const sig = require("tweetnacl").sign.detached(
+        jupTx.message.serialize(),
+        keypair.secretKey
+      );
+      jupTx.signatures[signerIndex] = sig;
+    }
 
     // Log opportunity to DB
     const { data: oppRow } = await supabase.from("arb_opportunities").insert({
