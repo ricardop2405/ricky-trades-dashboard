@@ -211,10 +211,10 @@ async function fetchTriadOrderbook(marketId: string): Promise<TriadOrderbook | n
     if (!res.ok) return null;
     const ob = await res.json();
 
-    const hypeAsk = ob.hype?.ask?.length > 0 ? Math.min(...ob.hype.ask.map((l: any) => l.price)) : 0.5;
-    const hypeBid = ob.hype?.bid?.length > 0 ? Math.max(...ob.hype.bid.map((l: any) => l.price)) : 0.5;
-    const flopAsk = ob.flop?.ask?.length > 0 ? Math.min(...ob.flop.ask.map((l: any) => l.price)) : 0.5;
-    const flopBid = ob.flop?.bid?.length > 0 ? Math.max(...ob.flop.bid.map((l: any) => l.price)) : 0.5;
+    const hypeAsk = ob.hype?.ask?.length > 0 ? Math.min(...ob.hype.ask.map((l: any) => l.price)) / 1_000_000 : 0.5;
+    const hypeBid = ob.hype?.bid?.length > 0 ? Math.max(...ob.hype.bid.map((l: any) => l.price)) / 1_000_000 : 0.5;
+    const flopAsk = ob.flop?.ask?.length > 0 ? Math.min(...ob.flop.ask.map((l: any) => l.price)) / 1_000_000 : 0.5;
+    const flopBid = ob.flop?.bid?.length > 0 ? Math.max(...ob.flop.bid.map((l: any) => l.price)) / 1_000_000 : 0.5;
 
     return { hypeBid, hypeAsk, flopBid, flopAsk };
   } catch {
