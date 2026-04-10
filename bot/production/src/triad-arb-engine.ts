@@ -53,7 +53,7 @@ const JITO_BUNDLE_URL = `${JITO_BLOCK_ENGINE}/api/v1/bundles`;
 const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "1500");
 const TRADE_SIZE_USD = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
 const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
-const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || String(CONFIG.JITO_TIP));
+const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "100000"); // 100k lamports (~$0.015) for better inclusion
 const SAFETY_MIN_PROFIT_USD = 0.05; // profit-or-revert guardrail
 const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
 const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
