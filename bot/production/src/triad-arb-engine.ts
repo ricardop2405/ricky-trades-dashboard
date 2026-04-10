@@ -1454,11 +1454,15 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     // ════════════════════════════════════════════════════════
     console.log(`[XARB] ── STEP 2: Triad confirmed → sending Jupiter order...`);
 
-    // Re-check Jupiter price before sending (market may have moved in 3s)
-    const freshCandidate = await refreshJupCandidate(c);
+    // First try normal refresh (profitable), then emergency hedge (accept loss to avoid unhedged)
+    let freshCandidate = await refreshJupCandidate(c);
     if (!freshCandidate) {
-      console.error(`[XARB] ⚠️ Jupiter price moved out of range after Triad fill!`);
-      console.error(`[XARB]    Triad position exists but Jupiter cannot be sent. Manual hedge needed.`);
+      console.warn(`[XARB] ⚠️ Normal refresh failed — attempting EMERGENCY HEDGE (accept loss to avoid unhedged)...`);
+      freshCandidate = await emergencyRefreshJupCandidate(c);
+    }
+    if (!freshCandidate) {
+      console.error(`[XARB] 🚨 EMERGENCY HEDGE ALSO FAILED — Jupiter price moved too far or market closed`);
+      console.error(`[XARB]    Triad position exists UNHEDGED. Manual action needed. Sig: ${triadSig}`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
@@ -1466,7 +1470,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
           realized_pnl: 0,
           fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
           status: "partial_triad_only",
-          error_message: `Triad filled but Jupiter price moved. Triad position unhedged. Sig: ${triadSig}`,
+          error_message: `Triad filled. Emergency hedge failed — price moved >$${MAX_EMERGENCY_HEDGE_LOSS_USD}. UNHEDGED. Sig: ${triadSig}`,
           side_a_tx: triadSig,
         });
         await supabase.from("arb_opportunities").update({ status: "partial_triad_only" }).eq("id", oppId);
@@ -1474,6 +1478,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
       return;
     }
+    c = freshCandidate;
 
     // Rebuild Jupiter tx with fresh blockhash
     const { blockhash: jupBlockhash } = await connection.getLatestBlockhash("processed");
