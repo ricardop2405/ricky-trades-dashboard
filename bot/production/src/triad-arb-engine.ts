@@ -128,12 +128,17 @@ console.log(`[XARB] Min profit:   $${MIN_NET_PROFIT}`);
 console.log(`[XARB] Jito tip:     ${JITO_TIP_LAMPORTS} lamports`);
 console.log(`[XARB] Scan:         ${SCAN_INTERVAL_MS}ms`);
 console.log(`[XARB] Dry run:      ${DRY_RUN}`);
+console.log(`[XARB] Unsafe live override: ${ALLOW_UNSAFE_TRIAD_LIVE ? "ENABLED" : "DISABLED"}`);
 console.log(`[XARB] Max concurrent: ${MAX_CONCURRENT} positions`);
 console.log(`[XARB] Proxy:        ${PROXY_URL && !PROXY_URL.includes("your-proxy") ? "YES" : "NONE"}`);
 console.log(`[XARB] Jito regions: ${JITO_REGIONS.join(", ")} (multi-region parallel)`);
 console.log(`[XARB] Strategy:     YES_A + NO_B < $1 (outcome-independent)`);
 console.log(`[XARB] Safety:       profit-or-revert via Jito bundle`);
 console.log(`[XARB] Kill switch:  touch ${STOP_FILE} to emergency stop`);
+if (!ALLOW_UNSAFE_TRIAD_LIVE) {
+  console.log(`[XARB] LIVE TRIAD TRADING DISABLED: Triad exposes resting limit orders, not guaranteed taker fills.`);
+  console.log(`[XARB] Set TRIAD_ALLOW_UNSAFE_LIVE=true only if you accept leg mismatch risk.`);
+}
 console.log("═══════════════════════════════════════════════════════");
 
 // ── Types ───────────────────────────────────────────────
