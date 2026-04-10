@@ -69,6 +69,7 @@ let scanCount = 0;
 let bestSpreadSeen = -Infinity;
 let executionsInFlight = 0;
 let bundleInFlight = new Set<string>(); // prevent duplicate submissions for same market
+let executionLock = false;
 let emergencyStopped = false;
 
 // ── Proxy for Jupiter (region-blocked) ──────────────────
@@ -672,7 +673,7 @@ async function buildJitoTipTx(blockhash: string): Promise<VersionedTransaction> 
   return tx;
 }
 
-async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<string | null> {
+async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<{ bundleId: string; pending?: boolean } | null> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
   try {
     const encodedTxs = txs.map(tx => bs58.encode(tx.serialize()));
@@ -719,14 +720,14 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
         if (statuses.length > 0) {
           const s = statuses[0];
           console.log(`[JITO] Status: ${s.confirmation_status || s.status}`);
-          if (s.confirmation_status === "confirmed" || s.confirmation_status === "finalized") return bundleId;
+          if (s.confirmation_status === "confirmed" || s.confirmation_status === "finalized") return { bundleId };
           if (s.err || s.confirmation_status === "failed") return null;
         }
       } catch { /* retry */ }
     }
 
-    console.warn("[JITO] Status unknown after 30s — treating as FAILED (no on-chain confirmation)");
-    return null;
+    console.warn("[JITO] Status unknown after 30s — marking as submitted/pending");
+    return { bundleId, pending: true };
   } catch (err) {
     console.error("[JITO] Submission error:", err instanceof Error ? err.message : err);
     if (attempt < maxRetries - 1) {
@@ -760,6 +761,11 @@ function checkEmergencyStop(): boolean {
 
 async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   if (checkEmergencyStop()) return;
+
+  if (executionLock) {
+    console.log("[XARB] Execution lock active — skipping");
+    return;
+  }
 
   if (executionsInFlight >= MAX_CONCURRENT) {
     console.log(`[XARB] ${executionsInFlight}/${MAX_CONCURRENT} positions in flight — skipping`);
@@ -838,6 +844,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   }
 
   // ── LIVE EXECUTION ────────────────────────────────────
+  executionLock = true;
   executionsInFlight++;
   bundleInFlight.add(marketKey);
   try {
@@ -959,8 +966,8 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
     bundleInFlight.delete(marketKey);
 
-    if (bundleResult) {
-      console.log(`[XARB] ✅ Bundle landed! ${bundleResult}`);
+    if (bundleResult && !bundleResult.pending) {
+      console.log(`[XARB] ✅ Bundle landed! ${bundleResult.bundleId}`);
       console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
 
       if (oppId) {
@@ -974,6 +981,21 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
           side_b_tx: bs58.encode(jupTx.signatures[0]),
         });
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+      }
+    } else if (bundleResult?.pending) {
+      console.warn(`[XARB] ⏳ Bundle pending: ${bundleResult.bundleId}`);
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.totalCost * c.contracts,
+          realized_pnl: 0,
+          fees: JITO_TIP_LAMPORTS / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "submitted",
+          error_message: "Bundle submitted; pending confirmation after 30s",
+          side_a_tx: bs58.encode(triadTx.signatures[0]),
+          side_b_tx: bs58.encode(jupTx.signatures[0]),
+        });
+        await supabase.from("arb_opportunities").update({ status: "executing" }).eq("id", oppId);
       }
     } else {
       console.error("[XARB] ❌ Bundle failed — zero capital at risk (atomic revert)");
@@ -992,6 +1014,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   } catch (err) {
     console.error("[XARB] Execution error:", err instanceof Error ? err.message : err);
   } finally {
+    executionLock = false;
     executionsInFlight = Math.max(0, executionsInFlight - 1);
     bundleInFlight.delete(marketKey);
   }
