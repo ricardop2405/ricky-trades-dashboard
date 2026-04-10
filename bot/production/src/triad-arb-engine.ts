@@ -1164,6 +1164,27 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       }
     } else if (bundleResult?.pending) {
       console.warn(`[XARB] ⏳ Bundle pending: ${bundleResult.bundleId}`);
+      // Check on-chain if the first tx (Triad) actually landed
+      try {
+        const triadSig = bs58.encode(triadTx.signatures[0]);
+        console.log(`[XARB] Checking on-chain for Triad tx: ${triadSig}`);
+        await sleep(5000);
+        const status = await connection.getSignatureStatus(triadSig);
+        if (status?.value?.confirmationStatus === "confirmed" || status?.value?.confirmationStatus === "finalized") {
+          console.log(`[XARB] ✅ Bundle CONFIRMED on-chain! Triad tx: ${triadSig}`);
+          console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
+          if (oppId) {
+            await supabase.from("arb_executions").update({ status: "filled", realized_pnl: c.netProfit }).eq("opportunity_id", oppId);
+            await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+          }
+        } else if (status?.value?.err) {
+          console.warn(`[XARB] ❌ Triad tx failed on-chain:`, JSON.stringify(status.value.err));
+        } else {
+          console.warn(`[XARB] ⏳ Triad tx not yet confirmed — check manually: ${triadSig}`);
+        }
+      } catch (checkErr) {
+        console.warn(`[XARB] Could not verify on-chain status:`, checkErr instanceof Error ? checkErr.message : checkErr);
+      }
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
