@@ -596,6 +596,7 @@ async function createTriadBuyInstruction(
   marketAddress: string,
   direction: "hype" | "flop",
   amountUsd: number,
+  pricePerShare: number,
 ): Promise<TransactionInstruction[] | null> {
   try {
     // marketAddress is actually the numeric market ID string (e.g. "120117297284885")
@@ -610,10 +611,10 @@ async function createTriadBuyInstruction(
 
     // Build place_bid_order instruction
     // amount = USDC amount in raw (6 decimals)
-    // price = price per share in raw (6 decimals) — we use the full cost since we're taking the best ask
+    // price = price per share in raw (6 decimals) — must be < 1_000_000 (< $1.00)
     const amountRaw = BigInt(Math.floor(amountUsd * 10 ** BASE_DECIMALS));
-    // Price = 1 USDC per share (we want to buy at market, so set ceiling price)
-    const priceRaw = BigInt(1 * 10 ** BASE_DECIMALS);
+    // Use market price, clamped to max 999_999 (Triad rejects >= 1_000_000)
+    const priceRaw = BigInt(Math.min(Math.floor(pricePerShare * 10 ** BASE_DECIMALS), 999_999));
     const data = Buffer.concat([PLACE_BID_ORDER_DISC, serializePlaceBidOrderArgs(amountRaw, priceRaw, marketId, direction)]);
 
     ixs.push(new TransactionInstruction({
@@ -634,7 +635,7 @@ async function createTriadBuyInstruction(
       data,
     }));
 
-    console.log(`[TRIAD-ORDER] Built place_bid_order for ${direction} on market ${marketAddress} ($${amountUsd.toFixed(2)})`);
+    console.log(`[TRIAD-ORDER] Built place_bid_order for ${direction} on market ${marketAddress} ($${amountUsd.toFixed(2)}, price=$${pricePerShare.toFixed(4)})`);
     console.log(`[TRIAD-ORDER]   market=${marketPDA.toBase58()} orderBook=${orderBookPDA.toBase58()} order=${orderPDA.toBase58()}`);
     return ixs;
   } catch (err) {
@@ -1006,7 +1007,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // Build both legs in parallel
     const [triadIxs, jupTxBase64] = await Promise.all([
-      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts),
+      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts, c.costA),
       createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd),
     ]);
 
