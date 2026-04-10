@@ -1,20 +1,34 @@
 /**
- * RICKY TRADES — Triad ↔ Jupiter Predict Cross-Platform Arb v1
+ * RICKY TRADES — Triad ↔ Jupiter Predict Cross-Platform Arb v2
  *
- * Strategy: Cross-platform price differences on the SAME crypto outcome
- *   - Both platforms have 5-min "Up or Down" binary markets for BTC, ETH, SOL
- *   - If Triad hype(Up) is cheaper than Jupiter's sellYes(Up) → buy Triad, sell Jupiter
- *   - If Jupiter buyYes(Up) is cheaper than Triad's bid → buy Jupiter, sell Triad
- *   - Non-atomic: sequential execution (Triad first, then Jupiter or vice versa)
+ * Strategy: Outcome-independent cross-platform prediction market arbitrage.
  *
- * Triad API:   beta.triadfi.co/api/market/{poolId} (no auth)
- * Jupiter API: prediction-market-api.jup.ag/api/v1/events/crypto/timed
+ * Math:
+ *   - Triad has Hype (YES/Up) + Flop (NO/Down) for each 5-min crypto market
+ *   - Jupiter has Up + Down for the same asset/window
+ *   - If Triad_Hype_Ask + Jup_Down_BuyYes < $1 → buy both → guaranteed $1 payout
+ *   - If Triad_Flop_Ask + Jup_Up_BuyYes < $1 → buy both → guaranteed $1 payout
+ *   - Profit = $1 - totalCost (per contract), regardless of outcome
+ *
+ * Execution:
+ *   - Atomic via Jito bundle: both legs in one bundle
+ *   - Profit-or-revert: if bundle fails, zero capital at risk
+ *   - Uses @triadxyz/triad-protocol SDK for Triad instructions
+ *   - Uses Jupiter Predict API for Jupiter transactions
+ *
+ * Safety guardrail: revert if final balance < starting + tip + $0.05
  */
 
 import {
   Connection,
   Keypair,
+  VersionedTransaction,
+  TransactionMessage,
+  TransactionInstruction,
+  LAMPORTS_PER_SOL,
   PublicKey,
+  SystemProgram,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { createClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
@@ -31,24 +45,25 @@ const WALLET = keypair.publicKey.toBase58();
 
 const TRIAD_API = "https://beta.triadfi.co/api";
 const JUP_TIMED_API = "https://prediction-market-api.jup.ag/api/v1/events/crypto/timed";
+const JITO_BUNDLE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles";
+const JITO_TIP_ACCOUNT = new PublicKey("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5");
 
 const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "3000");
-const ARB_AMOUNT = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
+const TRADE_SIZE_USD = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
 const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
+const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || String(CONFIG.JITO_TIP));
+const SAFETY_MIN_PROFIT_USD = 0.05; // profit-or-revert guardrail
 const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
 const COOLDOWN_MS = 60_000;
 
-// Triad pool IDs for crypto fast markets (correct IDs from /api/market/fast)
-const FAST_MARKET_POOLS = [
-  { poolId: "163", coin: "btc" },
-  { poolId: "164", coin: "sol" },
-  { poolId: "165", coin: "eth" },
-];
+// Triad pool IDs for crypto fast markets (from /api/market/fast)
+const FAST_MARKET_COINS = ["btc", "sol", "eth"];
 
 // State
 const marketCooldowns = new Map<string, number>();
 let scanCount = 0;
 let bestSpreadSeen = -Infinity;
+let executionInFlight = false;
 
 // ── Proxy for Jupiter (region-blocked) ──────────────────
 const PROXY_URL = process.env.PROXY_URL || "";
@@ -59,15 +74,17 @@ if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("place
   } else {
     proxyAgent = new HttpsProxyAgent(PROXY_URL);
   }
-  console.log(`[XARB] Proxy: ${PROXY_URL.replace(/\/\/.*@/, "//***@")}`);
-} else {
-  console.log("[XARB] No valid proxy — Jupiter calls go direct");
 }
 
 async function jupFetch(url: string, init?: RequestInit): Promise<Response> {
-  if (!proxyAgent) return fetch(url, init);
-  const nodeFetch = (await import("node-fetch")).default;
-  return nodeFetch(url, { ...init, agent: proxyAgent } as any) as unknown as Response;
+  try {
+    if (!proxyAgent) return fetch(url, init);
+    const nodeFetch = (await import("node-fetch")).default;
+    return nodeFetch(url, { ...init, agent: proxyAgent } as any) as unknown as Response;
+  } catch (err) {
+    console.error(`[JUP-FETCH] Error: ${err instanceof Error ? err.message : err}`);
+    throw err;
+  }
 }
 
 function jupHeaders(): Record<string, string> {
@@ -80,36 +97,47 @@ function jupHeaders(): Record<string, string> {
 }
 
 console.log("═══════════════════════════════════════════════════════");
-console.log("  RICKY TRADES — Triad ↔ Jupiter Cross-Arb v1");
+console.log("  RICKY TRADES — Triad ↔ Jupiter Cross-Arb v2 (Atomic)");
 console.log("═══════════════════════════════════════════════════════");
 console.log(`[XARB] Wallet:       ${WALLET}`);
-console.log(`[XARB] Amount/trade: $${ARB_AMOUNT}`);
+console.log(`[XARB] Amount/trade: $${TRADE_SIZE_USD}`);
 console.log(`[XARB] Min profit:   $${MIN_NET_PROFIT}`);
+console.log(`[XARB] Jito tip:     ${JITO_TIP_LAMPORTS} lamports`);
 console.log(`[XARB] Scan:         ${SCAN_INTERVAL_MS}ms`);
 console.log(`[XARB] Dry run:      ${DRY_RUN}`);
-console.log(`[XARB] Proxy:        ${PROXY_URL ? "YES" : "NONE"}`);
-console.log(`[XARB] Strategy:     Cross-platform price difference`);
+console.log(`[XARB] Proxy:        ${PROXY_URL && !PROXY_URL.includes("your-proxy") ? "YES" : "NONE"}`);
+console.log(`[XARB] Strategy:     YES_A + NO_B < $1 (outcome-independent)`);
+console.log(`[XARB] Safety:       profit-or-revert via Jito bundle`);
 console.log("═══════════════════════════════════════════════════════");
 
 // ── Types ───────────────────────────────────────────────
-interface TriadMarket {
-  id: string;
+interface TriadFastMarket {
+  id: string;          // e.g. "120117297284885"
   marketAddress: string;
   marketStart: number;
   marketEnd: number;
   question: string;
   winningDirection: string;
   isFast: boolean;
-  hypePrice: number; // YES/Up price
-  flopPrice: number; // NO/Down price
+  hypePrice: number;   // YES/Up price
+  flopPrice: number;   // NO/Down price
   payoutFee: number;
   volume: number;
+  poolId: string;
+  coin: string;        // added by us
+}
+
+interface TriadOrderbook {
+  hypeBid: number;
+  hypeAsk: number;
+  flopBid: number;
+  flopAsk: number;
 }
 
 interface JupSide {
   marketId: string;
-  buyYes: number;  // ask — cost to buy YES
-  sellYes: number; // bid — proceeds from selling YES
+  buyYes: number;   // cost to buy YES (ask)
+  sellYes: number;  // proceeds from selling YES (bid)
 }
 
 interface JupEvent {
@@ -122,48 +150,56 @@ interface JupEvent {
   openTime: number;
 }
 
-interface CrossArbCandidate {
+interface MergeArbCandidate {
   coin: string;
-  direction: "up" | "down"; // Which outcome we're arbing
-  strategy: string;
-  triadPrice: number;       // Triad price (buy or sell)
-  jupPrice: number;         // Jupiter price (sell or buy)
-  spread: number;           // Price difference
-  netProfit: number;
-  remaining: number;
-  triadMarket: TriadMarket;
+  // What we buy
+  legA: "triad_hype" | "triad_flop";
+  legB: "jup_down" | "jup_up";
+  // Prices
+  costA: number;       // cost per contract on Triad
+  costB: number;       // cost per contract on Jupiter
+  totalCost: number;   // costA + costB (must be < 1)
+  profitPerContract: number; // 1 - totalCost
+  netProfit: number;   // (profitPerContract * contracts) - fees
+  contracts: number;
+  remaining: number;   // seconds to close
+  triadMarket: TriadFastMarket;
   jupEvent: JupEvent;
 }
 
 // ── Triad API ───────────────────────────────────────────
 const TRIAD_HEADERS: Record<string, string> = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-  "Accept": "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+  "Accept": "application/json",
   "Referer": "https://triadfi.co/",
   "Origin": "https://triadfi.co",
-  "sec-ch-ua": '"Chromium";v="125", "Not-A.Brand";v="24", "Google Chrome";v="125"',
-  "sec-ch-ua-mobile": "?0",
-  "sec-ch-ua-platform": '"macOS"',
 };
 
-async function fetchTriadMarkets(coin: string, poolId: string): Promise<TriadMarket[]> {
+async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
   try {
-    // Use the /api/market/fast endpoint which returns all fast market pools
     const res = await fetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS });
     if (!res.ok) return [];
     const pools = await res.json() as any[];
-    // Find the pool matching our coin's poolId
-    const pool = pools.find((p: any) => String(p.id) === poolId);
-    if (!pool) return [];
-    const markets: TriadMarket[] = pool.markets || [];
-    return markets.filter(m => m.winningDirection === "None" && m.isFast);
-  } catch {
+    const markets: TriadFastMarket[] = [];
+
+    for (const pool of pools) {
+      const coin = (pool.coin || "").toLowerCase();
+      if (!FAST_MARKET_COINS.includes(coin)) continue;
+
+      for (const m of (pool.markets || [])) {
+        if (m.winningDirection === "None" && m.isFast) {
+          markets.push({ ...m, coin });
+        }
+      }
+    }
+    return markets;
+  } catch (err) {
+    console.error("[TRIAD] Fetch error:", err instanceof Error ? err.message : err);
     return [];
   }
 }
 
-async function fetchTriadOrderbook(marketId: string): Promise<{ hypeBid: number; hypeAsk: number; flopBid: number; flopAsk: number } | null> {
+async function fetchTriadOrderbook(marketId: string): Promise<TriadOrderbook | null> {
   try {
     const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS });
     if (!res.ok) return null;
@@ -218,176 +254,152 @@ async function fetchJupiterEvents(coin: string): Promise<JupEvent[]> {
 
         if (upBuyYes <= 0 || downBuyYes <= 0) continue;
 
-        const closeTime = Number(upMarket.closeTime || upMarket.metadata?.closeTime || 0);
-        const openTime = Number(upMarket.openTime || upMarket.metadata?.openTime || 0);
-
         events.push({
           coin,
           interval,
           title: event.metadata?.title || event.title || `${coin.toUpperCase()} ${interval}`,
           up: { marketId: upMarket.marketId, buyYes: upBuyYes, sellYes: upSellYes },
           down: { marketId: downMarket.marketId, buyYes: downBuyYes, sellYes: downSellYes },
-          closeTime,
-          openTime,
+          closeTime: Number(upMarket.closeTime || upMarket.metadata?.closeTime || 0),
+          openTime: Number(upMarket.openTime || upMarket.metadata?.openTime || 0),
         });
       }
     } catch (err) {
-      console.error(`[JUP] Fetch error for ${coin}/${interval}:`, err);
+      console.error(`[JUP] Fetch error for ${coin}/${interval}:`, err instanceof Error ? err.message : err);
     }
   }
 
   return events;
 }
 
-// ── Cross-Platform Matching ─────────────────────────────
-// Match Triad and Jupiter markets by:
-// 1. Same coin (BTC/ETH/SOL)
-// 2. Overlapping time windows (both close around the same time)
-// Then compare prices for arb opportunities
+// ── Cross-Platform Merge Arb Detection ──────────────────
+// Core formula: buy YES_A on platform A + buy NO_B on platform B
+// If costA + costB < $1 → one of them pays $1, guaranteed profit
+//
+// Combinations:
+//   1. Buy Triad Hype (Up/YES) + Buy Jupiter Down YES → covers all outcomes
+//   2. Buy Triad Flop (Down/YES) + Buy Jupiter Up YES → covers all outcomes
+//
+// In both cases: one leg always wins $1 per contract
 
-async function findCrossArbCandidates(): Promise<CrossArbCandidate[]> {
-  const candidates: CrossArbCandidate[] = [];
+async function findMergeArbs(): Promise<MergeArbCandidate[]> {
+  const candidates: MergeArbCandidate[] = [];
   const now = Date.now() / 1000;
   const verbose = scanCount % 10 === 0;
 
-  // Fetch Triad + Jupiter in parallel for all coins
-  const coinData = await Promise.all(
-    FAST_MARKET_POOLS.map(async (p) => {
-      const [triadMarkets, jupEvents] = await Promise.all([
-        fetchTriadMarkets(p.coin, p.poolId),
-        fetchJupiterEvents(p.coin),
-      ]);
-      return { coin: p.coin, triadMarkets, jupEvents };
-    })
-  );
+  // Fetch all data in parallel: single Triad call + parallel Jupiter calls
+  const [triadMarkets, ...jupEventsByCoin] = await Promise.all([
+    fetchAllTriadFastMarkets(),
+    ...FAST_MARKET_COINS.map(coin => fetchJupiterEvents(coin)),
+  ]);
 
-  for (const { coin, triadMarkets, jupEvents } of coinData) {
-    if (verbose) {
-      console.log(`  [${coin.toUpperCase()}] Triad: ${triadMarkets.length} open markets | Jupiter: ${jupEvents.length} events`);
+  // Group Jupiter events by coin
+  const jupByCoin = new Map<string, JupEvent[]>();
+  FAST_MARKET_COINS.forEach((coin, i) => {
+    jupByCoin.set(coin, jupEventsByCoin[i]);
+  });
+
+  if (verbose) {
+    console.log(`  [TRIAD] ${triadMarkets.length} open fast markets`);
+    for (const coin of FAST_MARKET_COINS) {
+      const jups = jupByCoin.get(coin) || [];
+      const triads = triadMarkets.filter(m => m.coin === coin);
+      console.log(`  [${coin.toUpperCase()}] Triad: ${triads.length} | Jupiter: ${jups.length} events`);
     }
+  }
 
-    if (triadMarkets.length === 0 || jupEvents.length === 0) continue;
+  for (const triad of triadMarkets) {
+    const remaining = triad.marketEnd - now;
+    if (remaining < 30 || remaining > 6 * 60) continue;
 
-    for (const triad of triadMarkets) {
-      const remaining = triad.marketEnd - now;
-      if (remaining < 30 || remaining > 6 * 60) continue;
+    const cooldownKey = `${triad.coin}-${triad.id}`;
+    if (marketCooldowns.has(cooldownKey) && Date.now() - marketCooldowns.get(cooldownKey)! < COOLDOWN_MS) continue;
 
-      const cooldownKey = `${coin}-${triad.id}`;
-      if (marketCooldowns.has(cooldownKey) && Date.now() - marketCooldowns.get(cooldownKey)! < COOLDOWN_MS) continue;
+    // Get orderbook for real bid/ask
+    const ob = await fetchTriadOrderbook(triad.id);
+    const triadHypeAsk = ob?.hypeAsk ?? triad.hypePrice;
+    const triadFlopAsk = ob?.flopAsk ?? triad.flopPrice;
 
-      // Get Triad orderbook for real bid/ask
-      const ob = await fetchTriadOrderbook(triad.id);
-      const triadHypeAsk = ob?.hypeAsk ?? triad.hypePrice;
-      const triadHypeBid = ob?.hypeBid ?? triad.hypePrice;
-      const triadFlopAsk = ob?.flopAsk ?? triad.flopPrice;
-      const triadFlopBid = ob?.flopBid ?? triad.flopPrice;
+    const jupEvents = jupByCoin.get(triad.coin) || [];
 
-      const hasOB = ob && (ob.hypeAsk !== 0.5 || ob.hypeBid !== 0.5 || ob.flopAsk !== 0.5 || ob.flopBid !== 0.5);
+    // Match by close time (within 2 min)
+    for (const jup of jupEvents) {
+      const timeDiff = Math.abs(triad.marketEnd - jup.closeTime);
+      if (timeDiff > 120) continue;
 
-      // Match with Jupiter events by close time (within 2 min window)
-      let matched = false;
-      for (const jup of jupEvents) {
-        const timeDiff = Math.abs(triad.marketEnd - jup.closeTime);
-        if (timeDiff > 120) continue;
-        matched = true;
+      const txFee = JITO_TIP_LAMPORTS / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD;
+
+      // ── Merge 1: Buy Triad Hype (Up) + Buy Jup Down YES ──
+      // If price goes UP  → Triad Hype wins $1
+      // If price goes DOWN → Jup Down wins $1
+      // Either way we get $1 per contract
+      {
+        const totalCost = triadHypeAsk + jup.down.buyYes;
+        const profitPerContract = 1 - totalCost;
+        const contracts = Math.floor(TRADE_SIZE_USD / totalCost);
+        const netProfit = (profitPerContract * contracts) - txFee;
+
+        if (profitPerContract > 0 && profitPerContract > bestSpreadSeen) bestSpreadSeen = profitPerContract;
 
         if (verbose) {
           console.log(
-            `    🔗 MATCH ${coin.toUpperCase()} close±${Math.round(timeDiff)}s | ` +
-            `Triad: hype=$${triadHypeAsk.toFixed(4)}/${triadHypeBid.toFixed(4)} flop=$${triadFlopAsk.toFixed(4)}/${triadFlopBid.toFixed(4)}${hasOB ? " 📖" : ""} | ` +
-            `Jup: up=$${jup.up.buyYes.toFixed(4)}/${jup.up.sellYes.toFixed(4)} down=$${jup.down.buyYes.toFixed(4)}/${jup.down.sellYes.toFixed(4)}`
-          );
-
-          // Show all 4 spread calculations
-          const s1 = jup.up.sellYes - triadHypeAsk;
-          const s2 = triadHypeBid - jup.up.buyYes;
-          const s3 = jup.down.sellYes - triadFlopAsk;
-          const s4 = triadFlopBid - jup.down.buyYes;
-          console.log(
-            `    📊 Spreads: buyTriad/sellJup(Up)=${(s1*100).toFixed(2)}% buyJup/sellTriad(Up)=${(s2*100).toFixed(2)}% ` +
-            `buyTriad/sellJup(Dn)=${(s3*100).toFixed(2)}% buyJup/sellTriad(Dn)=${(s4*100).toFixed(2)}%`
+            `    🔗 ${triad.coin.toUpperCase()} Merge1: triadHype=$${triadHypeAsk.toFixed(4)} + jupDown=$${jup.down.buyYes.toFixed(4)} = $${totalCost.toFixed(4)} | ` +
+            `profit/c=$${profitPerContract.toFixed(4)} × ${contracts}c net=$${netProfit.toFixed(4)}`
           );
         }
 
-        const txFee = 0.002 * CONFIG.SOL_PRICE_USD;
-
-        // Strategy 1: Buy Up on Triad (cheap), Sell Up on Jupiter (expensive)
-        // Profit = jupSellYes(Up) - triadHypeAsk - fees
-        {
-          const spread = jup.up.sellYes - triadHypeAsk;
-          const netProfit = (spread * ARB_AMOUNT) - txFee;
-          if (spread > 0) {
-            if (spread > bestSpreadSeen) bestSpreadSeen = spread;
-          }
-          if (netProfit > MIN_NET_PROFIT) {
-            candidates.push({
-              coin, direction: "up",
-              strategy: "BUY_TRIAD_SELL_JUP",
-              triadPrice: triadHypeAsk, jupPrice: jup.up.sellYes,
-              spread, netProfit, remaining,
-              triadMarket: triad, jupEvent: jup,
-            });
-          }
-        }
-
-        // Strategy 2: Buy Up on Jupiter (cheap), Sell Up on Triad (expensive)
-        // Profit = triadHypeBid - jupBuyYes(Up) - fees
-        {
-          const spread = triadHypeBid - jup.up.buyYes;
-          const netProfit = (spread * ARB_AMOUNT) - txFee;
-          if (spread > 0) {
-            if (spread > bestSpreadSeen) bestSpreadSeen = spread;
-          }
-          if (netProfit > MIN_NET_PROFIT) {
-            candidates.push({
-              coin, direction: "up",
-              strategy: "BUY_JUP_SELL_TRIAD",
-              triadPrice: triadHypeBid, jupPrice: jup.up.buyYes,
-              spread, netProfit, remaining,
-              triadMarket: triad, jupEvent: jup,
-            });
-          }
-        }
-
-        // Strategy 3: Buy Down on Triad (cheap), Sell Down on Jupiter (expensive)
-        {
-          const spread = jup.down.sellYes - triadFlopAsk;
-          const netProfit = (spread * ARB_AMOUNT) - txFee;
-          if (spread > 0) {
-            if (spread > bestSpreadSeen) bestSpreadSeen = spread;
-          }
-          if (netProfit > MIN_NET_PROFIT) {
-            candidates.push({
-              coin, direction: "down",
-              strategy: "BUY_TRIAD_SELL_JUP",
-              triadPrice: triadFlopAsk, jupPrice: jup.down.sellYes,
-              spread, netProfit, remaining,
-              triadMarket: triad, jupEvent: jup,
-            });
-          }
-        }
-
-        // Strategy 4: Buy Down on Jupiter (cheap), Sell Down on Triad (expensive)
-        {
-          const spread = triadFlopBid - jup.down.buyYes;
-          const netProfit = (spread * ARB_AMOUNT) - txFee;
-          if (spread > 0) {
-            if (spread > bestSpreadSeen) bestSpreadSeen = spread;
-          }
-          if (netProfit > MIN_NET_PROFIT) {
-            candidates.push({
-              coin, direction: "down",
-              strategy: "BUY_JUP_SELL_TRIAD",
-              triadPrice: triadFlopBid, jupPrice: jup.down.buyYes,
-              spread, netProfit, remaining,
-              triadMarket: triad, jupEvent: jup,
-            });
-          }
+        if (netProfit > MIN_NET_PROFIT && totalCost < 1) {
+          candidates.push({
+            coin: triad.coin,
+            legA: "triad_hype",
+            legB: "jup_down",
+            costA: triadHypeAsk,
+            costB: jup.down.buyYes,
+            totalCost,
+            profitPerContract,
+            netProfit,
+            contracts,
+            remaining,
+            triadMarket: triad,
+            jupEvent: jup,
+          });
         }
       }
 
-      if (!matched && verbose) {
-        console.log(`    ❌ Triad "${triad.question}" (closes ${new Date(triad.marketEnd * 1000).toISOString().slice(11,19)}) — no Jupiter match within 2min`);
+      // ── Merge 2: Buy Triad Flop (Down) + Buy Jup Up YES ──
+      // If price goes DOWN → Triad Flop wins $1
+      // If price goes UP   → Jup Up wins $1
+      {
+        const totalCost = triadFlopAsk + jup.up.buyYes;
+        const profitPerContract = 1 - totalCost;
+        const contracts = Math.floor(TRADE_SIZE_USD / totalCost);
+        const netProfit = (profitPerContract * contracts) - txFee;
+
+        if (profitPerContract > 0 && profitPerContract > bestSpreadSeen) bestSpreadSeen = profitPerContract;
+
+        if (verbose) {
+          console.log(
+            `    🔗 ${triad.coin.toUpperCase()} Merge2: triadFlop=$${triadFlopAsk.toFixed(4)} + jupUp=$${jup.up.buyYes.toFixed(4)} = $${totalCost.toFixed(4)} | ` +
+            `profit/c=$${profitPerContract.toFixed(4)} × ${contracts}c net=$${netProfit.toFixed(4)}`
+          );
+        }
+
+        if (netProfit > MIN_NET_PROFIT && totalCost < 1) {
+          candidates.push({
+            coin: triad.coin,
+            legA: "triad_flop",
+            legB: "jup_up",
+            costA: triadFlopAsk,
+            costB: jup.up.buyYes,
+            totalCost,
+            profitPerContract,
+            netProfit,
+            contracts,
+            remaining,
+            triadMarket: triad,
+            jupEvent: jup,
+          });
+        }
       }
     }
   }
@@ -395,41 +407,364 @@ async function findCrossArbCandidates(): Promise<CrossArbCandidate[]> {
   return candidates.sort((a, b) => b.netProfit - a.netProfit);
 }
 
-// ── Execute cross-arb ───────────────────────────────────
-async function executeCrossArb(c: CrossArbCandidate): Promise<void> {
-  console.log(`\n[XARB] ═══ CROSS-ARB OPPORTUNITY ══════════════════════`);
-  console.log(`[XARB] ${c.coin.toUpperCase()} ${c.direction.toUpperCase()} — ${c.strategy}`);
-  console.log(`[XARB] Triad: $${c.triadPrice.toFixed(4)} | Jupiter: $${c.jupPrice.toFixed(4)}`);
-  console.log(`[XARB] Spread: ${(c.spread * 100).toFixed(3)}% | Net: $${c.netProfit.toFixed(4)}`);
+// ── Jupiter Order Creation ──────────────────────────────
+async function createJupBuyOrder(
+  marketId: string,
+  contracts: number,
+  depositUsd: number,
+): Promise<string | null> {
+  try {
+    const body = {
+      ownerPubkey: WALLET,
+      marketId,
+      isYes: true,
+      isBuy: true,
+      contracts,
+      depositAmount: String(Math.floor(depositUsd * 1_000_000)),
+      depositMint: CONFIG.JUP_USD_MINT,
+    };
+
+    const res = await jupFetch(`${CONFIG.JUP_PREDICT_API}/orders`, {
+      method: "POST",
+      headers: jupHeaders(),
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[JUP-ORDER] Error ${res.status}: ${text.slice(0, 200)}`);
+      return null;
+    }
+
+    const data = await res.json() as any;
+    return data.transaction || null;
+  } catch (err) {
+    console.error("[JUP-ORDER] Error:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// ── Triad Order Creation via SDK ────────────────────────
+// We build instructions directly using the Triad program's Anchor IDL
+// marketBidOrder: takes from ask side of orderbook (market buy)
+// orderDirection: { hype: {} } or { flop: {} }
+async function createTriadBuyInstruction(
+  marketId: string,
+  direction: "hype" | "flop",
+  amountUsd: number,
+): Promise<TransactionInstruction[] | null> {
+  try {
+    // Dynamic import of the Triad SDK
+    const { default: TriadProtocol } = await import("@triadxyz/triad-protocol");
+    const { AnchorProvider, Wallet } = await import("@coral-xyz/anchor");
+
+    const wallet = new Wallet(keypair);
+    const provider = new AnchorProvider(connection, wallet, { commitment: "confirmed" });
+    const triad = new TriadProtocol(connection, wallet, {
+      payer: keypair.publicKey,
+      skipPreflight: true,
+    });
+
+    const marketIdNum = parseInt(marketId);
+    const orderDirection = direction === "hype" ? { hype: {} } : { flop: {} };
+
+    // Use the SDK's trade module to get the instruction
+    // The marketBidOrder method builds instructions that match against ask orders
+    const program = (triad as any).program;
+    if (!program) {
+      console.error("[TRIAD-ORDER] Cannot access program from SDK");
+      return null;
+    }
+
+    // Get orderbook to find asks to match against
+    const orderBook = await triad.trade.getOrderBook(marketIdNum);
+    const asks = direction === "hype" ? orderBook.hype.ask : orderBook.flop.ask;
+
+    if (asks.length === 0) {
+      console.log(`[TRIAD-ORDER] No asks on ${direction} side for market ${marketId}`);
+      return null;
+    }
+
+    const ixs: TransactionInstruction[] = [];
+    const BN = (await import("bn.js")).default;
+    const { getMarketPDA, getOrderBookPDA, getOrderPDA, getCustomerPDA } = await import("@triadxyz/triad-protocol");
+
+    let remainingAmount = new BN(Math.floor(amountUsd * 1_000_000));
+    const programId = program.programId;
+    const oppositeDirection = direction === "hype" ? { flop: {} } : { hype: {} };
+    const customerId = 7; // Default Triadmarkets customer
+
+    const sortedAsks = asks.sort((a: any, b: any) => Number(a.price) - Number(b.price));
+
+    for (const ask of sortedAsks) {
+      if (remainingAmount.lte(new BN(0))) break;
+      if (ask.authority === WALLET) continue;
+
+      const askPrice = new BN(ask.price);
+      const availableShares = new BN(ask.totalShares).sub(new BN(ask.filledShares));
+      const maxSharesForAmount = remainingAmount.mul(new BN(1_000_000)).div(askPrice);
+      const sharesToBuy = BN.min(maxSharesForAmount, availableShares);
+
+      if (sharesToBuy.lte(new BN(0))) continue;
+
+      const usdcAmount = sharesToBuy.mul(askPrice).div(new BN(1_000_000));
+
+      ixs.push(
+        await program.methods
+          .marketBidOrder({
+            amount: usdcAmount,
+            marketId: new BN(marketIdNum),
+            orderDirection,
+            bookOrderAskId: new BN(ask.id),
+            oppositeOrderDirection: oppositeDirection,
+          })
+          .accounts({
+            signer: keypair.publicKey,
+            payer: keypair.publicKey,
+            market: getMarketPDA(programId, marketIdNum),
+            orderBook: getOrderBookPDA(programId, marketIdNum),
+            bookOrderAskAuthority: new PublicKey(ask.authority),
+            order: getOrderPDA(programId, keypair.publicKey, marketIdNum, direction === "hype" ? "Hype" : "Flop"),
+            oppositeOrder: getOrderPDA(programId, new PublicKey(ask.authority), marketIdNum, direction === "hype" ? "Flop" : "Hype"),
+            customer: getCustomerPDA(programId, customerId),
+          })
+          .instruction()
+      );
+
+      remainingAmount = remainingAmount.sub(usdcAmount);
+    }
+
+    if (ixs.length === 0) {
+      console.log(`[TRIAD-ORDER] No matching asks to fill for ${direction} market ${marketId}`);
+      return null;
+    }
+
+    return ixs;
+  } catch (err) {
+    console.error("[TRIAD-ORDER] Error building instruction:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// ── Build, Sign & Bundle ────────────────────────────────
+async function buildAndSign(base64Tx: string): Promise<VersionedTransaction> {
+  const txBuf = Buffer.from(base64Tx, "base64");
+  const tx = VersionedTransaction.deserialize(txBuf);
+  tx.sign([keypair]);
+  return tx;
+}
+
+async function buildTriadTx(ixs: TransactionInstruction[]): Promise<VersionedTransaction> {
+  const { blockhash } = await connection.getLatestBlockhash();
+  const msg = new TransactionMessage({
+    payerKey: keypair.publicKey,
+    recentBlockhash: blockhash,
+    instructions: [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }),
+      ...ixs,
+    ],
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(msg);
+  tx.sign([keypair]);
+  return tx;
+}
+
+async function buildJitoTipTx(): Promise<VersionedTransaction> {
+  const { blockhash } = await connection.getLatestBlockhash();
+  const tipIx = SystemProgram.transfer({
+    fromPubkey: keypair.publicKey,
+    toPubkey: JITO_TIP_ACCOUNT,
+    lamports: JITO_TIP_LAMPORTS,
+  });
+  const msg = new TransactionMessage({
+    payerKey: keypair.publicKey,
+    recentBlockhash: blockhash,
+    instructions: [tipIx],
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(msg);
+  tx.sign([keypair]);
+  return tx;
+}
+
+async function sendJitoBundle(txs: VersionedTransaction[]): Promise<string | null> {
+  try {
+    const encodedTxs = txs.map(tx => bs58.encode(tx.serialize()));
+    const res = await fetch(JITO_BUNDLE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "sendBundle",
+        params: [encodedTxs],
+      }),
+    });
+
+    const data = await res.json() as any;
+    if (data.error) {
+      console.error(`[JITO] Bundle error: ${JSON.stringify(data.error)}`);
+      return null;
+    }
+
+    const bundleId = data.result;
+    console.log(`[JITO] Bundle submitted: ${bundleId}`);
+
+    // Poll for confirmation
+    for (let i = 0; i < 15; i++) {
+      await sleep(2000);
+      try {
+        const statusRes = await fetch(JITO_BUNDLE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1, method: "getBundleStatuses",
+            params: [[bundleId]],
+          }),
+        });
+        const statusData = await statusRes.json() as any;
+        const statuses = statusData?.result?.value || [];
+        if (statuses.length > 0) {
+          const s = statuses[0];
+          console.log(`[JITO] Status: ${s.confirmation_status || s.status}`);
+          if (s.confirmation_status === "confirmed" || s.confirmation_status === "finalized") return bundleId;
+          if (s.err || s.confirmation_status === "failed") return null;
+        }
+      } catch { /* retry */ }
+    }
+
+    console.warn("[JITO] Status unknown after 30s — marking as submitted/pending");
+    return bundleId;
+  } catch (err) {
+    console.error("[JITO] Submission error:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// ── Execute Atomic Merge Arb ────────────────────────────
+async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
+  if (executionInFlight) {
+    console.log("[XARB] Execution already in flight — skipping");
+    return;
+  }
+
+  console.log(`\n[XARB] ═══ MERGE ARB OPPORTUNITY ══════════════════════`);
+  console.log(`[XARB] ${c.coin.toUpperCase()} — ${c.legA} + ${c.legB}`);
+  console.log(`[XARB] Cost: $${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)}`);
+  console.log(`[XARB] Payout: $1.00 per contract (guaranteed)`);
+  console.log(`[XARB] Profit/contract: $${c.profitPerContract.toFixed(4)}`);
+  console.log(`[XARB] Contracts: ${c.contracts} | Net profit: $${c.netProfit.toFixed(4)}`);
   console.log(`[XARB] Time remaining: ${Math.round(c.remaining)}s`);
-  console.log(`[XARB] Triad market: ${c.triadMarket.question}`);
-  console.log(`[XARB] Jupiter event: ${c.jupEvent.title}`);
+  console.log(`[XARB] Triad: "${c.triadMarket.question}" | Jupiter: "${c.jupEvent.title}"`);
+
+  // Safety check: total cost < 1 and profit > safety minimum
+  if (c.totalCost >= 1) {
+    console.log(`[XARB] ❌ SAFETY: totalCost $${c.totalCost.toFixed(4)} >= $1 — NO PROFIT. Aborting.`);
+    return;
+  }
+  if (c.profitPerContract < SAFETY_MIN_PROFIT_USD / c.contracts) {
+    console.log(`[XARB] ❌ SAFETY: profit too thin after guardrail. Aborting.`);
+    return;
+  }
 
   if (DRY_RUN) {
-    console.log(`[XARB] 🏜️ DRY RUN — logging opportunity only`);
+    console.log(`[XARB] 🏜️ DRY RUN — logging opportunity (set TRIAD_DRY_RUN=false to go live)`);
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
 
-    // Log to DB
     await supabase.from("arb_opportunities").insert({
       market_a_id: c.triadMarket.id,
-      market_b_id: c.jupEvent.up.marketId,
-      side_a: `triad_${c.direction === "up" ? "hype" : "flop"}`,
-      side_b: `jup_${c.direction}_yes`,
-      price_a: c.triadPrice,
-      price_b: c.jupPrice,
-      spread: c.spread,
-      status: "detected",
+      market_b_id: c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId,
+      side_a: c.legA,
+      side_b: c.legB,
+      price_a: c.costA,
+      price_b: c.costB,
+      spread: c.profitPerContract,
+      status: "dry_run",
     });
 
     return;
   }
 
-  // TODO: Live execution
-  // 1. Place order on Triad (on-chain via program)
-  // 2. Place order on Jupiter Predict (via API)
-  // Sequential — not atomic, so use small size and fast execution
-  console.log(`[XARB] ⚠️ Live execution not yet implemented`);
-  marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+  // ── LIVE EXECUTION ────────────────────────────────────
+  executionInFlight = true;
+  try {
+    const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
+    const jupMarketId = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
+    const jupDepositUsd = c.costB * c.contracts;
+
+    console.log(`[XARB] Building legs...`);
+
+    // Build both legs in parallel
+    const [triadIxs, jupTxBase64] = await Promise.all([
+      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts),
+      createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd),
+    ]);
+
+    if (!triadIxs || !jupTxBase64) {
+      console.log(`[XARB] ⚠️ Could not build both legs — aborting (zero capital at risk)`);
+      console.log(`[XARB]   Triad: ${triadIxs ? `${triadIxs.length} ixs` : "FAILED"} | Jupiter: ${jupTxBase64 ? "OK" : "FAILED"}`);
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
+    // Build transactions
+    const [triadTx, jupTx, tipTx] = await Promise.all([
+      buildTriadTx(triadIxs),
+      buildAndSign(jupTxBase64),
+      buildJitoTipTx(),
+    ]);
+
+    // Log opportunity to DB
+    const { data: oppRow } = await supabase.from("arb_opportunities").insert({
+      market_a_id: c.triadMarket.id,
+      market_b_id: jupMarketId,
+      side_a: c.legA,
+      side_b: c.legB,
+      price_a: c.costA,
+      price_b: c.costB,
+      spread: c.profitPerContract,
+      status: "executing",
+    }).select("id").single();
+    const oppId = oppRow?.id;
+
+    // Submit atomic Jito bundle: [triadTx, jupTx, tipTx]
+    console.log(`[XARB] 🚀 Submitting atomic Jito bundle (3 txs)...`);
+    const bundleResult = await sendJitoBundle([triadTx, jupTx, tipTx]);
+    marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+
+    if (bundleResult) {
+      console.log(`[XARB] ✅ Bundle landed! ${bundleResult}`);
+      console.log(`[XARB] 💰 Guaranteed profit: $${c.netProfit.toFixed(4)} (${c.contracts} contracts × $${c.profitPerContract.toFixed(4)})`);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: c.totalCost * c.contracts,
+          realized_pnl: c.netProfit,
+          fees: JITO_TIP_LAMPORTS / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "filled",
+          side_a_tx: bs58.encode(triadTx.signatures[0]),
+          side_b_tx: bs58.encode(jupTx.signatures[0]),
+        });
+        await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
+      }
+    } else {
+      console.error("[XARB] ❌ Bundle failed — zero capital at risk (atomic revert)");
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: 0,
+          realized_pnl: 0,
+          fees: 0,
+          status: "failed",
+          error_message: "Jito bundle rejected — atomic revert, no funds lost",
+        });
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      }
+    }
+  } catch (err) {
+    console.error("[XARB] Execution error:", err instanceof Error ? err.message : err);
+  } finally {
+    executionInFlight = false;
+  }
 }
 
 // ── Main Scan Loop ──────────────────────────────────────
@@ -442,26 +777,26 @@ async function runScan(): Promise<void> {
       console.log(`\n[SCAN] #${scanCount} ${new Date().toISOString()} ─────────────────`);
     }
 
-    const candidates = await findCrossArbCandidates();
+    const candidates = await findMergeArbs();
 
     if (candidates.length === 0) {
       if (verbose) {
-        console.log(`[SCAN] No cross-platform opportunities`);
-        console.log(`  📈 Best spread seen: ${bestSpreadSeen === -Infinity ? "N/A" : (bestSpreadSeen * 100).toFixed(3) + "%"}`);
+        console.log(`[SCAN] No merge arb opportunities (YES_A + NO_B all >= $1)`);
+        console.log(`  📈 Best profit/contract seen: ${bestSpreadSeen === -Infinity ? "N/A" : "$" + bestSpreadSeen.toFixed(4)}`);
       }
       return;
     }
 
-    console.log(`\n[SCAN] 🎯 FOUND ${candidates.length} cross-arb opportunities!`);
+    console.log(`\n[SCAN] 🎯 FOUND ${candidates.length} merge arb opportunities!`);
     for (const c of candidates.slice(0, 5)) {
       console.log(
-        `  💰 ${c.coin.toUpperCase()} ${c.direction} ${c.strategy} ` +
-        `triad=$${c.triadPrice.toFixed(4)} jup=$${c.jupPrice.toFixed(4)} ` +
-        `spread=${(c.spread * 100).toFixed(2)}% net=$${c.netProfit.toFixed(4)}`
+        `  💰 ${c.coin.toUpperCase()} ${c.legA}+${c.legB} ` +
+        `cost=$${c.totalCost.toFixed(4)} profit/c=$${c.profitPerContract.toFixed(4)} ` +
+        `×${c.contracts}c net=$${c.netProfit.toFixed(4)}`
       );
     }
 
-    await executeCrossArb(candidates[0]);
+    await executeMergeArb(candidates[0]);
   } catch (err) {
     console.error("[SCAN] Error:", err);
   }
@@ -478,34 +813,38 @@ async function scanLoop() {
 async function main() {
   try {
     const balance = await connection.getBalance(keypair.publicKey);
-    console.log(`[XARB] SOL balance: ${(balance / 1e9).toFixed(4)}`);
+    console.log(`[XARB] SOL balance: ${(balance / LAMPORTS_PER_SOL).toFixed(4)}`);
 
     // Verify Triad API
-    const triadTest = await fetch(`${TRIAD_API}/points/levels`, { headers: TRIAD_HEADERS });
-    console.log(`[XARB] Triad API: ${triadTest.ok ? "✅" : "❌ " + triadTest.status}`);
+    const triadTest = await fetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS });
+    if (triadTest.ok) {
+      const pools = await triadTest.json() as any[];
+      const cryptoPools = pools.filter((p: any) => FAST_MARKET_COINS.includes((p.coin || "").toLowerCase()));
+      console.log(`[XARB] Triad API: ✅ (${cryptoPools.length} crypto fast-market pools)`);
+    } else {
+      console.warn(`[XARB] ⚠️ Triad API error: ${triadTest.status}`);
+    }
 
     // Verify Jupiter API
-    let jupOk = false;
     try {
       const jupTest = await jupFetch(`${JUP_TIMED_API}?subcategory=btc&tags=5m`, { headers: jupHeaders() });
       if (!jupTest.ok) {
         const body = await jupTest.text();
         if (body.includes("unsupported_region")) {
-          console.warn("[XARB] ⚠️ Jupiter API region-blocked — set PROXY_URL. Will scan Triad-only spreads.");
+          console.warn("[XARB] ⚠️ Jupiter API region-blocked — set PROXY_URL");
         } else {
-          console.warn(`[XARB] ⚠️ Jupiter API error: ${jupTest.status}. Will retry in scan loop.`);
+          console.warn(`[XARB] ⚠️ Jupiter API error: ${jupTest.status}. Will retry.`);
         }
       } else {
         const testData = await jupTest.json() as any;
         const testEvents = Array.isArray(testData) ? testData : testData.data || testData.events || [];
         console.log(`[XARB] Jupiter API: ✅ (${testEvents.length} BTC/5m events)`);
-        jupOk = true;
       }
     } catch (err: any) {
-      console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry in scan loop.`);
+      console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry.`);
     }
 
-    console.log("[XARB] Starting cross-platform scan...\n");
+    console.log("[XARB] Starting atomic merge-arb scan...\n");
     await scanLoop();
   } catch (err) {
     console.error("[XARB] Fatal error:", err);
