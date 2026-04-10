@@ -826,12 +826,20 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    // Build transactions
-    const [triadTx, jupTx, tipTx] = await Promise.all([
-      buildTriadTx(triadIxs),
-      buildAndSign(jupTxBase64),
-      buildJitoTipTx(),
-    ]);
+    // Build transactions — all must share the same blockhash for Jito bundle
+    const { blockhash } = await connection.getLatestBlockhash();
+
+    const triadTx = await buildTriadTx(triadIxs, blockhash);
+    const jupTx = await buildAndSign(jupTxBase64);
+    const tipTx = await buildJitoTipTx(blockhash);
+
+    // Re-set blockhash on Jupiter tx so it matches the bundle
+    jupTx.message.recentBlockhash = blockhash;
+
+    // Sign all txs with our keypair
+    triadTx.sign([keypair]);
+    jupTx.sign([keypair]);
+    tipTx.sign([keypair]);
 
     // Log opportunity to DB
     const { data: oppRow } = await supabase.from("arb_opportunities").insert({
