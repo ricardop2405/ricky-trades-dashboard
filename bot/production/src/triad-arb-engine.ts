@@ -1545,15 +1545,10 @@ async function main() {
       console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry.`);
     }
 
-    if (!ATOMIC_ARB_PROGRAM_ID) {
-      console.log("[XARB] ⚠️ ATOMIC_ARB_PROGRAM_ID not set — live execution blocked. Deploy the program first.");
-      console.log("[XARB]    Scanning/logging only mode until program is deployed.");
-    } else {
-      console.log(`[XARB] ✅ Atomic program active: ${ATOMIC_ARB_PROGRAM_ID.toBase58()}`);
-      console.log("[XARB]    Both legs execute in ONE tx — fill or revert, zero risk.");
-    }
+    console.log(`[XARB] SUM-TO-ONE guard: costA + costB must be ≤ $${MAX_COMBINED_COST_PER_CONTRACT} per contract`);
+    console.log(`[XARB] Mode: ${DRY_RUN ? "DRY RUN (scanning only)" : "LIVE EXECUTION"}`);
 
-    console.log("[XARB] Starting atomic merge-arb scan...\n");
+    console.log("[XARB] Starting sum-to-one merge-arb scan...\n");
     await scanLoop();
   } catch (err) {
     console.error("[XARB] Fatal error:", err);
