@@ -424,7 +424,9 @@ async function findMergeArbs(): Promise<MergeArbCandidate[]> {
           );
         }
 
-        if (netProfit > MIN_NET_PROFIT && totalCost < 1) {
+        // Jupiter requires min $1 deposit
+        const jupDepositA = jup.down.buyYes * contracts;
+        if (netProfit > MIN_NET_PROFIT && totalCost < 1 && jupDepositA >= 1.0) {
           candidates.push({
             coin: triad.coin,
             legA: "triad_hype",
@@ -460,7 +462,9 @@ async function findMergeArbs(): Promise<MergeArbCandidate[]> {
           );
         }
 
-        if (netProfit > MIN_NET_PROFIT && totalCost < 1) {
+        // Jupiter requires min $1 deposit
+        const jupDepositB = jup.up.buyYes * contracts;
+        if (netProfit > MIN_NET_PROFIT && totalCost < 1 && jupDepositB >= 1.0) {
           candidates.push({
             coin: triad.coin,
             legA: "triad_flop",
