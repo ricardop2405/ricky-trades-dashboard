@@ -466,6 +466,13 @@ async function main() {
     } catch (err: any) {
       console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry in scan loop.`);
     }
+
+    console.log("[XARB] Starting cross-platform scan...\n");
+    await scanLoop();
+  } catch (err) {
+    console.error("[XARB] Fatal error:", err);
+    process.exit(1);
+  }
 }
 
 main().catch(console.error);
