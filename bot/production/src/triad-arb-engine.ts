@@ -859,7 +859,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // Build both legs in parallel
     const [triadIxs, jupTxBase64] = await Promise.all([
-      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts),
+      createTriadBuyInstruction(c.triadMarket.marketAddress, triadDirection, c.costA * c.contracts),
       createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd),
     ]);
 
