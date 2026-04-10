@@ -49,11 +49,14 @@ const TRIAD_API = "https://beta.triadfi.co/api";
 const JUP_TIMED_API = "https://prediction-market-api.jup.ag/api/v1/events/crypto/timed";
 const JITO_BLOCK_ENGINE = process.env.TRIAD_JITO_URL || "https://ny.mainnet.block-engine.jito.wtf";
 const JITO_BUNDLE_URL = `${JITO_BLOCK_ENGINE}/api/v1/bundles`;
+const JITO_INFLIGHT_STATUS_URL = `${JITO_BLOCK_ENGINE}/api/v1/getInflightBundleStatuses`;
+const JITO_FINAL_STATUS_URL = `${JITO_BLOCK_ENGINE}/api/v1/getBundleStatuses`;
 
 const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "1500");
 const TRADE_SIZE_USD = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
 const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
-const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "100000"); // 100k lamports (~$0.015) for better inclusion
+const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "100000"); // 100k lamports default
+const JITO_REQUEST_MIN_INTERVAL_MS = parseInt(process.env.TRIAD_JITO_MIN_INTERVAL_MS || "1100"); // Jito default rate limit is 1 req/sec/IP/region
 const SAFETY_MIN_PROFIT_USD = 0.05; // profit-or-revert guardrail
 const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
 const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
@@ -72,6 +75,7 @@ let executionsInFlight = 0;
 let bundleInFlight = new Set<string>(); // prevent duplicate submissions for same market
 let executionLock = false;
 let emergencyStopped = false;
+let lastJitoRequestAt = 0;
 
 // ── Proxy for Jupiter (region-blocked) ──────────────────
 const PROXY_URL = process.env.PROXY_URL || "";
@@ -661,14 +665,14 @@ async function buildTriadTx(ixs: TransactionInstruction[], blockhash: string): P
   return tx;
 }
 
-async function buildJitoTipTx(blockhash: string): Promise<VersionedTransaction> {
+async function buildJitoTipTx(blockhash: string, lamports: number): Promise<VersionedTransaction> {
   const tipAccount = new PublicKey(
     JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]
   );
   const tipIx = SystemProgram.transfer({
     fromPubkey: keypair.publicKey,
     toPubkey: tipAccount,
-    lamports: JITO_TIP_LAMPORTS,
+    lamports,
   });
   const msg = new TransactionMessage({
     payerKey: keypair.publicKey,
@@ -679,69 +683,143 @@ async function buildJitoTipTx(blockhash: string): Promise<VersionedTransaction> 
   return tx;
 }
 
-async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<{ bundleId: string; pending?: boolean } | null> {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+async function paceJitoRequests(): Promise<void> {
+  const waitMs = Math.max(0, JITO_REQUEST_MIN_INTERVAL_MS - (Date.now() - lastJitoRequestAt));
+  if (waitMs > 0) await sleep(waitMs);
+  lastJitoRequestAt = Date.now();
+}
+
+async function fetchJitoTipRecommendationLamports(): Promise<number | null> {
   try {
-    const encodedTxs = txs.map(tx => bs58.encode(tx.serialize()));
-    const res = await fetch(JITO_BUNDLE_URL, {
+    const res = await fetch("https://bundles.jito.wtf/api/v1/bundles/tip_floor");
+    if (!res.ok) return null;
+    const rows = await res.json() as Array<{
+      landed_tips_75th_percentile?: number;
+      landed_tips_95th_percentile?: number;
+      landed_tips_99th_percentile?: number;
+    }>;
+    const latest = rows?.[0];
+    if (!latest) return null;
+
+    // API returns SOL values; choose >=95th percentile for competitive landing.
+    const solTip = latest.landed_tips_95th_percentile || latest.landed_tips_99th_percentile || latest.landed_tips_75th_percentile;
+    if (!solTip || !Number.isFinite(solTip)) return null;
+
+    const lamports = Math.ceil(solTip * LAMPORTS_PER_SOL);
+    return Math.max(JITO_TIP_LAMPORTS, lamports);
+  } catch {
+    return null;
+  }
+}
+
+async function getInflightBundleStatus(bundleId: string): Promise<"Pending" | "Landed" | "Failed" | "Invalid" | null> {
+  try {
+    await paceJitoRequests();
+    const res = await fetch(JITO_INFLIGHT_STATUS_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: "sendBundle",
-        params: [encodedTxs],
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getInflightBundleStatuses",
+        params: [[bundleId]],
       }),
     });
-
     const data = await res.json() as any;
-    if (data.error) {
-      const errMsg = JSON.stringify(data.error);
-      // Retry on rate limit / congestion
-      if ((data.error.code === -32097 || errMsg.includes("rate limited") || errMsg.includes("congested")) && attempt < maxRetries - 1) {
-        const backoff = (attempt + 1) * 2000;
-        console.warn(`[JITO] Rate limited (attempt ${attempt + 1}/${maxRetries}) — retrying in ${backoff}ms`);
-        await sleep(backoff);
-        continue;
-      }
-      console.error(`[JITO] Bundle error: ${errMsg}`);
-      return null;
-    }
-
-    const bundleId = data.result;
-    console.log(`[JITO] Bundle submitted: ${bundleId}`);
-
-    // Poll for confirmation
-    for (let i = 0; i < 15; i++) {
-      await sleep(2000);
-      try {
-        const statusRes = await fetch(JITO_BUNDLE_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jsonrpc: "2.0", id: 1, method: "getBundleStatuses",
-            params: [[bundleId]],
-          }),
-        });
-        const statusData = await statusRes.json() as any;
-        const statuses = statusData?.result?.value || [];
-        if (statuses.length > 0) {
-          const s = statuses[0];
-          console.log(`[JITO] Status: ${s.confirmation_status || s.status}`);
-          if (s.confirmation_status === "confirmed" || s.confirmation_status === "finalized") return { bundleId };
-          if (s.err || s.confirmation_status === "failed") return null;
-        }
-      } catch { /* retry */ }
-    }
-
-    console.warn("[JITO] Status unknown after 30s — marking as submitted/pending");
-    return { bundleId, pending: true };
-  } catch (err) {
-    console.error("[JITO] Submission error:", err instanceof Error ? err.message : err);
-    if (attempt < maxRetries - 1) {
-      await sleep(2000);
-      continue;
-    }
+    const status = data?.result?.value?.[0]?.status;
+    return status ?? null;
+  } catch {
     return null;
   }
+}
+
+async function getFinalBundleStatus(bundleId: string): Promise<{ confirmationStatus?: string; err?: unknown } | null> {
+  try {
+    await paceJitoRequests();
+    const res = await fetch(JITO_FINAL_STATUS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getBundleStatuses",
+        params: [[bundleId]],
+      }),
+    });
+    const data = await res.json() as any;
+    return data?.result?.value?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<{ bundleId: string; pending?: boolean } | null> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const encodedTxs = txs.map(tx => Buffer.from(tx.serialize()).toString("base64"));
+      const tipRecommendation = await fetchJitoTipRecommendationLamports();
+      if (tipRecommendation && tipRecommendation > JITO_TIP_LAMPORTS) {
+        console.log(`[JITO] Tip floor suggests ${tipRecommendation} lamports (current tx tip remains ${JITO_TIP_LAMPORTS})`);
+      }
+
+      await paceJitoRequests();
+      const res = await fetch(JITO_BUNDLE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "sendBundle",
+          params: [encodedTxs, { encoding: "base64" }],
+        }),
+      });
+
+      const data = await res.json() as any;
+      if (data.error) {
+        const errMsg = JSON.stringify(data.error);
+        if ((data.error.code === -32097 || res.status === 429 || errMsg.includes("rate limited") || errMsg.includes("congested")) && attempt < maxRetries - 1) {
+          const backoff = Math.max(JITO_REQUEST_MIN_INTERVAL_MS, (attempt + 1) * 2500);
+          console.warn(`[JITO] Rate limited (attempt ${attempt + 1}/${maxRetries}) — retrying in ${backoff}ms`);
+          await sleep(backoff);
+          continue;
+        }
+        console.error(`[JITO] Bundle error: ${errMsg}`);
+        return null;
+      }
+
+      const bundleId = data.result;
+      console.log(`[JITO] Bundle submitted: ${bundleId}`);
+
+      for (let i = 0; i < 12; i++) {
+        await sleep(2500);
+
+        const inflightStatus = await getInflightBundleStatus(bundleId);
+        if (inflightStatus) {
+          console.log(`[JITO] Inflight: ${inflightStatus}`);
+          if (inflightStatus === "Landed") return { bundleId };
+          if (inflightStatus === "Failed" || inflightStatus === "Invalid") return null;
+        }
+
+        const finalStatus = await getFinalBundleStatus(bundleId);
+        if (finalStatus) {
+          console.log(`[JITO] Final status: ${finalStatus.confirmationStatus || "unknown"}`);
+          if (finalStatus.confirmationStatus === "confirmed" || finalStatus.confirmationStatus === "finalized") {
+            return { bundleId };
+          }
+          if (finalStatus.err) return null;
+        }
+      }
+
+      console.warn("[JITO] Status unknown after inflight/final polling — marking as submitted/pending");
+      return { bundleId, pending: true };
+    } catch (err) {
+      console.error("[JITO] Submission error:", err instanceof Error ? err.message : err);
+      if (attempt < maxRetries - 1) {
+        await sleep(Math.max(JITO_REQUEST_MIN_INTERVAL_MS, 2500));
+        continue;
+      }
+      return null;
+    }
   }
   return null;
 }
@@ -922,8 +1000,13 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
+    const effectiveJitoTipLamports = (await fetchJitoTipRecommendationLamports()) ?? JITO_TIP_LAMPORTS;
+    if (effectiveJitoTipLamports !== JITO_TIP_LAMPORTS) {
+      console.log(`[JITO] Using boosted tip: ${effectiveJitoTipLamports} lamports (base ${JITO_TIP_LAMPORTS})`);
+    }
+
     try {
-      tipTx = await buildJitoTipTx(blockhash);
+      tipTx = await buildJitoTipTx(blockhash, effectiveJitoTipLamports);
     } catch (err) {
       console.error("[XARB] Failed to build tip tx:", err instanceof Error ? err.message : err);
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
@@ -997,7 +1080,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
           opportunity_id: oppId,
           amount_usd: c.totalCost * c.contracts,
           realized_pnl: c.netProfit,
-          fees: JITO_TIP_LAMPORTS / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
           status: "filled",
           side_a_tx: bs58.encode(triadTx.signatures[0]),
           side_b_tx: bs58.encode(jupTx.signatures[0]),
@@ -1011,9 +1094,9 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
           opportunity_id: oppId,
           amount_usd: c.totalCost * c.contracts,
           realized_pnl: 0,
-          fees: JITO_TIP_LAMPORTS / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
           status: "submitted",
-          error_message: "Bundle submitted; pending confirmation after 30s",
+          error_message: "Bundle submitted; pending confirmation after inflight/final polling",
           side_a_tx: bs58.encode(triadTx.signatures[0]),
           side_b_tx: bs58.encode(jupTx.signatures[0]),
         });
