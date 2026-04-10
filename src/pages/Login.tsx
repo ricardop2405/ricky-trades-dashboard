@@ -1,31 +1,28 @@
 import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { lovable } from "@/integrations/lovable/index";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import { Shield } from "lucide-react";
 
 export default function Login() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const [isSignUp, setIsSignUp] = useState(false);
 
-  const handleAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleGoogleLogin = async () => {
     setLoading(true);
     try {
-      if (isSignUp) {
-        const { error } = await supabase.auth.signUp({ email, password });
-        if (error) throw error;
-        toast.success("Revisa tu email para confirmar tu cuenta");
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+      const result = await lovable.auth.signInWithOAuth("google", {
+        redirect_uri: window.location.origin,
+      });
+      if (result.error) {
+        throw result.error;
+      }
+      if (result.redirected) {
+        return;
       }
     } catch (err: any) {
-      toast.error(err.message);
+      toast.error(err.message || "Error al iniciar sesión");
     } finally {
       setLoading(false);
     }
@@ -40,36 +37,15 @@ export default function Login() {
           </div>
           <CardTitle className="text-xl font-mono">Ricky Trades</CardTitle>
           <p className="text-sm text-muted-foreground">
-            {isSignUp ? "Crea tu cuenta" : "Inicia sesión para acceder al dashboard"}
+            Inicia sesión para acceder al dashboard
           </p>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleAuth} className="space-y-4">
-            <Input
-              type="email"
-              placeholder="tu@email.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-            <Input
-              type="password"
-              placeholder="Contraseña"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              minLength={6}
-            />
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? "..." : isSignUp ? "Crear cuenta" : "Entrar"}
+          <div className="space-y-4">
+            <Button onClick={handleGoogleLogin} className="w-full" disabled={loading}>
+              {loading ? "..." : "Entrar con Google"}
             </Button>
-          </form>
-          <button
-            onClick={() => setIsSignUp(!isSignUp)}
-            className="mt-4 text-xs text-muted-foreground hover:text-foreground w-full text-center"
-          >
-            {isSignUp ? "¿Ya tienes cuenta? Inicia sesión" : "¿No tienes cuenta? Regístrate"}
-          </button>
+          </div>
         </CardContent>
       </Card>
     </div>
