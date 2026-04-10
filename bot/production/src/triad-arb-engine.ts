@@ -65,8 +65,10 @@ const JITO_FINAL_STATUS_URL = `${JITO_BLOCK_ENGINE}/api/v1/getBundleStatuses`;
 const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "1500");
 const TRADE_SIZE_USD = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
 const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
-const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "100000"); // 100k lamports default
-const JITO_REQUEST_MIN_INTERVAL_MS = parseInt(process.env.TRIAD_JITO_MIN_INTERVAL_MS || "1100"); // Jito default rate limit is 1 req/sec/IP/region
+const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "250000"); // 250k lamports default — competitive for April 2026
+const JITO_REQUEST_MIN_INTERVAL_MS = parseInt(process.env.TRIAD_JITO_MIN_INTERVAL_MS || "1100");
+const JITO_INVALID_RETRY_DELAY_MS = 1500; // Wait before re-polling on "Invalid" (propagation lag)
+const JITO_INVALID_MAX_RETRIES = 4; // Max times to retry-poll on consecutive Invalid before giving up
 const SAFETY_MIN_PROFIT_USD = 0.05; // profit-or-revert guardrail
 const DRY_RUN = process.env.TRIAD_DRY_RUN === "true";
 const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
@@ -1198,8 +1200,11 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
       let sawPendingLikeSignal = false;
       let invalidInflightCount = 0;
 
+      // Fix #1: Wait 1.5s after submission for blockhash propagation before first poll
+      await sleep(1500);
+
       for (let i = 0; i < 12; i++) {
-        await sleep(2000); // slightly faster polling
+        await sleep(2000);
 
         // Check inflight on primary region
         const inflightStatus = await getInflightBundleStatus(primaryBundleId);
@@ -1224,6 +1229,11 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
             if (i === 0) {
               console.warn("[JITO] Inflight returned Invalid immediately — propagation lag");
             }
+            // Fix #1: On Invalid, wait extra before next poll instead of burning cycles
+            if (invalidInflightCount <= JITO_INVALID_MAX_RETRIES) {
+              console.log(`[JITO] ⏳ Invalid status ${invalidInflightCount}/${JITO_INVALID_MAX_RETRIES} — waiting ${JITO_INVALID_RETRY_DELAY_MS}ms for propagation...`);
+              await sleep(JITO_INVALID_RETRY_DELAY_MS);
+            }
           }
         }
 
@@ -1238,7 +1248,18 @@ async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Prom
           if (finalStatus.err) return null;
         }
 
-        if (inflightStatus === "Invalid" && !finalStatus && invalidInflightCount >= 3 && !sawPendingLikeSignal) {
+        if (inflightStatus === "Invalid" && !finalStatus && invalidInflightCount >= JITO_INVALID_MAX_RETRIES && !sawPendingLikeSignal) {
+          // Check ALL bundle IDs from other regions before giving up
+          for (const altId of allBundleIds.slice(1)) {
+            const altInflight = await getInflightBundleStatus(altId);
+            if (altInflight === "Landed") return { bundleId: altId };
+            if (altInflight === "Pending") { sawPendingLikeSignal = true; break; }
+            const altFinal = await getFinalBundleStatus(altId);
+            if (altFinal?.confirmationStatus === "confirmed" || altFinal?.confirmationStatus === "finalized") {
+              return { bundleId: altId };
+            }
+          }
+          if (sawPendingLikeSignal) continue;
           console.warn("[JITO] Bundle not visible in status APIs — keeping as pending");
           return { bundleId: primaryBundleId, pending: true };
         }
