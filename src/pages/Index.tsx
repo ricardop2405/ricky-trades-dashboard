@@ -10,6 +10,7 @@ import { WalletTracker } from "@/components/WalletTracker";
 import { TradeDetailDrawer } from "@/components/TradeDetailDrawer";
 import { useLiveData } from "@/hooks/useLiveData";
 import { Badge } from "@/components/ui/badge";
+import { motion } from "framer-motion";
 import type { WhaleTrade, BundleResult } from "@/lib/mockData";
 
 const Index = () => {
@@ -19,7 +20,6 @@ const Index = () => {
 
   const { trades, bundles, useRealData, tokenStats, walletStats, volumeBuckets } = useLiveData(isRunning);
 
-  // Drawer state
   const [selectedTrade, setSelectedTrade] = useState<WhaleTrade | null>(null);
   const [selectedBundle, setSelectedBundle] = useState<BundleResult | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -40,23 +40,27 @@ const Index = () => {
     <div className="min-h-screen flex flex-col bg-background">
       <DashboardHeader />
 
-      <main className="flex-1 p-3 space-y-3 max-w-[1600px] mx-auto w-full">
+      <main className="flex-1 p-4 space-y-3 max-w-[1600px] mx-auto w-full">
         {/* Stats row */}
-        <div className="flex items-center gap-3">
+        <motion.div
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex items-center gap-3"
+        >
           <div className="flex-1 min-w-0">
             <StatsBar bundles={bundles} trades={trades} />
           </div>
           <Badge
             variant="outline"
-            className={`font-mono text-[10px] shrink-0 ${
+            className={`font-mono text-[10px] shrink-0 rounded-lg px-2.5 py-1 ${
               useRealData
-                ? "border-success/40 text-success bg-success/5"
-                : "border-warning/40 text-warning bg-warning/5"
+                ? "border-success/30 text-success bg-success/[0.06]"
+                : "border-warning/30 text-warning bg-warning/[0.06]"
             }`}
           >
-            {useRealData ? "● LIVE DATA" : "● SIMULATED"}
+            {useRealData ? "● LIVE" : "● SIM"}
           </Badge>
-        </div>
+        </motion.div>
 
         {/* Main grid */}
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3" style={{ minHeight: "calc(100vh - 220px)" }}>
