@@ -1584,24 +1584,54 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    if (atomicBundleResult.confirmed) {
+    const bundleConfirmed = !!atomicBundleResult.confirmed;
+    const bundlePending = !bundleConfirmed;
+
+    if (bundleConfirmed) {
       console.log(`[XARB] ✅ Atomic bundle CONFIRMED on-chain: ${atomicBundleResult.bundleId}`);
     } else {
-      console.warn(`[XARB] ⏳ Atomic bundle submitted but NOT confirmed (pending): ${atomicBundleResult.bundleId}`);
+      console.warn(`[XARB] ⏳ Atomic bundle submitted but NOT confirmed by Jito (pending): ${atomicBundleResult.bundleId}`);
     }
     console.log(`[XARB] Triad tx: ${triadSig}`);
     console.log(`[XARB] Jupiter tx: ${jupSig}`);
 
-    // Verify both legs (wait 5s for on-chain confirmation)
-    console.log(`[XARB] ⏳ Waiting 5s to verify both legs...`);
-    await sleep(5000);
+    // ── On-chain verification ──
+    // For pending bundles, we MUST verify on-chain before claiming success.
+    // Wait longer for pending bundles to give them time to land (or not).
+    const verifyWaitMs = bundlePending ? 12_000 : 5_000;
+    console.log(`[XARB] ⏳ Waiting ${verifyWaitMs / 1000}s to verify on-chain...`);
+    await sleep(verifyWaitMs);
+
+    // Check Triad signature on-chain first
+    const triadSigStatus = await connection.getSignatureStatus(triadSig);
+    const triadOnChain = !!(triadSigStatus?.value?.confirmationStatus === "confirmed" || triadSigStatus?.value?.confirmationStatus === "finalized") && !triadSigStatus?.value?.err;
 
     const jupConfirmed = await isJupiterTxConfirmed(jupTx);
+
+    // If bundle was "pending" and NEITHER sig is on-chain, it never landed
+    if (bundlePending && !triadOnChain && !jupConfirmed) {
+      console.warn(`[XARB] ❌ Bundle NEVER LANDED — neither Triad nor Jupiter sig found on-chain after ${verifyWaitMs / 1000}s`);
+      console.warn(`[XARB]    Triad sig: ${triadSig} — NOT on-chain`);
+      console.warn(`[XARB]    Jupiter sig: ${jupSig} — NOT on-chain`);
+      console.warn(`[XARB]    Zero capital at risk (atomic bundle reverted).`);
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId, amount_usd: 0, realized_pnl: 0, fees: 0,
+          status: "failed",
+          error_message: `Bundle pending/Invalid — never landed on-chain. Sigs: ${triadSig} / ${jupSig}`,
+        });
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      }
+      return;
+    }
+
+    // Also check Triad order PDA as secondary signal
     const triadStillOpen = await isTriadOrderStillOpen(c.triadMarket.id, triadDirection2);
-    const triadFilled = !triadStillOpen;
+    const triadFilled = triadOnChain || !triadStillOpen;
 
     if (triadFilled && jupConfirmed) {
-      console.log(`[XARB] ✅ BOTH LEGS CONFIRMED! Guaranteed profit: $${c.netProfit.toFixed(4)}`);
+      console.log(`[XARB] ✅ BOTH LEGS CONFIRMED ON-CHAIN! Guaranteed profit: $${c.netProfit.toFixed(4)}`);
       console.log(`[XARB]    ${c.contracts}× ($${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)}) → $1.00 payout either side`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
@@ -1616,9 +1646,11 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
     } else {
-      // Bundle submitted/landed but awaiting keeper confirmation
-      console.warn(`[XARB] ⚠️ Atomic bundle ${atomicBundleResult.confirmed ? "CONFIRMED" : "PENDING"} — Triad: ${triadFilled ? "FILLED" : "pending"} | Jupiter: ${jupConfirmed ? "CONFIRMED" : "awaiting keeper"}`);
-      console.warn(`[XARB]    SUM-TO-ONE holds: once both settle, profit is locked in.`);
+      // At least one sig is on-chain but maybe Jupiter is awaiting keeper
+      console.warn(`[XARB] ⚠️ Partial confirmation — Triad: ${triadFilled ? "FILLED (on-chain)" : "NOT on-chain"} | Jupiter: ${jupConfirmed ? "CONFIRMED" : "awaiting keeper"}`);
+      if (triadOnChain && !jupConfirmed) {
+        console.warn(`[XARB]    Triad IS on-chain — Jupiter keeper will fill. Profit locked.`);
+      }
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
@@ -1626,7 +1658,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
           realized_pnl: c.netProfit,
           fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
           status: triadFilled && jupConfirmed ? "filled" : "pending_jup_fill",
-          error_message: `Atomic bundle. Triad: ${triadFilled ? "filled" : "pending"}. Jupiter: ${jupConfirmed ? "confirmed" : "awaiting keeper"}. Sigs: ${triadSig} / ${jupSig}`,
+          error_message: `Triad: ${triadOnChain ? "on-chain" : "not on-chain"}. Jupiter: ${jupConfirmed ? "confirmed" : "awaiting keeper"}. Sigs: ${triadSig} / ${jupSig}`,
           side_a_tx: triadSig,
           side_b_tx: jupSig,
         });
