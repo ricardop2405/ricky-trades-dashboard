@@ -793,8 +793,11 @@ async function createTriadBuyInstruction(
     // amount = USDC amount in raw (6 decimals)
     // price = price per share in raw (6 decimals) — must be < 1_000_000 (< $1.00)
     const amountRaw = BigInt(Math.floor(amountUsd * 10 ** BASE_DECIMALS));
-    // Use market price, clamped to max 999_999 (Triad rejects >= 1_000_000)
-    const priceRaw = BigInt(Math.min(Math.floor(pricePerShare * 10 ** BASE_DECIMALS), 999_999));
+    // Price AGGRESSIVELY at $0.99 to guarantee immediate taker fill.
+    // We're paying costA per contract (checked by sum-to-one guard), but pricing
+    // the order at max ensures we sweep all asks up to our price — preventing resting orders.
+    // The actual fill price will be at the best ask, not at $0.99.
+    const priceRaw = BigInt(999_999); // $0.999999 — max allowed by Triad
     const data = Buffer.concat([PLACE_BID_ORDER_DISC, serializePlaceBidOrderArgs(amountRaw, priceRaw, marketId, direction)]);
 
     ixs.push(new TransactionInstruction({
@@ -1441,29 +1444,48 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
         });
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
-    } else if (!triadFilled) {
-      // Triad order is resting — auto-cancel to prevent unhedged exposure
-      console.error(`[XARB] ⚠️ Triad order RESTING (not filled) — auto-canceling...`);
-      const cancelOk = await cancelTriadOrder(c.triadMarket.id, triadDirection2);
-      const errorMsg = `Triad order unfilled (resting) — ${cancelOk ? "auto-canceled" : "CANCEL FAILED"}. ` +
-        (jupConfirmed ? `Jupiter filled ($${jupDepositUsd.toFixed(2)} exposed).` : "Jupiter also not confirmed.");
+    } else if (!triadFilled && jupConfirmed) {
+      // CRITICAL: Jupiter filled but Triad is resting — DO NOT cancel Triad!
+      // Cancelling would leave Jupiter unhedged. Keep the resting order as the hedge.
+      // It may still fill before market close.
+      console.warn(`[XARB] ⚠️ Triad order RESTING but Jupiter CONFIRMED — keeping Triad order as hedge`);
+      console.warn(`[XARB]    DO NOT cancel — resting order may fill before market close`);
+      console.warn(`[XARB]    If it doesn't fill, both positions expire and net to ~$0`);
 
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
-          amount_usd: jupConfirmed ? jupDepositUsd : 0,
+          amount_usd: jupDepositUsd,
           realized_pnl: 0,
           fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: "partial_unwind",
-          error_message: errorMsg,
+          status: "pending_triad_fill",
+          error_message: `Jupiter filled. Triad order resting — keeping as hedge. Will resolve at market close.`,
           side_a_tx: triadSig,
           side_b_tx: jupSig,
         });
-        await supabase.from("arb_opportunities").update({ status: "partial_unwind" }).eq("id", oppId);
+        await supabase.from("arb_opportunities").update({ status: "pending_triad_fill" }).eq("id", oppId);
+      }
+    } else if (!triadFilled && !jupConfirmed) {
+      // Neither filled — safe to cancel Triad (nothing at risk)
+      console.log(`[XARB] ℹ️ Neither leg confirmed — canceling Triad order (no exposure)`);
+      const cancelOk = await cancelTriadOrder(c.triadMarket.id, triadDirection2);
+
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: 0,
+          realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "failed",
+          error_message: `Neither leg confirmed. Triad ${cancelOk ? "auto-canceled" : "CANCEL FAILED"}.`,
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
 
       if (!cancelOk) {
-        console.error(`[XARB] 🚨 CRITICAL: Could not cancel Triad order! Manual cancel needed.`);
+        console.error(`[XARB] 🚨 Could not cancel Triad order — manual cancel needed.`);
       }
     } else {
       // Triad filled but Jupiter not confirmed — wait for keeper
