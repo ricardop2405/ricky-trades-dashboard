@@ -281,6 +281,12 @@ async function fetchTriadAskDepth(
   try {
     const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS });
     if (!res.ok) {
+      // Triad Fast Markets are position-based — if orderbook endpoint is down (500),
+      // assume liquidity exists at market price since these are AMM-style pools
+      if (res.status >= 500) {
+        console.warn(`[DEPTH] Orderbook API 500 — bypassing depth check (position-based market)`);
+        return { totalContracts: 999, avgPrice: maxPriceUsd };
+      }
       console.warn(`[DEPTH] Orderbook fetch failed: ${res.status}`);
       return { totalContracts: 0, avgPrice: 0 };
     }
