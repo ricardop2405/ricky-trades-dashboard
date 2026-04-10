@@ -466,7 +466,7 @@ async function main() {
     }
 
     // Verify Triad API access
-    const testRes = await fetch(`${TRIAD_API}/points/levels`);
+    const testRes = await fetch(`${TRIAD_API}/points/levels`, { headers: TRIAD_HEADERS });
     if (!testRes.ok) {
       console.error(`[TRIAD] ❌ Cannot reach Triad API: ${testRes.status}`);
       process.exit(1);
