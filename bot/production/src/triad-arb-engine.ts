@@ -417,7 +417,7 @@ async function discoverPools(): Promise<void> {
   const tryIds = Array.from({ length: 20 }, (_, i) => String(160 + i));
   const results = await Promise.allSettled(
     tryIds.map(async (id) => {
-      const res = await fetch(`${TRIAD_API}/market/${id}?lang=en-US`);
+      const res = await fetch(`${TRIAD_API}/market/${id}?lang=en-US`, { headers: TRIAD_HEADERS });
       if (!res.ok) return null;
       const data: TriadPool = await res.json();
       if (data.markets?.some(m => m.isFast)) {
