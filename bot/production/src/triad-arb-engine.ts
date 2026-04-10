@@ -1189,7 +1189,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   executionsInFlight++;
   bundleInFlight.add(marketKey);
   try {
-    const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
+    const triadDirection2 = c.legA === "triad_hype" ? "hype" as const : "flop" as const;
     const jupMarketId = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
     const jupDepositUsd = c.costB * c.contracts;
 
