@@ -1181,7 +1181,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   }
 
   if (DRY_RUN) {
-    console.log(`[XARB] 🏜️ DRY RUN — logging opportunity (${ALLOW_UNSAFE_TRIAD_LIVE ? "TRIAD_DRY_RUN enabled" : "safe mode blocks unsafe live Triad execution"})`);
+    console.log(`[XARB] 🏜️ DRY RUN — logging opportunity`);
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
 
     await supabase.from("arb_opportunities").insert({
@@ -1192,9 +1192,28 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       price_a: c.costA,
       price_b: c.costB,
       spread: c.profitPerContract,
-      status: ALLOW_UNSAFE_TRIAD_LIVE ? "dry_run" : "blocked_unsafe_live",
+      status: "dry_run",
     });
 
+    return;
+  }
+
+  // Block live execution if atomic program is not deployed
+  if (!ATOMIC_ARB_PROGRAM_ID) {
+    console.log(`[XARB] ⛔ BLOCKED: ATOMIC_ARB_PROGRAM_ID not set. Deploy the program first.`);
+    console.log(`[XARB]    Without the atomic program, Triad limit orders can create unhedged positions.`);
+    marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+
+    await supabase.from("arb_opportunities").insert({
+      market_a_id: c.triadMarket.id,
+      market_b_id: c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId,
+      side_a: c.legA,
+      side_b: c.legB,
+      price_a: c.costA,
+      price_b: c.costB,
+      spread: c.profitPerContract,
+      status: "blocked_no_program",
+    });
     return;
   }
 
