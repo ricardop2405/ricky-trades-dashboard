@@ -75,7 +75,9 @@ const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
 const JUP_EXECUTION_BUFFER_USD = parseFloat(process.env.TRIAD_JUP_EXECUTION_BUFFER_USD || "0.01");
 const EXECUTION_BUNDLE_COUNT = 2; // Triad leg + Jupiter leg
 const MIN_JUPITER_DEPOSIT_USD = parseFloat(process.env.TRIAD_MIN_JUP_DEPOSIT_USD || "1.0");
-const MIN_SOL_BALANCE = parseFloat(process.env.TRIAD_MIN_SOL_BALANCE || "0.2");
+const MIN_SOL_BALANCE = parseFloat(process.env.TRIAD_MIN_SOL_BALANCE || "0.05");
+const MIN_MARKET_SECONDS_REMAINING = parseInt(process.env.TRIAD_MIN_MARKET_SECONDS_REMAINING || "35");
+const PREHEDGE_REQUOTE_ATTEMPTS = parseInt(process.env.TRIAD_PREHEDGE_REQUOTE_ATTEMPTS || "3");
 
 // ── SUM-TO-ONE HARD CEILING ──
 // CRITICAL SAFETY: costA + costB must be STRICTLY below this per contract.
@@ -141,6 +143,7 @@ console.log(`[XARB] Max concurrent: ${MAX_CONCURRENT} positions`);
 console.log(`[XARB] Proxy:        ${PROXY_URL && !PROXY_URL.includes("your-proxy") ? "YES" : "NONE"}`);
 console.log(`[XARB] Jito regions: ${JITO_REGIONS.join(", ")} (multi-region parallel)`);
 console.log(`[XARB] Strategy:     costA + costB < $${MAX_COMBINED_COST_PER_CONTRACT} → payout $1.00 → guaranteed profit`);
+console.log(`[XARB] Late-entry cutoff: ${MIN_MARKET_SECONDS_REMAINING}s remaining`);
 console.log(`[XARB] Safety:       SUM-TO-ONE enforced at scan, pre-exec, and re-quote`);
 console.log(`[XARB]               Triad: aggressive taker pricing + depth check`);
 console.log(`[XARB]               Jupiter: keeper-filled at quoted price`);
@@ -219,6 +222,40 @@ function estimateExecutionFeesUsd(tipLamports: number, bundleCount = EXECUTION_B
 
 function estimateRequiredSolBalance(tipLamports: number, bundleCount = EXECUTION_BUNDLE_COUNT): number {
   return Math.max(MIN_SOL_BALANCE, ((tipLamports * bundleCount) / LAMPORTS_PER_SOL) + 0.02);
+}
+
+function isSafeCombinedCost(totalCost: number): boolean {
+  return Number.isFinite(totalCost) && totalCost > 0 && totalCost <= MAX_COMBINED_COST_PER_CONTRACT && totalCost < 1;
+}
+
+async function stabilizeExecutableCandidate(
+  candidate: MergeArbCandidate,
+  options: { fixedContracts?: number; tipLamports?: number; attempts?: number } = {}
+): Promise<MergeArbCandidate | null> {
+  const attempts = Math.max(1, options.attempts ?? PREHEDGE_REQUOTE_ATTEMPTS);
+  let current: MergeArbCandidate | null = candidate;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (!current) return null;
+    const refreshed = await refreshJupCandidate(current, {
+      fixedContracts: options.fixedContracts,
+      tipLamports: options.tipLamports,
+    });
+    if (!refreshed) return null;
+
+    if (!isSafeCombinedCost(refreshed.totalCost)) {
+      console.log(`[XARB] Unsafe combined cost after refresh: $${refreshed.totalCost.toFixed(4)} — aborting`);
+      return null;
+    }
+
+    const changed = Math.abs(refreshed.costB - current.costB) >= 0.005 || refreshed.contracts !== current.contracts;
+    current = refreshed;
+
+    if (!changed) return current;
+  }
+
+  console.log(`[XARB] Hedge price kept moving during preflight — aborting before entry`);
+  return null;
 }
 
 // ── Triad API ───────────────────────────────────────────
@@ -1237,9 +1274,9 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     return;
   }
 
-  // Require minimum 60s remaining to avoid expired-market bundles
-  if (c.remaining < 60) {
-    console.log(`[XARB] Only ${Math.round(c.remaining)}s remaining — too late, skipping`);
+  // Require a configurable late-entry buffer to avoid expired-market bundles
+  if (c.remaining < MIN_MARKET_SECONDS_REMAINING) {
+    console.log(`[XARB] Only ${Math.round(c.remaining)}s remaining — below ${MIN_MARKET_SECONDS_REMAINING}s cutoff, skipping`);
     return;
   }
 
@@ -1249,7 +1286,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     return;
   }
 
-  const liveCandidate = await refreshJupCandidate(c);
+  const liveCandidate = await stabilizeExecutableCandidate(c);
   if (!liveCandidate) {
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
     return;
@@ -1282,14 +1319,10 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   // ── SUM-TO-ONE HARD GUARD ──
   // This is the CORE protection: if costA + costB < $1, profit is GUARANTEED
   // regardless of outcome. One side always pays $1 per contract.
-  if (c.totalCost > MAX_COMBINED_COST_PER_CONTRACT) {
+  if (!isSafeCombinedCost(c.totalCost)) {
     console.log(
-      `[XARB] ❌ SUM-TO-ONE VIOLATION: $${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)} > $${MAX_COMBINED_COST_PER_CONTRACT} — BLOCKED`
+      `[XARB] ❌ SUM-TO-ONE VIOLATION: $${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${c.totalCost.toFixed(4)} exceeds safe payout bounds — BLOCKED`
     );
-    return;
-  }
-  if (c.totalCost >= 1) {
-    console.log(`[XARB] ❌ SAFETY: totalCost $${c.totalCost.toFixed(4)} >= $1 — NO PROFIT. Aborting.`);
     return;
   }
   if (c.profitPerContract < SAFETY_MIN_PROFIT_USD / c.contracts) {
@@ -1328,7 +1361,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   try {
     const triadDirection2 = c.legA === "triad_hype" ? "hype" as const : "flop" as const;
     const effectiveJitoTipLamports = await fetchJitoTipRecommendationLamports().then(tip => tip ?? JITO_TIP_LAMPORTS);
-    const executionCandidate = await refreshJupCandidate(c, { tipLamports: effectiveJitoTipLamports });
+    const executionCandidate = await stabilizeExecutableCandidate(c, { tipLamports: effectiveJitoTipLamports });
     if (!executionCandidate) {
       console.log(`[XARB] Live executable price + two-tip fee no longer support profitable entry — aborting before Triad`);
       marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
@@ -1372,7 +1405,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // ── FINAL SUM-TO-ONE RE-CHECK ──
     const finalTotalCost = c.costA + c.costB;
-    if (finalTotalCost > MAX_COMBINED_COST_PER_CONTRACT || finalTotalCost >= 1) {
+    if (!isSafeCombinedCost(finalTotalCost)) {
       console.error(
         `[XARB] ❌ FINAL SUM-TO-ONE FAILED: $${c.costA.toFixed(4)} + $${c.costB.toFixed(4)} = $${finalTotalCost.toFixed(4)} — ABORTING`
       );
@@ -1511,12 +1544,12 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     // ════════════════════════════════════════════════════════
     console.log(`[XARB] ── STEP 2: Triad confirmed → sending Jupiter order...`);
 
-    const freshCandidate = await refreshJupCandidate(c, {
+    const freshCandidate = await stabilizeExecutableCandidate(c, {
       fixedContracts: c.contracts,
       tipLamports: effectiveJitoTipLamports,
     });
     if (!freshCandidate) {
-      console.error(`[XARB] 🚨 Jupiter no longer profitable for the filled Triad size — refusing losing hedge`);
+      console.error(`[XARB] 🚨 Jupiter no longer executable at a guaranteed-profit price for the filled Triad size — refusing entry into an over-payout hedge`);
       console.error(`[XARB]    Triad position exists UNHEDGED. Manual action needed. Sig: ${triadSig}`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
