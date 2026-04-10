@@ -1549,8 +1549,12 @@ async function main() {
       console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry.`);
     }
 
-    if (!ALLOW_UNSAFE_TRIAD_LIVE) {
-      console.log("[XARB] Safe mode active: scanning/logging only. Live Triad execution blocked because true always-hedged fills are not guaranteed by the current Triad order path.");
+    if (!ATOMIC_ARB_PROGRAM_ID) {
+      console.log("[XARB] ⚠️ ATOMIC_ARB_PROGRAM_ID not set — live execution blocked. Deploy the program first.");
+      console.log("[XARB]    Scanning/logging only mode until program is deployed.");
+    } else {
+      console.log(`[XARB] ✅ Atomic program active: ${ATOMIC_ARB_PROGRAM_ID.toBase58()}`);
+      console.log("[XARB]    Both legs execute in ONE tx — fill or revert, zero risk.");
     }
 
     console.log("[XARB] Starting atomic merge-arb scan...\n");
