@@ -533,37 +533,63 @@ async function createJupBuyOrder(
 
 // ── Triad Order Creation (raw instructions, no SDK) ─────
 // Program: TRDwq3BN4mP3m9KsuNUWSN6QDff93VKGSwE95Jbr9Ss
-// Instructions built from IDL discriminators + Borsh serialization
+// Uses place_bid_order from official IDL (v4.x)
 const TRIAD_PROGRAM_ID = new PublicKey("TRDwq3BN4mP3m9KsuNUWSN6QDff93VKGSwE95Jbr9Ss");
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
-// IDL discriminators (first 8 bytes of sha256("global:<instruction_name>"))
-const CREATE_USER_POSITION_DISC = Buffer.from([6, 137, 127, 227, 135, 241, 14, 109]);
-const OPEN_POSITION_DISC = Buffer.from([135, 128, 47, 77, 15, 152, 240, 49]);
+// IDL discriminator: sha256("global:place_bid_order")[0..8]
+const PLACE_BID_ORDER_DISC = Buffer.from([154, 143, 199, 233, 97, 23, 223, 255]);
+const BASE_DECIMALS = 6;
 
-function serializeOpenPositionArgs(amount: bigint, isLong: boolean): Buffer {
-  // Borsh: u64 (8 bytes LE) + bool (1 byte)
-  const buf = Buffer.alloc(9);
+// PlaceBidOrderArgs: { amount: u64, price: u64, market_id: u64, order_direction: enum(Hype=0,Flop=1) }
+function serializePlaceBidOrderArgs(amount: bigint, price: bigint, marketId: bigint, orderDirection: "hype" | "flop"): Buffer {
+  // Borsh: u64 (8 LE) + u64 (8 LE) + u64 (8 LE) + enum (1 byte)
+  const buf = Buffer.alloc(25);
   buf.writeBigUInt64LE(amount, 0);
-  buf.writeUInt8(isLong ? 1 : 0, 8);
+  buf.writeBigUInt64LE(price, 8);
+  buf.writeBigUInt64LE(marketId, 16);
+  buf.writeUInt8(orderDirection === "hype" ? 0 : 1, 24);
   return buf;
 }
 
-function deriveTriadPDAs(marketAddress: PublicKey, wallet: PublicKey) {
-  const [vault] = PublicKey.findProgramAddressSync(
-    [Buffer.from("vault"), marketAddress.toBuffer()],
+// PDA derivations from @triadxyz/triad-protocol SDK
+function getMarketPDA(marketId: bigint): PublicKey {
+  const BN = require("bn.js");
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("market"), new BN(marketId.toString()).toArrayLike(Buffer, "le", 8)],
     TRIAD_PROGRAM_ID,
-  );
-  const [userPosition] = PublicKey.findProgramAddressSync(
-    [Buffer.from("user_position"), wallet.toBuffer(), marketAddress.toBuffer()],
+  )[0];
+}
+
+function getOrderBookPDA(marketId: bigint): PublicKey {
+  const BN = require("bn.js");
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("order_book"), new BN(marketId.toString()).toArrayLike(Buffer, "le", 8)],
     TRIAD_PROGRAM_ID,
-  );
-  const [vaultTokenAccount] = PublicKey.findProgramAddressSync(
-    [Buffer.from("vault_token_account"), vault.toBuffer()],
+  )[0];
+}
+
+function getOrderPDA(authority: PublicKey, marketId: bigint, orderDirection: "hype" | "flop"): PublicKey {
+  const BN = require("bn.js");
+  const enumDirection = orderDirection === "hype" ? 0 : 1;
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("order"),
+      authority.toBuffer(),
+      new BN(marketId.toString()).toArrayLike(Buffer, "le", 8),
+      new BN(enumDirection).toArrayLike(Buffer, "le", 1),
+    ],
     TRIAD_PROGRAM_ID,
-  );
-  return { vault, userPosition, vaultTokenAccount };
+  )[0];
+}
+
+function getATA(owner: PublicKey, mint: PublicKey, tokenProgram: PublicKey = TOKEN_PROGRAM_ID): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), tokenProgram.toBuffer(), mint.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+  )[0];
 }
 
 async function createTriadBuyInstruction(
@@ -572,51 +598,44 @@ async function createTriadBuyInstruction(
   amountUsd: number,
 ): Promise<TransactionInstruction[] | null> {
   try {
-    const { getAssociatedTokenAddress } = await import("@solana/spl-token");
-
-    const tickerPDA = new PublicKey(marketAddress);
-    const { vault, userPosition, vaultTokenAccount } = deriveTriadPDAs(tickerPDA, keypair.publicKey);
-    const userTokenAccount = await getAssociatedTokenAddress(USDC_MINT, keypair.publicKey);
+    // marketAddress is actually the numeric market ID string (e.g. "120117297284885")
+    const marketId = BigInt(marketAddress);
+    const marketPDA = getMarketPDA(marketId);
+    const orderBookPDA = getOrderBookPDA(marketId);
+    const orderPDA = getOrderPDA(keypair.publicKey, marketId, direction);
+    const userAta = getATA(keypair.publicKey, USDC_MINT);
+    const marketAta = getATA(marketPDA, USDC_MINT);
 
     const ixs: TransactionInstruction[] = [];
 
-    // Check if user position exists on-chain
-    const acctInfo = await connection.getAccountInfo(userPosition);
-    if (!acctInfo) {
-      console.log(`[TRIAD-ORDER] Creating user position for market ${marketAddress}`);
-      ixs.push(new TransactionInstruction({
-        programId: TRIAD_PROGRAM_ID,
-        keys: [
-          { pubkey: keypair.publicKey, isSigner: true, isWritable: true },  // signer
-          { pubkey: tickerPDA, isSigner: false, isWritable: true },          // ticker
-          { pubkey: userPosition, isSigner: false, isWritable: true },       // user_position (PDA)
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
-        ],
-        data: CREATE_USER_POSITION_DISC,
-      }));
-    }
-
-    // Build open_position instruction
-    const amountRaw = BigInt(Math.floor(amountUsd * 1_000_000));
-    const isLong = direction === "hype";
-    const data = Buffer.concat([OPEN_POSITION_DISC, serializeOpenPositionArgs(amountRaw, isLong)]);
+    // Build place_bid_order instruction
+    // amount = USDC amount in raw (6 decimals)
+    // price = price per share in raw (6 decimals) — we use the full cost since we're taking the best ask
+    const amountRaw = BigInt(Math.floor(amountUsd * 10 ** BASE_DECIMALS));
+    // Price = 1 USDC per share (we want to buy at market, so set ceiling price)
+    const priceRaw = BigInt(1 * 10 ** BASE_DECIMALS);
+    const data = Buffer.concat([PLACE_BID_ORDER_DISC, serializePlaceBidOrderArgs(amountRaw, priceRaw, marketId, direction)]);
 
     ixs.push(new TransactionInstruction({
       programId: TRIAD_PROGRAM_ID,
       keys: [
-        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },    // signer
-        { pubkey: tickerPDA, isSigner: false, isWritable: true },            // ticker
-        { pubkey: vault, isSigner: false, isWritable: true },                // vault
-        { pubkey: userPosition, isSigner: false, isWritable: true },         // user_position
-        { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },    // vault_token_account (PDA)
-        { pubkey: userTokenAccount, isSigner: false, isWritable: true },     // user_token_account
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },     // signer
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },     // payer
+        { pubkey: marketPDA, isSigner: false, isWritable: true },            // market
+        { pubkey: orderBookPDA, isSigner: false, isWritable: true },         // order_book
+        { pubkey: orderPDA, isSigner: false, isWritable: true },             // order
+        { pubkey: USDC_MINT, isSigner: false, isWritable: true },            // mint (USDC)
+        { pubkey: userAta, isSigner: false, isWritable: true },              // user_ata
+        { pubkey: marketAta, isSigner: false, isWritable: true },            // market_ata
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },    // token_program
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // associated_token_program
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
       ],
       data,
     }));
 
-    console.log(`[TRIAD-ORDER] Built ${ixs.length} ixs for ${direction} on ${marketAddress} ($${amountUsd.toFixed(2)})`);
+    console.log(`[TRIAD-ORDER] Built place_bid_order for ${direction} on market ${marketAddress} ($${amountUsd.toFixed(2)})`);
+    console.log(`[TRIAD-ORDER]   market=${marketPDA.toBase58()} orderBook=${orderBookPDA.toBase58()} order=${orderPDA.toBase58()}`);
     return ixs;
   } catch (err) {
     console.error("[TRIAD-ORDER] Error building instruction:", err instanceof Error ? err.stack || err.message : err);
@@ -987,7 +1006,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // Build both legs in parallel
     const [triadIxs, jupTxBase64] = await Promise.all([
-      createTriadBuyInstruction(c.triadMarket.marketAddress, triadDirection, c.costA * c.contracts),
+      createTriadBuyInstruction(c.triadMarket.id, triadDirection, c.costA * c.contracts),
       createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd),
     ]);
 
