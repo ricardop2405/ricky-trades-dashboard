@@ -522,6 +522,56 @@ async function refreshJupCandidate(c: MergeArbCandidate): Promise<MergeArbCandid
   };
 }
 
+// Emergency hedge refresh: when Triad is already filled, accept ANY Jupiter price
+// up to maxAcceptableLoss. An unhedged position is worse than a small loss on the hedge.
+const MAX_EMERGENCY_HEDGE_LOSS_USD = 0.50; // max acceptable loss to complete the hedge
+async function emergencyRefreshJupCandidate(c: MergeArbCandidate): Promise<MergeArbCandidate | null> {
+  const latestEvents = await fetchJupiterEvents(c.coin);
+  const targetMarketId = getJupSideForLeg(c.jupEvent, c.legB).marketId;
+  const latestEvent = latestEvents.find((event) => getJupSideForLeg(event, c.legB).marketId === targetMarketId);
+
+  if (!latestEvent) {
+    console.error(`[XARB] 🚨 EMERGENCY: Jupiter market ${targetMarketId} no longer available — cannot hedge!`);
+    return null;
+  }
+
+  const latestSide = getJupSideForLeg(latestEvent, c.legB);
+  const bufferedCostB = latestSide.buyYes + JUP_EXECUTION_BUFFER_USD;
+  const totalCost = c.costA + bufferedCostB;
+  const profitPerContract = 1 - totalCost;
+  const contracts = Math.max(1, Math.floor(TRADE_SIZE_USD / Math.max(totalCost, 0.01)));
+  const txFee = JITO_TIP_LAMPORTS / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD;
+  const netProfit = (profitPerContract * contracts) - txFee;
+  const remaining = Math.max(0, latestEvent.closeTime - Date.now() / 1000);
+
+  // Accept even negative profit up to MAX_EMERGENCY_HEDGE_LOSS_USD
+  if (totalCost >= 1 + MAX_EMERGENCY_HEDGE_LOSS_USD / contracts) {
+    console.error(
+      `[XARB] 🚨 EMERGENCY: Jupiter price too far gone. total=$${totalCost.toFixed(4)} ` +
+      `loss would exceed $${MAX_EMERGENCY_HEDGE_LOSS_USD} — cannot hedge safely`
+    );
+    return null;
+  }
+
+  if (netProfit < 0) {
+    console.warn(
+      `[XARB] ⚠️ EMERGENCY HEDGE: accepting loss. total=$${totalCost.toFixed(4)} ` +
+      `net=$${netProfit.toFixed(4)} — better than unhedged exposure`
+    );
+  }
+
+  return {
+    ...c,
+    costB: bufferedCostB,
+    totalCost,
+    profitPerContract,
+    netProfit,
+    contracts,
+    remaining,
+    jupEvent: latestEvent,
+  };
+}
+
 // ── Cross-Platform Merge Arb Detection ──────────────────
 // Core formula: buy YES_A on platform A + buy NO_B on platform B
 // If costA + costB < $1 → one of them pays $1, guaranteed profit
