@@ -490,6 +490,12 @@ async function createJupBuyOrder(
   depositUsd: number,
 ): Promise<string | null> {
   try {
+    // Jupiter requires minimum $1 deposit
+    if (depositUsd < 1.0) {
+      console.log(`[JUP-ORDER] Deposit $${depositUsd.toFixed(2)} below $1 minimum — skipping`);
+      return null;
+    }
+
     const body = {
       ownerPubkey: WALLET,
       marketId,
