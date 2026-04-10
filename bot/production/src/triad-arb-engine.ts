@@ -49,7 +49,7 @@ const TRIAD_API = "https://beta.triadfi.co/api";
 const JUP_TIMED_API = "https://prediction-market-api.jup.ag/api/v1/events/crypto/timed";
 const JITO_BUNDLE_URL = `${CONFIG.JITO_BLOCK_ENGINE_URL}/api/v1/bundles`;
 
-const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "3000");
+const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "1500");
 const TRADE_SIZE_USD = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
 const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
 const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || String(CONFIG.JITO_TIP));
@@ -58,7 +58,7 @@ const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
 const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
 const COOLDOWN_MS = 60_000;
 const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
-const JUP_EXECUTION_BUFFER_USD = parseFloat(process.env.TRIAD_JUP_EXECUTION_BUFFER_USD || "0.02");
+const JUP_EXECUTION_BUFFER_USD = parseFloat(process.env.TRIAD_JUP_EXECUTION_BUFFER_USD || "0.01");
 
 // Triad pool IDs for crypto fast markets (from /api/market/fast)
 const FAST_MARKET_COINS = ["btc", "sol", "eth"];
