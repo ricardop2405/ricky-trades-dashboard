@@ -1124,10 +1124,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    const effectiveJitoTipLamports = (await fetchJitoTipRecommendationLamports()) ?? JITO_TIP_LAMPORTS;
-    if (effectiveJitoTipLamports !== JITO_TIP_LAMPORTS) {
-      console.log(`[JITO] Using boosted tip: ${effectiveJitoTipLamports} lamports (base ${JITO_TIP_LAMPORTS})`);
-    }
+    // effectiveJitoTipLamports already fetched above with blockhash
 
     try {
       tipTx = await buildJitoTipTx(blockhash, effectiveJitoTipLamports);
