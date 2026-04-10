@@ -765,10 +765,11 @@ async function createJupBuyOrder(
   marketId: string,
   contracts: number,
   depositUsd: number,
+  skipMinDeposit = false,
 ): Promise<string | null> {
   try {
     // Jupiter requires minimum $1 deposit
-    if (depositUsd < MIN_JUPITER_DEPOSIT_USD) {
+    if (!skipMinDeposit && depositUsd < MIN_JUPITER_DEPOSIT_USD) {
       console.log(`[JUP-ORDER] Deposit $${depositUsd.toFixed(2)} below $${MIN_JUPITER_DEPOSIT_USD.toFixed(2)} minimum — skipping`);
       return null;
     }
@@ -1444,7 +1445,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     // Build both legs in parallel (saves time), but execute sequentially
     const [triadIxs, jupTxBase64] = await Promise.all([
       createTriadBuyInstruction(c.triadMarket.id, triadDirection2, c.costA * c.contracts, c.costA),
-      createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd),
+      createJupBuyOrder(jupMarketId, c.contracts, jupDepositUsd, true),
     ]);
 
     if (!triadIxs || !jupTxBase64) {
