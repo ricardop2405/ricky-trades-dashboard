@@ -30,6 +30,8 @@ import {
   SystemProgram,
   ComputeBudgetProgram,
 } from "@solana/web3.js";
+import * as fs from "fs";
+} from "@solana/web3.js";
 import { createClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
 import { SocksProxyAgent } from "socks-proxy-agent";
@@ -54,7 +56,9 @@ const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
 const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || String(CONFIG.JITO_TIP));
 const SAFETY_MIN_PROFIT_USD = 0.05; // profit-or-revert guardrail
 const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
+const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
 const COOLDOWN_MS = 60_000;
+const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
 
 // Triad pool IDs for crypto fast markets (from /api/market/fast)
 const FAST_MARKET_COINS = ["btc", "sol", "eth"];
@@ -63,7 +67,8 @@ const FAST_MARKET_COINS = ["btc", "sol", "eth"];
 const marketCooldowns = new Map<string, number>();
 let scanCount = 0;
 let bestSpreadSeen = -Infinity;
-let executionInFlight = false;
+let executionsInFlight = 0;
+let emergencyStopped = false;
 
 // ── Proxy for Jupiter (region-blocked) ──────────────────
 const PROXY_URL = process.env.PROXY_URL || "";
@@ -105,9 +110,11 @@ console.log(`[XARB] Min profit:   $${MIN_NET_PROFIT}`);
 console.log(`[XARB] Jito tip:     ${JITO_TIP_LAMPORTS} lamports`);
 console.log(`[XARB] Scan:         ${SCAN_INTERVAL_MS}ms`);
 console.log(`[XARB] Dry run:      ${DRY_RUN}`);
+console.log(`[XARB] Max concurrent: ${MAX_CONCURRENT} positions`);
 console.log(`[XARB] Proxy:        ${PROXY_URL && !PROXY_URL.includes("your-proxy") ? "YES" : "NONE"}`);
 console.log(`[XARB] Strategy:     YES_A + NO_B < $1 (outcome-independent)`);
 console.log(`[XARB] Safety:       profit-or-revert via Jito bundle`);
+console.log(`[XARB] Kill switch:  touch ${STOP_FILE} to emergency stop`);
 console.log("═══════════════════════════════════════════════════════");
 
 // ── Types ───────────────────────────────────────────────
@@ -640,9 +647,29 @@ async function sendJitoBundle(txs: VersionedTransaction[]): Promise<string | nul
 }
 
 // ── Execute Atomic Merge Arb ────────────────────────────
+function checkEmergencyStop(): boolean {
+  try {
+    if (fs.existsSync(STOP_FILE)) {
+      if (!emergencyStopped) {
+        console.log(`\n[XARB] 🛑 EMERGENCY STOP — ${STOP_FILE} detected. All execution halted.`);
+        console.log(`[XARB] To resume: rm ${STOP_FILE}`);
+        emergencyStopped = true;
+      }
+      return true;
+    }
+    if (emergencyStopped) {
+      console.log(`[XARB] ✅ Emergency stop cleared — resuming execution`);
+      emergencyStopped = false;
+    }
+    return false;
+  } catch { return false; }
+}
+
 async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
-  if (executionInFlight) {
-    console.log("[XARB] Execution already in flight — skipping");
+  if (checkEmergencyStop()) return;
+
+  if (executionsInFlight >= MAX_CONCURRENT) {
+    console.log(`[XARB] ${executionsInFlight}/${MAX_CONCURRENT} positions in flight — skipping`);
     return;
   }
 
@@ -684,7 +711,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   }
 
   // ── LIVE EXECUTION ────────────────────────────────────
-  executionInFlight = true;
+  executionsInFlight++;
   try {
     const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
     const jupMarketId = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
@@ -763,7 +790,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   } catch (err) {
     console.error("[XARB] Execution error:", err instanceof Error ? err.message : err);
   } finally {
-    executionInFlight = false;
+    executionsInFlight = Math.max(0, executionsInFlight - 1);
   }
 }
 
@@ -796,7 +823,9 @@ async function runScan(): Promise<void> {
       );
     }
 
-    await executeMergeArb(candidates[0]);
+    // Execute top candidates concurrently (up to MAX_CONCURRENT)
+    const toExecute = candidates.slice(0, MAX_CONCURRENT - executionsInFlight);
+    await Promise.all(toExecute.map(c => executeMergeArb(c)));
   } catch (err) {
     console.error("[SCAN] Error:", err);
   }
