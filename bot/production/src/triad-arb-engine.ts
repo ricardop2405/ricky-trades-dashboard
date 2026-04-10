@@ -263,6 +263,123 @@ async function fetchTriadOrderbook(marketId: string): Promise<TriadOrderbook | n
   }
 }
 
+// Returns fillable depth on the ask side at or below maxPrice (USD)
+async function fetchTriadAskDepth(
+  marketId: string,
+  side: "hype" | "flop",
+  maxPriceUsd: number,
+): Promise<{ totalContracts: number; avgPrice: number }> {
+  try {
+    const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS });
+    if (!res.ok) return { totalContracts: 0, avgPrice: 0 };
+    const ob = await res.json();
+
+    const askLevels: any[] = ob[side]?.ask || [];
+    let totalContracts = 0;
+    let totalCost = 0;
+    const maxPriceRaw = maxPriceUsd * 1_000_000;
+
+    for (const level of askLevels) {
+      const price = Number(level.price);
+      const size = Number(level.size || level.quantity || level.amount || 0);
+      if (!Number.isFinite(price) || price <= 0 || price > maxPriceRaw) continue;
+      if (!Number.isFinite(size) || size <= 0) continue;
+      totalContracts += size;
+      totalCost += (price / 1_000_000) * size;
+    }
+
+    const avgPrice = totalContracts > 0 ? totalCost / totalContracts : 0;
+    return { totalContracts, avgPrice };
+  } catch {
+    return { totalContracts: 0, avgPrice: 0 };
+  }
+}
+
+// Cancel an open Triad order to recover locked funds
+async function cancelTriadOrder(marketId: string, direction: "hype" | "flop"): Promise<boolean> {
+  try {
+    const mId = BigInt(marketId);
+    const orderPDA = getOrderPDA(keypair.publicKey, mId, direction);
+    const marketPDA = getMarketPDA(mId);
+    const orderBookPDA = getOrderBookPDA(mId);
+    const userAta = getATA(keypair.publicKey, USDC_MINT);
+    const marketAta = getATA(marketPDA, USDC_MINT);
+
+    // cancel_order discriminator: sha256("global:cancel_order")[0..8]
+    const CANCEL_ORDER_DISC = Buffer.from([95, 129, 237, 240, 8, 49, 223, 132]);
+    // CancelOrderArgs: { market_id: u64, order_direction: enum }
+    const argsBuf = Buffer.alloc(9);
+    argsBuf.writeBigUInt64LE(mId, 0);
+    argsBuf.writeUInt8(direction === "hype" ? 0 : 1, 8);
+    const data = Buffer.concat([CANCEL_ORDER_DISC, argsBuf]);
+
+    const cancelIx = new TransactionInstruction({
+      programId: TRIAD_PROGRAM_ID,
+      keys: [
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: marketPDA, isSigner: false, isWritable: true },
+        { pubkey: orderBookPDA, isSigner: false, isWritable: true },
+        { pubkey: orderPDA, isSigner: false, isWritable: true },
+        { pubkey: USDC_MINT, isSigner: false, isWritable: true },
+        { pubkey: userAta, isSigner: false, isWritable: true },
+        { pubkey: marketAta, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const { blockhash } = await connection.getLatestBlockhash("confirmed");
+    const msg = new TransactionMessage({
+      payerKey: keypair.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5000 }),
+        cancelIx,
+      ],
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([keypair]);
+
+    const sig = await connection.sendTransaction(tx, { skipPreflight: false });
+    console.log(`[TRIAD-CANCEL] ✅ Cancel tx sent: ${sig}`);
+    await connection.confirmTransaction(sig, "confirmed");
+    console.log(`[TRIAD-CANCEL] ✅ Cancel confirmed for ${direction} on market ${marketId}`);
+    return true;
+  } catch (err) {
+    console.error(`[TRIAD-CANCEL] ❌ Failed to cancel ${direction} order on market ${marketId}:`, err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+// Check if a Triad order is still open (unfilled) by checking order account on-chain
+async function isTriadOrderStillOpen(marketId: string, direction: "hype" | "flop"): Promise<boolean> {
+  try {
+    const mId = BigInt(marketId);
+    const orderPDA = getOrderPDA(keypair.publicKey, mId, direction);
+    const accountInfo = await connection.getAccountInfo(orderPDA);
+    // If account exists and has data, order is still open (resting)
+    return accountInfo !== null && accountInfo.data.length > 0;
+  } catch {
+    return false; // can't determine, assume closed
+  }
+}
+
+// Verify Jupiter fill by checking on-chain signature status
+async function isJupiterTxConfirmed(jupTx: VersionedTransaction): Promise<boolean> {
+  try {
+    const sig = bs58.encode(jupTx.signatures[0]);
+    const status = await connection.getSignatureStatus(sig);
+    const cs = status?.value?.confirmationStatus;
+    return (cs === "confirmed" || cs === "finalized") && !status?.value?.err;
+  } catch {
+    return false;
+  }
+}
+
 // ── Jupiter Predict API ─────────────────────────────────
 async function fetchJupiterEvents(coin: string): Promise<JupEvent[]> {
   const events: JupEvent[] = [];
