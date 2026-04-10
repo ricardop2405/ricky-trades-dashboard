@@ -280,17 +280,43 @@ async function fetchTriadAskDepth(
 ): Promise<{ totalContracts: number; avgPrice: number }> {
   try {
     const res = await fetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS });
-    if (!res.ok) return { totalContracts: 0, avgPrice: 0 };
+    if (!res.ok) {
+      console.warn(`[DEPTH] Orderbook fetch failed: ${res.status}`);
+      return { totalContracts: 0, avgPrice: 0 };
+    }
     const ob = await res.json();
 
-    const askLevels: any[] = ob[side]?.ask || [];
+    // Debug: log raw orderbook structure to find the correct path
+    const obKeys = Object.keys(ob || {});
+    const sideData = ob[side];
+    const askLevels: any[] = sideData?.ask || sideData?.asks || sideData?.sell || [];
+
+    // Also check if orderbook is flat (e.g. ob.asks instead of ob.hype.ask)
+    const fallbackAsks: any[] = ob.ask || ob.asks || ob.sell || [];
+    const levels = askLevels.length > 0 ? askLevels : fallbackAsks;
+
+    if (scanCount % 20 === 1) {
+      console.log(
+        `[DEPTH] ${side} on ${marketId}: keys=${obKeys.join(",")}, ` +
+        `sideKeys=${sideData ? Object.keys(sideData).join(",") : "null"}, ` +
+        `askLevels=${askLevels.length}, fallbackAsks=${fallbackAsks.length}`
+      );
+      if (levels.length > 0) {
+        console.log(`[DEPTH] Sample level: ${JSON.stringify(levels[0])}`);
+      } else {
+        // Log the raw response to understand the structure
+        const rawStr = JSON.stringify(ob).slice(0, 500);
+        console.log(`[DEPTH] Raw orderbook (first 500 chars): ${rawStr}`);
+      }
+    }
+
     let totalContracts = 0;
     let totalCost = 0;
     const maxPriceRaw = maxPriceUsd * 1_000_000;
 
-    for (const level of askLevels) {
+    for (const level of levels) {
       const price = Number(level.price);
-      const size = Number(level.size || level.quantity || level.amount || 0);
+      const size = Number(level.size || level.quantity || level.amount || level.total || 0);
       if (!Number.isFinite(price) || price <= 0 || price > maxPriceRaw) continue;
       if (!Number.isFinite(size) || size <= 0) continue;
       totalContracts += size;
@@ -299,7 +325,8 @@ async function fetchTriadAskDepth(
 
     const avgPrice = totalContracts > 0 ? totalCost / totalContracts : 0;
     return { totalContracts, avgPrice };
-  } catch {
+  } catch (err) {
+    console.warn(`[DEPTH] Error: ${err instanceof Error ? err.message : err}`);
     return { totalContracts: 0, avgPrice: 0 };
   }
 }
