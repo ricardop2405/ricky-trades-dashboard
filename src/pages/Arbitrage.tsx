@@ -13,6 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ArrowRight, TrendingUp, AlertCircle, RefreshCw, Zap } from "lucide-react";
+import { PairedTradeCard } from "@/components/PairedTradeCard";
 import { NavLink, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -51,6 +52,10 @@ interface ArbExecution {
   status: string;
   executed_at: string;
   error_message: string | null;
+  side_a_tx: string | null;
+  side_b_tx: string | null;
+  side_a_fill_price: number | null;
+  side_b_fill_price: number | null;
 }
 
 const Arbitrage = () => {
@@ -59,6 +64,7 @@ const Arbitrage = () => {
   const [markets, setMarkets] = useState<Map<string, PredictionMarket>>(new Map());
   const [scanning, setScanning] = useState(false);
   const [lastScan, setLastScan] = useState<string | null>(null);
+  const [oppMap, setOppMap] = useState<Map<string, ArbOpportunity>>(new Map());
   const navigate = useNavigate();
 
   // Load initial data
@@ -102,7 +108,12 @@ const Arbitrage = () => {
       supabase.from("prediction_markets").select("*").limit(500),
     ]);
 
-    if (oppRes.data) setOpportunities(oppRes.data);
+    if (oppRes.data) {
+      setOpportunities(oppRes.data);
+      const oMap = new Map<string, ArbOpportunity>();
+      oppRes.data.forEach((o: ArbOpportunity) => oMap.set(o.id, o));
+      setOppMap(oMap);
+    }
     if (mktRes.data) {
       const map = new Map<string, PredictionMarket>();
       mktRes.data.forEach((m: PredictionMarket) => map.set(m.id, m));
@@ -346,12 +357,12 @@ const Arbitrage = () => {
           </div>
 
           {/* Execution history */}
-          <div>
+          <div className="lg:col-span-3">
             <Card className="glass border-border/30 h-full">
               <CardHeader className="pb-2 px-4 pt-3">
                 <CardTitle className="text-sm font-mono flex items-center gap-2">
                   <ArrowRight className="h-4 w-4 text-primary" />
-                  EXECUTION LOG
+                  PAIRED TRADE LOG
                 </CardTitle>
               </CardHeader>
               <CardContent className="px-2 pb-2">
@@ -363,50 +374,13 @@ const Arbitrage = () => {
                     </p>
                   </div>
                 ) : (
-                  <div className="max-h-[60vh] overflow-auto space-y-2">
+                  <div className="max-h-[60vh] overflow-auto space-y-3">
                     {executions.map((exec) => (
-                      <div
+                      <PairedTradeCard
                         key={exec.id}
-                        className="p-2 rounded bg-secondary/20 border border-border/20"
-                      >
-                        <div className="flex items-center justify-between">
-                          <Badge
-                            variant="outline"
-                            className={`font-mono text-[10px] ${
-                              exec.status === "filled"
-                                ? "border-primary/40 text-primary"
-                                : exec.status === "failed"
-                                ? "border-destructive/40 text-destructive"
-                                : "border-warning/40 text-warning"
-                            }`}
-                          >
-                            {exec.status.toUpperCase()}
-                          </Badge>
-                          <span className="text-[10px] font-mono text-muted-foreground">
-                            {new Date(exec.executed_at).toLocaleTimeString()}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between mt-1">
-                          <span className="text-xs font-mono text-muted-foreground">
-                            ${Number(exec.amount_usd).toFixed(2)} deployed
-                          </span>
-                          <span
-                            className={`text-xs font-bold font-mono ${
-                              Number(exec.realized_pnl) >= 0
-                                ? "text-primary"
-                                : "text-destructive"
-                            }`}
-                          >
-                            {Number(exec.realized_pnl) >= 0 ? "+" : ""}$
-                            {Number(exec.realized_pnl).toFixed(2)}
-                          </span>
-                        </div>
-                        {exec.error_message && (
-                          <p className="text-[10px] font-mono text-destructive mt-1 truncate">
-                            {exec.error_message}
-                          </p>
-                        )}
-                      </div>
+                        execution={exec}
+                        opportunity={oppMap.get(exec.opportunity_id) || null}
+                      />
                     ))}
                   </div>
                 )}
