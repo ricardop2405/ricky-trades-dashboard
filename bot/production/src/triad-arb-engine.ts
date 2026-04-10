@@ -526,82 +526,90 @@ async function createJupBuyOrder(
   }
 }
 
-// ── Triad Order Creation ────────────────────────────────
-// Uses the on-chain program's `open_position` instruction (not orderbook).
-// Triad Fast Markets are position-based: deposit USDC, pick long/short (hype/flop).
-// hype = long (Up/YES), flop = short (Down/NO)
+// ── Triad Order Creation (raw instructions, no SDK) ─────
+// Program: TRDwq3BN4mP3m9KsuNUWSN6QDff93VKGSwE95Jbr9Ss
+// Instructions built from IDL discriminators + Borsh serialization
+const TRIAD_PROGRAM_ID = new PublicKey("TRDwq3BN4mP3m9KsuNUWSN6QDff93VKGSwE95Jbr9Ss");
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+
+// IDL discriminators (first 8 bytes of sha256("global:<instruction_name>"))
+const CREATE_USER_POSITION_DISC = Buffer.from([6, 137, 127, 227, 135, 241, 14, 109]);
+const OPEN_POSITION_DISC = Buffer.from([135, 128, 47, 77, 15, 152, 240, 49]);
+
+function serializeOpenPositionArgs(amount: bigint, isLong: boolean): Buffer {
+  // Borsh: u64 (8 bytes LE) + bool (1 byte)
+  const buf = Buffer.alloc(9);
+  buf.writeBigUInt64LE(amount, 0);
+  buf.writeUInt8(isLong ? 1 : 0, 8);
+  return buf;
+}
+
+function deriveTriadPDAs(marketAddress: PublicKey, wallet: PublicKey) {
+  const [vault] = PublicKey.findProgramAddressSync(
+    [Buffer.from("vault"), marketAddress.toBuffer()],
+    TRIAD_PROGRAM_ID,
+  );
+  const [userPosition] = PublicKey.findProgramAddressSync(
+    [Buffer.from("user_position"), wallet.toBuffer(), marketAddress.toBuffer()],
+    TRIAD_PROGRAM_ID,
+  );
+  const [vaultTokenAccount] = PublicKey.findProgramAddressSync(
+    [Buffer.from("vault_token_account"), vault.toBuffer()],
+    TRIAD_PROGRAM_ID,
+  );
+  return { vault, userPosition, vaultTokenAccount };
+}
+
 async function createTriadBuyInstruction(
   marketAddress: string,
   direction: "hype" | "flop",
   amountUsd: number,
 ): Promise<TransactionInstruction[] | null> {
   try {
-    const { default: TriadProtocolClient } = await import("@triadxyz/triad-protocol");
-    const { AnchorProvider, Wallet, BN } = await import("@coral-xyz/anchor");
     const { getAssociatedTokenAddress } = await import("@solana/spl-token");
 
-    const wallet = new Wallet(keypair);
-    const provider = new AnchorProvider(connection, wallet, { commitment: "confirmed" });
-    const client = new TriadProtocolClient(connection, wallet);
-    const program = client.program;
-    const programId = program.programId;
-
     const tickerPDA = new PublicKey(marketAddress);
-    const mint = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC
-
-    // Derive PDAs using same logic as SDK helpers
-    const [vaultPDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), tickerPDA.toBuffer()],
-      programId,
-    );
-    const [userPositionPDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from("user_position"), keypair.publicKey.toBuffer(), tickerPDA.toBuffer()],
-      programId,
-    );
-    const userTokenAccount = await getAssociatedTokenAddress(mint, keypair.publicKey);
+    const { vault, userPosition, vaultTokenAccount } = deriveTriadPDAs(tickerPDA, keypair.publicKey);
+    const userTokenAccount = await getAssociatedTokenAddress(USDC_MINT, keypair.publicKey);
 
     const ixs: TransactionInstruction[] = [];
 
-    // Check if user position account exists; create if needed
-    let hasUserPosition = false;
-    try {
-      await program.account.userPosition.fetch(userPositionPDA);
-      hasUserPosition = true;
-    } catch {
-      // Position account doesn't exist yet
-    }
-
-    if (!hasUserPosition) {
+    // Check if user position exists on-chain
+    const acctInfo = await connection.getAccountInfo(userPosition);
+    if (!acctInfo) {
       console.log(`[TRIAD-ORDER] Creating user position for market ${marketAddress}`);
-      ixs.push(
-        await program.methods
-          .createUserPosition()
-          .accounts({
-            signer: keypair.publicKey,
-            ticker: tickerPDA,
-          })
-          .instruction()
-      );
+      ixs.push(new TransactionInstruction({
+        programId: TRIAD_PROGRAM_ID,
+        keys: [
+          { pubkey: keypair.publicKey, isSigner: true, isWritable: true },  // signer
+          { pubkey: tickerPDA, isSigner: false, isWritable: true },          // ticker
+          { pubkey: userPosition, isSigner: false, isWritable: true },       // user_position (PDA)
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+        ],
+        data: CREATE_USER_POSITION_DISC,
+      }));
     }
 
     // Build open_position instruction
-    const amountRaw = Math.floor(amountUsd * 1_000_000);
+    const amountRaw = BigInt(Math.floor(amountUsd * 1_000_000));
     const isLong = direction === "hype";
+    const data = Buffer.concat([OPEN_POSITION_DISC, serializeOpenPositionArgs(amountRaw, isLong)]);
 
-    ixs.push(
-      await program.methods
-        .openPosition({
-          amount: new BN(amountRaw),
-          isLong,
-        })
-        .accounts({
-          userPosition: userPositionPDA,
-          ticker: tickerPDA,
-          vault: vaultPDA,
-          userTokenAccount,
-        })
-        .instruction()
-    );
+    ixs.push(new TransactionInstruction({
+      programId: TRIAD_PROGRAM_ID,
+      keys: [
+        { pubkey: keypair.publicKey, isSigner: true, isWritable: true },    // signer
+        { pubkey: tickerPDA, isSigner: false, isWritable: true },            // ticker
+        { pubkey: vault, isSigner: false, isWritable: true },                // vault
+        { pubkey: userPosition, isSigner: false, isWritable: true },         // user_position
+        { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },    // vault_token_account (PDA)
+        { pubkey: userTokenAccount, isSigner: false, isWritable: true },     // user_token_account
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },    // token_program
+      ],
+      data,
+    }));
 
     console.log(`[TRIAD-ORDER] Built ${ixs.length} ixs for ${direction} on ${marketAddress} ($${amountUsd.toFixed(2)})`);
     return ixs;
