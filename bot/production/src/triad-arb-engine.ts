@@ -1550,6 +1550,10 @@ async function main() {
       console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry.`);
     }
 
+    if (!ALLOW_UNSAFE_TRIAD_LIVE) {
+      console.log("[XARB] Safe mode active: scanning/logging only. Live Triad execution blocked because true always-hedged fills are not guaranteed by the current Triad order path.");
+    }
+
     console.log("[XARB] Starting atomic merge-arb scan...\n");
     await scanLoop();
   } catch (err) {
