@@ -31,7 +31,6 @@ import {
   ComputeBudgetProgram,
 } from "@solana/web3.js";
 import * as fs from "fs";
-} from "@solana/web3.js";
 import { createClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
 import { SocksProxyAgent } from "socks-proxy-agent";
