@@ -47,7 +47,8 @@ const WALLET = keypair.publicKey.toBase58();
 
 const TRIAD_API = "https://beta.triadfi.co/api";
 const JUP_TIMED_API = "https://prediction-market-api.jup.ag/api/v1/events/crypto/timed";
-const JITO_BUNDLE_URL = `${CONFIG.JITO_BLOCK_ENGINE_URL}/api/v1/bundles`;
+const JITO_BLOCK_ENGINE = process.env.TRIAD_JITO_URL || "https://ny.mainnet.block-engine.jito.wtf";
+const JITO_BUNDLE_URL = `${JITO_BLOCK_ENGINE}/api/v1/bundles`;
 
 const SCAN_INTERVAL_MS = parseInt(process.env.TRIAD_SCAN_INTERVAL_MS || "1500");
 const TRADE_SIZE_USD = parseFloat(process.env.TRIAD_ARB_AMOUNT || String(CONFIG.ARB_AMOUNT));
