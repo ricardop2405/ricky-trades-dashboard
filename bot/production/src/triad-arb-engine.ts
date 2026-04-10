@@ -68,7 +68,8 @@ const MIN_NET_PROFIT = parseFloat(process.env.TRIAD_MIN_PROFIT || "0.005");
 const JITO_TIP_LAMPORTS = parseInt(process.env.TRIAD_JITO_TIP || "100000"); // 100k lamports default
 const JITO_REQUEST_MIN_INTERVAL_MS = parseInt(process.env.TRIAD_JITO_MIN_INTERVAL_MS || "1100"); // Jito default rate limit is 1 req/sec/IP/region
 const SAFETY_MIN_PROFIT_USD = 0.05; // profit-or-revert guardrail
-const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false";
+const ALLOW_UNSAFE_TRIAD_LIVE = process.env.TRIAD_ALLOW_UNSAFE_LIVE === "true";
+const DRY_RUN = process.env.TRIAD_DRY_RUN !== "false" || !ALLOW_UNSAFE_TRIAD_LIVE;
 const MAX_CONCURRENT = parseInt(process.env.TRIAD_MAX_CONCURRENT || "2");
 const COOLDOWN_MS = 60_000;
 const STOP_FILE = "/tmp/triad-stop"; // touch this file to emergency stop
@@ -127,12 +128,17 @@ console.log(`[XARB] Min profit:   $${MIN_NET_PROFIT}`);
 console.log(`[XARB] Jito tip:     ${JITO_TIP_LAMPORTS} lamports`);
 console.log(`[XARB] Scan:         ${SCAN_INTERVAL_MS}ms`);
 console.log(`[XARB] Dry run:      ${DRY_RUN}`);
+console.log(`[XARB] Unsafe live override: ${ALLOW_UNSAFE_TRIAD_LIVE ? "ENABLED" : "DISABLED"}`);
 console.log(`[XARB] Max concurrent: ${MAX_CONCURRENT} positions`);
 console.log(`[XARB] Proxy:        ${PROXY_URL && !PROXY_URL.includes("your-proxy") ? "YES" : "NONE"}`);
 console.log(`[XARB] Jito regions: ${JITO_REGIONS.join(", ")} (multi-region parallel)`);
 console.log(`[XARB] Strategy:     YES_A + NO_B < $1 (outcome-independent)`);
 console.log(`[XARB] Safety:       profit-or-revert via Jito bundle`);
 console.log(`[XARB] Kill switch:  touch ${STOP_FILE} to emergency stop`);
+if (!ALLOW_UNSAFE_TRIAD_LIVE) {
+  console.log(`[XARB] LIVE TRIAD TRADING DISABLED: Triad exposes resting limit orders, not guaranteed taker fills.`);
+  console.log(`[XARB] Set TRIAD_ALLOW_UNSAFE_LIVE=true only if you accept leg mismatch risk.`);
+}
 console.log("═══════════════════════════════════════════════════════");
 
 // ── Types ───────────────────────────────────────────────
@@ -1167,7 +1173,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   }
 
   if (DRY_RUN) {
-    console.log(`[XARB] 🏜️ DRY RUN — logging opportunity (set TRIAD_DRY_RUN=false to go live)`);
+    console.log(`[XARB] 🏜️ DRY RUN — logging opportunity (${ALLOW_UNSAFE_TRIAD_LIVE ? "TRIAD_DRY_RUN enabled" : "safe mode blocks unsafe live Triad execution"})`);
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
 
     await supabase.from("arb_opportunities").insert({
@@ -1178,7 +1184,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       price_a: c.costA,
       price_b: c.costB,
       spread: c.profitPerContract,
-      status: "dry_run",
+      status: ALLOW_UNSAFE_TRIAD_LIVE ? "dry_run" : "blocked_unsafe_live",
     });
 
     return;
@@ -1542,6 +1548,10 @@ async function main() {
       }
     } catch (err: any) {
       console.warn(`[XARB] ⚠️ Jupiter API unreachable: ${err.message?.slice(0, 80)}. Will retry.`);
+    }
+
+    if (!ALLOW_UNSAFE_TRIAD_LIVE) {
+      console.log("[XARB] Safe mode active: scanning/logging only. Live Triad execution blocked because true always-hedged fills are not guaranteed by the current Triad order path.");
     }
 
     console.log("[XARB] Starting atomic merge-arb scan...\n");
