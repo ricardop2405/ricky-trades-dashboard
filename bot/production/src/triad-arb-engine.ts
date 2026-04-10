@@ -1173,7 +1173,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
   }
 
   if (DRY_RUN) {
-    console.log(`[XARB] 🏜️ DRY RUN — logging opportunity (set TRIAD_DRY_RUN=false to go live)`);
+    console.log(`[XARB] 🏜️ DRY RUN — logging opportunity (${ALLOW_UNSAFE_TRIAD_LIVE ? "TRIAD_DRY_RUN enabled" : "safe mode blocks unsafe live Triad execution"})`);
     marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
 
     await supabase.from("arb_opportunities").insert({
@@ -1184,7 +1184,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       price_a: c.costA,
       price_b: c.costB,
       spread: c.profitPerContract,
-      status: "dry_run",
+      status: ALLOW_UNSAFE_TRIAD_LIVE ? "dry_run" : "blocked_unsafe_live",
     });
 
     return;
