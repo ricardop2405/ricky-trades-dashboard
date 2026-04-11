@@ -116,6 +116,11 @@ async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 5000)
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`Fetch timed out after ${timeoutMs}ms: ${url.split("?")[0]}`);
+    }
+    throw err;
   } finally {
     clearTimeout(timeout);
   }
@@ -1855,7 +1860,7 @@ async function main() {
     console.log(`[XARB] USDC balance: $${funding.usdcBalance.toFixed(2)}`);
 
     // Verify Triad API
-    const triadTest = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 5000);
+    const triadTest = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 15000);
     if (triadTest.ok) {
       const pools = await triadTest.json() as any[];
       const cryptoPools = pools.filter((p: any) => FAST_MARKET_COINS.includes((p.coin || "").toLowerCase()));
@@ -1889,8 +1894,10 @@ async function main() {
     console.log("[XARB] Starting sum-to-one merge-arb scan...\n");
     await scanLoop();
   } catch (err) {
-    console.error("[XARB] Fatal error:", err);
-    process.exit(1);
+    console.error("[XARB] Fatal error:", err instanceof Error ? err.message : err);
+    console.log("[XARB] Restarting in 10 seconds...");
+    await sleep(10_000);
+    return main(); // auto-restart on transient failures
   }
 }
 
