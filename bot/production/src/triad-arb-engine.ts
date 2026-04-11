@@ -111,7 +111,7 @@ if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("place
   }
 }
 
-async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 5000): Promise<Response> {
+async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 30000): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -1860,7 +1860,7 @@ async function main() {
     console.log(`[XARB] USDC balance: $${funding.usdcBalance.toFixed(2)}`);
 
     // Verify Triad API
-    const triadTest = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 15000);
+    const triadTest = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 30000);
     if (triadTest.ok) {
       const pools = await triadTest.json() as any[];
       const cryptoPools = pools.filter((p: any) => FAST_MARKET_COINS.includes((p.coin || "").toLowerCase()));
