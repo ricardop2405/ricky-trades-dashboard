@@ -170,8 +170,8 @@ console.log(`[XARB] Jito regions: ${JITO_REGIONS.join(", ")} (multi-region paral
 console.log(`[XARB] Strategy:     costA + costB < $${MAX_COMBINED_COST_PER_CONTRACT} → payout $1.00 → guaranteed profit`);
 console.log(`[XARB] Late-entry cutoff: ${MIN_MARKET_SECONDS_REMAINING}s remaining`);
 console.log(`[XARB] Safety:       SUM-TO-ONE enforced at scan, pre-exec, and re-quote`);
-console.log(`[XARB]               Triad: aggressive taker pricing + depth check`);
-console.log(`[XARB]               Jupiter: keeper-filled at quoted price`);
+console.log(`[XARB]               Triad: executable ask-depth required, no resting orders accepted`);
+console.log(`[XARB]               Jupiter: max-spend capped; unverified fills are NOT treated as success`);
 console.log(`[XARB] Kill switch:  touch ${STOP_FILE} to emergency stop`);
 console.log("═══════════════════════════════════════════════════════");
 
@@ -350,18 +350,13 @@ async function fetchTriadAskDepth(
   marketId: string,
   side: "hype" | "flop",
   maxPriceUsd: number,
-): Promise<{ totalContracts: number; avgPrice: number }> {
+  requiredContracts = Number.POSITIVE_INFINITY,
+): Promise<{ totalContracts: number; avgPrice: number; worstPrice: number }> {
   try {
     const res = await timedFetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS }, 5000);
     if (!res.ok) {
-      // Triad Fast Markets are position-based — if orderbook endpoint is down (500),
-      // assume liquidity exists at market price since these are AMM-style pools
-      if (res.status >= 500) {
-        console.warn(`[DEPTH] Orderbook API 500 — bypassing depth check (position-based market)`);
-        return { totalContracts: 999, avgPrice: maxPriceUsd };
-      }
-      console.warn(`[DEPTH] Orderbook fetch failed: ${res.status}`);
-      return { totalContracts: 0, avgPrice: 0 };
+      console.warn(`[DEPTH] Orderbook fetch failed for ${marketId}/${side}: ${res.status}`);
+      return { totalContracts: 0, avgPrice: 0, worstPrice: 0 };
     }
     const ob = await res.json();
 
@@ -391,9 +386,12 @@ async function fetchTriadAskDepth(
 
     let totalContracts = 0;
     let totalCost = 0;
+    let worstPrice = 0;
     const maxPriceRaw = maxPriceUsd * 1_000_000;
 
-    for (const level of levels) {
+    const sortedLevels = [...levels].sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
+
+    for (const level of sortedLevels) {
       const price = Number(level.price);
       // Triad uses totalShares/filledShares, not size/quantity
       const totalShares = Number(level.totalShares || level.size || level.quantity || level.amount || 0);
@@ -403,16 +401,87 @@ async function fetchTriadAskDepth(
       if (!Number.isFinite(availableShares) || availableShares <= 0) continue;
       // Convert shares to contracts (shares are in raw units, 1 contract = 1_000_000 shares)
       const contracts = availableShares / 1_000_000;
-      totalContracts += contracts;
-      totalCost += (price / 1_000_000) * contracts;
+      const remainingNeeded = Math.max(0, requiredContracts - totalContracts);
+      const contractsToUse = Number.isFinite(requiredContracts)
+        ? Math.min(contracts, remainingNeeded)
+        : contracts;
+
+      if (contractsToUse <= 0) break;
+
+      const priceUsd = price / 1_000_000;
+      totalContracts += contractsToUse;
+      totalCost += priceUsd * contractsToUse;
+      worstPrice = Math.max(worstPrice, priceUsd);
+
+      if (totalContracts + 1e-9 >= requiredContracts) break;
     }
 
     const avgPrice = totalContracts > 0 ? totalCost / totalContracts : 0;
-    return { totalContracts, avgPrice };
+    return { totalContracts, avgPrice, worstPrice };
   } catch (err) {
     console.warn(`[DEPTH] Error: ${err instanceof Error ? err.message : err}`);
-    return { totalContracts: 0, avgPrice: 0 };
+    return { totalContracts: 0, avgPrice: 0, worstPrice: 0 };
   }
+}
+
+function applyStrictTriadPricing(
+  candidate: MergeArbCandidate,
+  strictTriadPrice: number,
+  tipLamports: number,
+): MergeArbCandidate {
+  const totalCost = strictTriadPrice + candidate.costB;
+  const profitPerContract = 1 - totalCost;
+  const netProfit = (profitPerContract * candidate.contracts) - estimateExecutionFeesUsd(tipLamports);
+
+  return {
+    ...candidate,
+    costA: strictTriadPrice,
+    totalCost,
+    profitPerContract,
+    netProfit,
+  };
+}
+
+async function enforceStrictTriadExecutablePricing(
+  candidate: MergeArbCandidate,
+  direction: "hype" | "flop",
+  tipLamports: number,
+): Promise<MergeArbCandidate | null> {
+  const maxTriadPrice = MAX_COMBINED_COST_PER_CONTRACT - candidate.costB;
+  if (!Number.isFinite(maxTriadPrice) || maxTriadPrice <= 0) {
+    console.warn(`[XARB] Strict Triad cap invalid: $${maxTriadPrice.toFixed(4)}`);
+    return null;
+  }
+
+  const depth = await fetchTriadAskDepth(candidate.triadMarket.id, direction, maxTriadPrice, candidate.contracts);
+  if (depth.totalContracts + 1e-9 < candidate.contracts) {
+    console.warn(
+      `[XARB] Triad ${direction} ask depth insufficient at or below $${maxTriadPrice.toFixed(4)} ` +
+      `(${depth.totalContracts.toFixed(2)} < ${candidate.contracts} contracts) — aborting`
+    );
+    return null;
+  }
+
+  if (!Number.isFinite(depth.worstPrice) || depth.worstPrice <= 0) {
+    console.warn(`[XARB] Triad ${direction} executable price missing — aborting`);
+    return null;
+  }
+
+  const strictCandidate = applyStrictTriadPricing(candidate, depth.worstPrice, tipLamports);
+  if (!isSafeCombinedCost(strictCandidate.totalCost) || strictCandidate.netProfit <= MIN_NET_PROFIT) {
+    console.warn(
+      `[XARB] Strict Triad pricing failed safety: worstAsk=$${depth.worstPrice.toFixed(4)} ` +
+      `total=$${strictCandidate.totalCost.toFixed(4)} net=$${strictCandidate.netProfit.toFixed(4)}`
+    );
+    return null;
+  }
+
+  console.log(
+    `[XARB] Strict Triad executable pricing: avg=$${depth.avgPrice.toFixed(4)} worst=$${depth.worstPrice.toFixed(4)} ` +
+    `for ${candidate.contracts} contracts`
+  );
+
+  return strictCandidate;
 }
 
 // Cancel an open Triad order to recover locked funds
@@ -1168,7 +1237,7 @@ async function submitToRegion(region: string, encodedTxs: string[]): Promise<{ b
   }
 }
 
-async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<{ bundleId: string; confirmed?: boolean } | null> {
+async function sendJitoBundle(txs: VersionedTransaction[], maxRetries = 3): Promise<{ bundleId: string; confirmed?: boolean; pending?: boolean } | null> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const encodedTxs = txs.map(tx => Buffer.from(tx.serialize()).toString("base64"));
@@ -1353,11 +1422,8 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
   c = liveCandidate;
 
-  // ── PRE-FLIGHT: Depth check REMOVED ──
-  // Jito bundle is atomic: if Triad order can't fill, the entire bundle reverts.
-  // Zero capital at risk. Simulation below is the real safety net.
   const triadDirection = c.legA === "triad_hype" ? "hype" : "flop";
-  console.log(`[XARB] ✅ Skipping depth check — Jito atomic bundle guarantees fill-or-revert`);
+  console.log(`[XARB] Strict mode: requiring executable Triad ask depth before submission`);
 
   console.log(`\n[XARB] ═══ MERGE ARB OPPORTUNITY ══════════════════════`);
   console.log(`[XARB] ${c.coin.toUpperCase()} — ${c.legA} + ${c.legB}`);
@@ -1403,10 +1469,9 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     return;
   }
 
-  // ── LIVE EXECUTION (SEQUENTIAL: Triad first → verify → then Jupiter) ──
-  // Strategy: Send Triad order first, verify it filled as taker, THEN send Jupiter.
-  //           This guarantees no Jupiter position without a confirmed Triad fill.
-  // Protection: SUM-TO-ONE math guarantees profit regardless of outcome.
+  // ── LIVE EXECUTION ──
+  // Strict mode: do not trust displayed prices. Build only after executable depth,
+  // capped spend, and post-submit verification rules are satisfied.
   executionLock = true;
   executionsInFlight++;
   bundleInFlight.add(marketKey);
@@ -1428,6 +1493,21 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
     }
 
     c = executionCandidate;
+    const strictTriadCandidate = await enforceStrictTriadExecutablePricing(c, triadDirection2, effectiveJitoTipLamports);
+    if (!strictTriadCandidate) {
+      console.log(`[XARB] Strict Triad fill check failed — refusing to submit`);
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
+    if (Math.abs(strictTriadCandidate.costA - c.costA) >= 0.001) {
+      console.log(
+        `[XARB] Strict Triad reprice: $${c.costA.toFixed(4)} → $${strictTriadCandidate.costA.toFixed(4)} ` +
+        `| combined now $${strictTriadCandidate.totalCost.toFixed(4)}`
+      );
+    }
+
+    c = strictTriadCandidate;
     const jupMarketId = c.legB === "jup_down" ? c.jupEvent.down.marketId : c.jupEvent.up.marketId;
     const jupDepositUsd = c.costB * c.contracts;
     const entryFunding = await checkWalletFunding(c.totalCost * c.contracts, effectiveJitoTipLamports);
@@ -1440,7 +1520,7 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
       return;
     }
 
-    console.log(`[XARB] Building both legs in parallel (atomic single-bundle execution)...`);
+    console.log(`[XARB] Building both legs in parallel (strict atomic single-bundle execution)...`);
 
     // Build both legs in parallel (saves time), but execute sequentially
     const [triadIxs, jupTxBase64] = await Promise.all([
@@ -1628,7 +1708,27 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
 
     // Also check Triad order PDA as secondary signal
     const triadStillOpen = await isTriadOrderStillOpen(c.triadMarket.id, triadDirection2);
-    const triadFilled = triadOnChain || !triadStillOpen;
+    if (triadOnChain && triadStillOpen) {
+      console.error(`[XARB] ❌ Triad tx landed but order is STILL OPEN — treating as FAILED, not filled`);
+      const cancelOk = await cancelTriadOrder(c.triadMarket.id, triadDirection2);
+      if (oppId) {
+        await supabase.from("arb_executions").insert({
+          opportunity_id: oppId,
+          amount_usd: 0,
+          realized_pnl: 0,
+          fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
+          status: "failed",
+          error_message: `Triad order rested open on-chain and was ${cancelOk ? "cancelled" : "not cancelled"}. Refusing to count as fill. Sigs: ${triadSig} / ${jupSig}`,
+          side_a_tx: triadSig,
+          side_b_tx: jupSig,
+        });
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
+      }
+      marketCooldowns.set(`${c.coin}-${c.triadMarket.id}`, Date.now());
+      return;
+    }
+
+    const triadFilled = triadOnChain && !triadStillOpen;
 
     if (triadFilled && jupConfirmed) {
       console.log(`[XARB] ✅ BOTH LEGS CONFIRMED ON-CHAIN! Guaranteed profit: $${c.netProfit.toFixed(4)}`);
@@ -1646,23 +1746,21 @@ async function executeMergeArb(c: MergeArbCandidate): Promise<void> {
         await supabase.from("arb_opportunities").update({ status: "executed" }).eq("id", oppId);
       }
     } else {
-      // At least one sig is on-chain but maybe Jupiter is awaiting keeper
-      console.warn(`[XARB] ⚠️ Partial confirmation — Triad: ${triadFilled ? "FILLED (on-chain)" : "NOT on-chain"} | Jupiter: ${jupConfirmed ? "CONFIRMED" : "awaiting keeper"}`);
-      if (triadOnChain && !jupConfirmed) {
-        console.warn(`[XARB]    Triad IS on-chain — Jupiter keeper will fill. Profit locked.`);
-      }
+      console.warn(`[XARB] ⚠️ Bundle not fully verified — refusing to treat this as success`);
+      console.warn(`[XARB]    Triad: ${triadFilled ? "FILLED" : triadOnChain ? "ON-CHAIN BUT UNPROVEN" : "NOT ON-CHAIN"}`);
+      console.warn(`[XARB]    Jupiter: ${jupConfirmed ? "CONFIRMED" : "UNVERIFIED / awaiting keeper"}`);
       if (oppId) {
         await supabase.from("arb_executions").insert({
           opportunity_id: oppId,
-          amount_usd: c.totalCost * c.contracts,
-          realized_pnl: c.netProfit,
+          amount_usd: 0,
+          realized_pnl: 0,
           fees: effectiveJitoTipLamports / LAMPORTS_PER_SOL * CONFIG.SOL_PRICE_USD,
-          status: triadFilled && jupConfirmed ? "filled" : "pending_jup_fill",
-          error_message: `Triad: ${triadOnChain ? "on-chain" : "not on-chain"}. Jupiter: ${jupConfirmed ? "confirmed" : "awaiting keeper"}. Sigs: ${triadSig} / ${jupSig}`,
+          status: "failed",
+          error_message: `Strict verification failed. Triad=${triadFilled ? "filled" : triadOnChain ? "on-chain_unproven" : "missing"}, Jupiter=${jupConfirmed ? "confirmed" : "unverified"}. Sigs: ${triadSig} / ${jupSig}`,
           side_a_tx: triadSig,
           side_b_tx: jupSig,
         });
-        await supabase.from("arb_opportunities").update({ status: triadFilled && jupConfirmed ? "executed" : "executing" }).eq("id", oppId);
+        await supabase.from("arb_opportunities").update({ status: "failed" }).eq("id", oppId);
       }
     }
 
