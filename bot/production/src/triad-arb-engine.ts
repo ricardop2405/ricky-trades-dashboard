@@ -1894,8 +1894,10 @@ async function main() {
     console.log("[XARB] Starting sum-to-one merge-arb scan...\n");
     await scanLoop();
   } catch (err) {
-    console.error("[XARB] Fatal error:", err);
-    process.exit(1);
+    console.error("[XARB] Fatal error:", err instanceof Error ? err.message : err);
+    console.log("[XARB] Restarting in 10 seconds...");
+    await sleep(10_000);
+    return main(); // auto-restart on transient failures
   }
 }
 
