@@ -295,16 +295,43 @@ const TRIAD_HEADERS: Record<string, string> = {
 async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
   try {
     const res = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 5000);
-    if (!res.ok) return [];
+    if (!res.ok) {
+      console.warn(`[TRIAD] API returned ${res.status}`);
+      return [];
+    }
     const pools = await res.json() as any[];
     const markets: TriadFastMarket[] = [];
+
+    // Debug: log raw pool structure on first scan or every 50 scans
+    if (scanCount <= 1 || scanCount % 50 === 0) {
+      for (const pool of pools) {
+        const coin = (pool.coin || "").toLowerCase();
+        if (!FAST_MARKET_COINS.includes(coin)) continue;
+        const allMarkets = pool.markets || [];
+        console.log(`  [TRIAD-DEBUG] Pool "${pool.coin}": ${allMarkets.length} total markets`);
+        if (allMarkets.length > 0) {
+          const sample = allMarkets[0];
+          console.log(`    Sample market keys: ${Object.keys(sample).join(", ")}`);
+          console.log(`    winningDirection="${sample.winningDirection}" isFast=${sample.isFast} status="${sample.status}" isActive=${sample.isActive}`);
+        }
+        // Count how many pass filter vs not
+        const passing = allMarkets.filter((m: any) => m.winningDirection === "None" && m.isFast);
+        const activeOnly = allMarkets.filter((m: any) => !m.winningDirection || m.winningDirection === "None");
+        console.log(`    Filter: ${passing.length} pass (winDir=None+isFast), ${activeOnly.length} unsettled, ${allMarkets.length} total`);
+      }
+    }
 
     for (const pool of pools) {
       const coin = (pool.coin || "").toLowerCase();
       if (!FAST_MARKET_COINS.includes(coin)) continue;
 
       for (const m of (pool.markets || [])) {
-        if (m.winningDirection === "None" && m.isFast) {
+        // Accept markets that are open/unsettled — handle both old and new API shapes
+        const isUnsettled = !m.winningDirection || m.winningDirection === "None" || m.winningDirection === "none";
+        const isFastMarket = m.isFast === true || m.isFast === "true" || m.type === "fast";
+        const isActive = m.status !== "settled" && m.status !== "closed" && m.isActive !== false;
+        
+        if (isUnsettled && (isFastMarket || true) && isActive) {
           markets.push({ ...m, coin });
         }
       }
