@@ -985,21 +985,52 @@ const TRIAD_PROGRAM_ID = new PublicKey("TRDwq3BN4mP3m9KsuNUWSN6QDff93VKGSwE95Jbr
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+const TRIAD_MARKET_ACCOUNT_DISC = Buffer.from([27, 60, 50, 75, 191, 193, 86, 227]);
+const TRIAD_MARKET_ACCOUNT_SIZE = 400;
+const TRIAD_MARKET_START_OFFSET = 196;
+const TRIAD_MARKET_END_OFFSET = 204;
+
+async function logTriadOnchainFastMarketStatus() {
+  try {
+    const accounts = await connection.getProgramAccounts(TRIAD_PROGRAM_ID, {
+      filters: [
+        { dataSize: TRIAD_MARKET_ACCOUNT_SIZE },
+        { memcmp: { offset: 0, bytes: bs58.encode(TRIAD_MARKET_ACCOUNT_DISC) } },
+      ],
+    });
+
+    const now = Math.floor(Date.now() / 1000);
+    const activeFastMarkets = accounts
+      .map(({ pubkey, account }) => {
+        const data = account.data;
+        if (!Buffer.isBuffer(data) || data.length < TRIAD_MARKET_END_OFFSET + 8) return null;
+
+        const start = Number(data.readBigInt64LE(TRIAD_MARKET_START_OFFSET));
+        const end = Number(data.readBigInt64LE(TRIAD_MARKET_END_OFFSET));
+        const duration = end - start;
+        const remaining = end - now;
+
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+        if (duration < 240 || duration > 360 || remaining <= 0) return null;
+
+        return { pubkey: pubkey.toBase58(), end, remaining };
+      })
+      .filter((market): market is { pubkey: string; end: number; remaining: number } => market !== null)
+      .sort((a, b) => a.end - b.end);
+
+    const nextMarket = activeFastMarkets[0];
+    console.log(
+      `[XARB] Triad on-chain 5m markets: ${activeFastMarkets.length}` +
+        (nextMarket ? ` (next ends in ${nextMarket.remaining}s @ ${new Date(nextMarket.end * 1000).toISOString()})` : "")
+    );
+  } catch (err) {
+    console.warn(`[XARB] ⚠️ Triad on-chain check failed: ${err instanceof Error ? err.message : err}`);
+  }
+}
 
 // IDL discriminator: sha256("global:place_bid_order")[0..8]
 const PLACE_BID_ORDER_DISC = Buffer.from([154, 143, 199, 233, 97, 23, 223, 255]);
 const BASE_DECIMALS = 6;
-
-// PlaceBidOrderArgs: { amount: u64, price: u64, market_id: u64, order_direction: enum(Hype=0,Flop=1) }
-function serializePlaceBidOrderArgs(amount: bigint, price: bigint, marketId: bigint, orderDirection: "hype" | "flop"): Buffer {
-  // Borsh: u64 (8 LE) + u64 (8 LE) + u64 (8 LE) + enum (1 byte)
-  const buf = Buffer.alloc(25);
-  buf.writeBigUInt64LE(amount, 0);
-  buf.writeBigUInt64LE(price, 8);
-  buf.writeBigUInt64LE(marketId, 16);
-  buf.writeUInt8(orderDirection === "hype" ? 0 : 1, 24);
-  return buf;
-}
 
 // PDA derivations from @triadxyz/triad-protocol SDK
 function getMarketPDA(marketId: bigint): PublicKey {
@@ -1942,6 +1973,8 @@ async function main() {
     } else {
       console.warn(`[XARB] ⚠️ Triad API error: ${triadTest.status}`);
     }
+
+    await logTriadOnchainFastMarketStatus();
 
     // Verify Jupiter API
     try {
