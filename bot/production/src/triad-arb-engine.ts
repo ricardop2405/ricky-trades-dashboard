@@ -1932,11 +1932,13 @@ async function main() {
     console.log(`[XARB] USDC balance: $${funding.usdcBalance.toFixed(2)}`);
 
     // Verify Triad API
-    const triadTest = await triadFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 30000);
+    const triadTest = await triadFetch(`${TRIAD_API}/market/fast?lang=en-US&_ts=${Date.now()}`, { headers: TRIAD_HEADERS }, 30000);
     if (triadTest.ok) {
       const pools = await triadTest.json() as any[];
       const cryptoPools = pools.filter((p: any) => FAST_MARKET_COINS.includes((p.coin || "").toLowerCase()));
-      console.log(`[XARB] Triad API: ✅ (${cryptoPools.length} crypto fast-market pools)`);
+      const latestEnd = Math.max(0, ...cryptoPools.flatMap((p: any) => (p.markets || []).map((m: any) => Number(m.marketEnd || 0) > 1e12 ? Number(m.marketEnd) / 1000 : Number(m.marketEnd || 0))));
+      const lag = latestEnd ? Math.round(Date.now() / 1000 - latestEnd) : -1;
+      console.log(`[XARB] Triad API: ✅ (${cryptoPools.length} crypto fast-market pools, feedLag=${lag}s)`);
     } else {
       console.warn(`[XARB] ⚠️ Triad API error: ${triadTest.status}`);
     }
