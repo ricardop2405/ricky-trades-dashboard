@@ -100,8 +100,8 @@ let executionLock = false;
 let emergencyStopped = false;
 let lastJitoRequestAt = 0;
 
-// ── Proxy for Jupiter (region-blocked) ──────────────────
-const PROXY_URL = process.env.PROXY_URL || "";
+// ── Proxy for market APIs (Triad/Jupiter) ───────────────
+const PROXY_URL = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.ALL_PROXY || process.env.HTTP_PROXY || "";
 let proxyAgent: any = null;
 if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("placeholder")) {
   if (PROXY_URL.startsWith("socks")) {
@@ -109,6 +109,7 @@ if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("place
   } else {
     proxyAgent = new HttpsProxyAgent(PROXY_URL);
   }
+  console.log(`[PROXY] Routing market API traffic through proxy: ${PROXY_URL.replace(/\/\/.*@/, "//***@")}`);
 }
 
 async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 30000): Promise<Response> {
