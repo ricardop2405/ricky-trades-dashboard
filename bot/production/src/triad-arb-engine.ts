@@ -116,6 +116,11 @@ async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 5000)
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`Fetch timed out after ${timeoutMs}ms: ${url.split("?")[0]}`);
+    }
+    throw err;
   } finally {
     clearTimeout(timeout);
   }
