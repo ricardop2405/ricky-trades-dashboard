@@ -100,8 +100,8 @@ let executionLock = false;
 let emergencyStopped = false;
 let lastJitoRequestAt = 0;
 
-// ── Proxy for Jupiter (region-blocked) ──────────────────
-const PROXY_URL = process.env.PROXY_URL || "";
+// ── Proxy for market APIs (Triad/Jupiter) ───────────────
+const PROXY_URL = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.ALL_PROXY || process.env.HTTP_PROXY || "";
 let proxyAgent: any = null;
 if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("placeholder")) {
   if (PROXY_URL.startsWith("socks")) {
@@ -109,6 +109,7 @@ if (PROXY_URL && !PROXY_URL.includes("your-proxy") && !PROXY_URL.includes("place
   } else {
     proxyAgent = new HttpsProxyAgent(PROXY_URL);
   }
+  console.log(`[PROXY] Routing market API traffic through proxy: ${PROXY_URL.replace(/\/\/.*@/, "//***@")}`);
 }
 
 async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 30000): Promise<Response> {
@@ -320,11 +321,14 @@ const TRIAD_HEADERS: Record<string, string> = {
   "Accept": "application/json",
   "Referer": "https://triadfi.co/",
   "Origin": "https://triadfi.co",
+  "Cache-Control": "no-cache, no-store, max-age=0",
+  "Pragma": "no-cache",
 };
 
 async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
   try {
-    const res = await triadFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 10000);
+    const requestTs = Date.now();
+    const res = await triadFetch(`${TRIAD_API}/market/fast?lang=en-US&_ts=${requestTs}`, { headers: TRIAD_HEADERS }, 10000);
     if (!res.ok) {
       console.warn(`[TRIAD] API returned ${res.status}`);
       return [];
@@ -345,16 +349,12 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
       const isFastMarket = m.isFast === true || m.isFast === "true" || m.type === "fast";
 
       if (!isFastMarket) return { open: false, reason: "not-fast" };
-
-      // Primary check: is the market still within its time window?
       if (marketEnd && marketEnd < now) return { open: false, reason: `ended ${Math.round(now - marketEnd)}s ago` };
       if (marketStart && marketStart > now) return { open: false, reason: `starts in ${Math.round(marketStart - now)}s` };
 
-      // Secondary: explicit settlement signals
       const statusStr = String(m.status || "").toLowerCase();
       if (["settled", "closed", "resolved"].includes(statusStr)) return { open: false, reason: `status=${statusStr}` };
 
-      // winningDirection set AND market ended = settled; otherwise could be live display
       const wd = String(m.winningDirection || "").toLowerCase();
       if (wd !== "" && wd !== "none" && marketEnd && marketEnd < now) {
         return { open: false, reason: `settled(wd=${m.winningDirection})` };
@@ -363,10 +363,10 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
       return { open: true };
     };
 
-    // Always log pool summary (compact)
     const verbose = scanCount <= 1 || scanCount % 50 === 0;
     let totalRaw = 0;
     let totalPassed = 0;
+    let newestEnd = 0;
 
     for (const pool of pools) {
       const coin = (pool.coin || "").toLowerCase();
@@ -375,34 +375,42 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
       totalRaw += allMarkets.length;
 
       for (const m of allMarkets) {
+        const marketEnd = normalizeTriadTimestamp(m.marketEnd);
+        if (marketEnd > newestEnd) newestEnd = marketEnd;
+
         const result = isTriadMarketOpen(m);
         if (result.open) {
           markets.push({ ...m, coin });
           totalPassed++;
         } else if (verbose && allMarkets.length > 0) {
-          const mEnd = normalizeTriadTimestamp(m.marketEnd);
           console.log(
             `  [TRIAD-DEBUG] ${pool.coin} market REJECTED: ${result.reason} ` +
-            `(wd=${m.winningDirection} payout=${m.isAllowedToPayout} ` +
-            `end=${mEnd ? new Date(mEnd * 1000).toISOString() : "n/a"})`
+            `(wd=${m.winningDirection} payout=${m.isAllowedToPayout} ts=${m.timestamp ?? "n/a"} ` +
+            `start=${m.marketStart ?? "n/a"} end=${m.marketEnd ?? "n/a"})`
           );
         }
       }
 
       if (verbose && allMarkets.length > 0) {
         const sample = allMarkets[0];
+        const sampleStart = normalizeTriadTimestamp(sample.marketStart);
         const sampleEnd = normalizeTriadTimestamp(sample.marketEnd);
-        console.log(`  [TRIAD-DEBUG] Pool "${pool.coin}": ${allMarkets.length} raw, keys: ${Object.keys(sample).slice(0, 10).join(",")}`);
+        console.log(`  [TRIAD-DEBUG] Pool "${pool.coin}": ${allMarkets.length} raw, keys: ${Object.keys(sample).slice(0, 12).join(",")}`);
         console.log(
           `    wd="${sample.winningDirection}" isFast=${sample.isFast} payout=${sample.isAllowedToPayout} ` +
+          `start=${sampleStart ? new Date(sampleStart * 1000).toISOString() : "n/a"} ` +
           `end=${sampleEnd ? new Date(sampleEnd * 1000).toISOString() : "n/a"} now=${new Date(now * 1000).toISOString()}`
         );
       }
     }
 
-    // Always log summary on every scan
     if (scanCount % 5 === 0) {
-      console.log(`  [TRIAD] ${totalPassed}/${totalRaw} markets passed filter across ${pools.length} pools`);
+      const newestEndIso = newestEnd ? new Date(newestEnd * 1000).toISOString() : "n/a";
+      const feedLagSec = newestEnd ? Math.round(now - newestEnd) : -1;
+      console.log(`  [TRIAD] ${totalPassed}/${totalRaw} markets passed filter across ${pools.length} pools | newestEnd=${newestEndIso} | feedLag=${feedLagSec}s`);
+      if (newestEnd && now - newestEnd > 300) {
+        console.warn(`  [TRIAD] Feed appears stale by ${Math.round(now - newestEnd)}s — upstream/proxy is serving old fast markets`);
+      }
     }
 
     return markets;
@@ -1924,11 +1932,13 @@ async function main() {
     console.log(`[XARB] USDC balance: $${funding.usdcBalance.toFixed(2)}`);
 
     // Verify Triad API
-    const triadTest = await triadFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 30000);
+    const triadTest = await triadFetch(`${TRIAD_API}/market/fast?lang=en-US&_ts=${Date.now()}`, { headers: TRIAD_HEADERS }, 30000);
     if (triadTest.ok) {
       const pools = await triadTest.json() as any[];
       const cryptoPools = pools.filter((p: any) => FAST_MARKET_COINS.includes((p.coin || "").toLowerCase()));
-      console.log(`[XARB] Triad API: ✅ (${cryptoPools.length} crypto fast-market pools)`);
+      const latestEnd = Math.max(0, ...cryptoPools.flatMap((p: any) => (p.markets || []).map((m: any) => Number(m.marketEnd || 0) > 1e12 ? Number(m.marketEnd) / 1000 : Number(m.marketEnd || 0))));
+      const lag = latestEnd ? Math.round(Date.now() / 1000 - latestEnd) : -1;
+      console.log(`[XARB] Triad API: ✅ (${cryptoPools.length} crypto fast-market pools, feedLag=${lag}s)`);
     } else {
       console.warn(`[XARB] ⚠️ Triad API error: ${triadTest.status}`);
     }
