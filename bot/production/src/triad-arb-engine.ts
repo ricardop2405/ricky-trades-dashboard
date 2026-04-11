@@ -306,8 +306,25 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
     }
     const pools = await res.json() as any[];
     const markets: TriadFastMarket[] = [];
+    const now = Date.now() / 1000;
 
-    // Debug: log raw pool structure on first scan or every 50 scans
+    const normalizeTriadTimestamp = (value: unknown): number => {
+      const num = Number(value ?? 0);
+      if (!Number.isFinite(num) || num <= 0) return 0;
+      return num > 1e12 ? num / 1000 : num;
+    };
+
+    const isTriadMarketOpen = (m: any): boolean => {
+      const marketEnd = normalizeTriadTimestamp(m.marketEnd);
+      const isFastMarket = m.isFast === true || m.isFast === "true" || m.type === "fast";
+      const isActiveFlag = m.isActive !== false;
+      const isNotClosed = !["settled", "closed", "resolved"].includes(String(m.status || "").toLowerCase());
+      const isNotPayoutable = m.isAllowedToPayout !== true;
+      const isStillLive = !marketEnd || marketEnd > now - 15;
+
+      return isFastMarket && isActiveFlag && isNotClosed && isNotPayoutable && isStillLive;
+    };
+
     if (scanCount <= 1 || scanCount % 50 === 0) {
       for (const pool of pools) {
         const coin = (pool.coin || "").toLowerCase();
@@ -316,13 +333,16 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
         console.log(`  [TRIAD-DEBUG] Pool "${pool.coin}": ${allMarkets.length} total markets`);
         if (allMarkets.length > 0) {
           const sample = allMarkets[0];
+          const sampleEnd = normalizeTriadTimestamp(sample.marketEnd);
           console.log(`    Sample market keys: ${Object.keys(sample).join(", ")}`);
-          console.log(`    winningDirection="${sample.winningDirection}" isFast=${sample.isFast} status="${sample.status}" isActive=${sample.isActive}`);
+          console.log(
+            `    winningDirection="${sample.winningDirection}" isFast=${sample.isFast} ` +
+            `status="${sample.status}" isActive=${sample.isActive} isAllowedToPayout=${sample.isAllowedToPayout} ` +
+            `marketEnd=${sampleEnd ? new Date(sampleEnd * 1000).toISOString() : "n/a"}`
+          );
         }
-        // Count how many pass filter vs not
-        const passing = allMarkets.filter((m: any) => m.winningDirection === "None" && m.isFast);
-        const activeOnly = allMarkets.filter((m: any) => !m.winningDirection || m.winningDirection === "None");
-        console.log(`    Filter: ${passing.length} pass (winDir=None+isFast), ${activeOnly.length} unsettled, ${allMarkets.length} total`);
+        const passing = allMarkets.filter((m: any) => isTriadMarketOpen(m));
+        console.log(`    Filter: ${passing.length} pass (time+activity-based), ${allMarkets.length} total`);
       }
     }
 
@@ -330,17 +350,13 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
       const coin = (pool.coin || "").toLowerCase();
       if (!FAST_MARKET_COINS.includes(coin)) continue;
 
-      for (const m of (pool.markets || [])) {
-        // Accept markets that are open/unsettled — handle both old and new API shapes
-        const isUnsettled = !m.winningDirection || m.winningDirection === "None" || m.winningDirection === "none";
-        const isFastMarket = m.isFast === true || m.isFast === "true" || m.type === "fast";
-        const isActive = m.status !== "settled" && m.status !== "closed" && m.isActive !== false;
-        
-        if (isUnsettled && (isFastMarket || true) && isActive) {
+      for (const m of pool.markets || []) {
+        if (isTriadMarketOpen(m)) {
           markets.push({ ...m, coin });
         }
       }
     }
+
     return markets;
   } catch (err) {
     console.error("[TRIAD] Fetch error:", err instanceof Error ? err.message : err);
