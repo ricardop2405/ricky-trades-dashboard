@@ -339,47 +339,70 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
       return num > 1e12 ? num / 1000 : num;
     };
 
-    const isTriadMarketOpen = (m: any): boolean => {
+    const isTriadMarketOpen = (m: any): { open: boolean; reason?: string } => {
       const marketEnd = normalizeTriadTimestamp(m.marketEnd);
+      const marketStart = normalizeTriadTimestamp(m.marketStart);
       const isFastMarket = m.isFast === true || m.isFast === "true" || m.type === "fast";
-      const isActiveFlag = m.isActive !== false;
-      const isNotClosed = !["settled", "closed", "resolved"].includes(String(m.status || "").toLowerCase());
-      const isNotPayoutable = m.isAllowedToPayout !== true;
-      const isStillLive = !marketEnd || marketEnd > now - 15;
 
-      return isFastMarket && isActiveFlag && isNotClosed && isNotPayoutable && isStillLive;
+      if (!isFastMarket) return { open: false, reason: "not-fast" };
+
+      // Primary check: is the market still within its time window?
+      if (marketEnd && marketEnd < now) return { open: false, reason: `ended ${Math.round(now - marketEnd)}s ago` };
+      if (marketStart && marketStart > now) return { open: false, reason: `starts in ${Math.round(marketStart - now)}s` };
+
+      // Secondary: explicit settlement signals
+      const statusStr = String(m.status || "").toLowerCase();
+      if (["settled", "closed", "resolved"].includes(statusStr)) return { open: false, reason: `status=${statusStr}` };
+
+      // winningDirection set AND market ended = settled; otherwise could be live display
+      const wd = String(m.winningDirection || "").toLowerCase();
+      if (wd !== "" && wd !== "none" && marketEnd && marketEnd < now) {
+        return { open: false, reason: `settled(wd=${m.winningDirection})` };
+      }
+
+      return { open: true };
     };
 
-    if (scanCount <= 1 || scanCount % 50 === 0) {
-      for (const pool of pools) {
-        const coin = (pool.coin || "").toLowerCase();
-        if (!FAST_MARKET_COINS.includes(coin)) continue;
-        const allMarkets = pool.markets || [];
-        console.log(`  [TRIAD-DEBUG] Pool "${pool.coin}": ${allMarkets.length} total markets`);
-        if (allMarkets.length > 0) {
-          const sample = allMarkets[0];
-          const sampleEnd = normalizeTriadTimestamp(sample.marketEnd);
-          console.log(`    Sample market keys: ${Object.keys(sample).join(", ")}`);
-          console.log(
-            `    winningDirection="${sample.winningDirection}" isFast=${sample.isFast} ` +
-            `status="${sample.status}" isActive=${sample.isActive} isAllowedToPayout=${sample.isAllowedToPayout} ` +
-            `marketEnd=${sampleEnd ? new Date(sampleEnd * 1000).toISOString() : "n/a"}`
-          );
-        }
-        const passing = allMarkets.filter((m: any) => isTriadMarketOpen(m));
-        console.log(`    Filter: ${passing.length} pass (time+activity-based), ${allMarkets.length} total`);
-      }
-    }
+    // Always log pool summary (compact)
+    const verbose = scanCount <= 1 || scanCount % 50 === 0;
+    let totalRaw = 0;
+    let totalPassed = 0;
 
     for (const pool of pools) {
       const coin = (pool.coin || "").toLowerCase();
       if (!FAST_MARKET_COINS.includes(coin)) continue;
+      const allMarkets = pool.markets || [];
+      totalRaw += allMarkets.length;
 
-      for (const m of pool.markets || []) {
-        if (isTriadMarketOpen(m)) {
+      for (const m of allMarkets) {
+        const result = isTriadMarketOpen(m);
+        if (result.open) {
           markets.push({ ...m, coin });
+          totalPassed++;
+        } else if (verbose && allMarkets.length > 0) {
+          const mEnd = normalizeTriadTimestamp(m.marketEnd);
+          console.log(
+            `  [TRIAD-DEBUG] ${pool.coin} market REJECTED: ${result.reason} ` +
+            `(wd=${m.winningDirection} payout=${m.isAllowedToPayout} ` +
+            `end=${mEnd ? new Date(mEnd * 1000).toISOString() : "n/a"})`
+          );
         }
       }
+
+      if (verbose && allMarkets.length > 0) {
+        const sample = allMarkets[0];
+        const sampleEnd = normalizeTriadTimestamp(sample.marketEnd);
+        console.log(`  [TRIAD-DEBUG] Pool "${pool.coin}": ${allMarkets.length} raw, keys: ${Object.keys(sample).slice(0, 10).join(",")}`);
+        console.log(
+          `    wd="${sample.winningDirection}" isFast=${sample.isFast} payout=${sample.isAllowedToPayout} ` +
+          `end=${sampleEnd ? new Date(sampleEnd * 1000).toISOString() : "n/a"} now=${new Date(now * 1000).toISOString()}`
+        );
+      }
+    }
+
+    // Always log summary on every scan
+    if (scanCount % 5 === 0) {
+      console.log(`  [TRIAD] ${totalPassed}/${totalRaw} markets passed filter across ${pools.length} pools`);
     }
 
     return markets;
