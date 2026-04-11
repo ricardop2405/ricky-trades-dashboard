@@ -126,6 +126,31 @@ async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = 30000
   }
 }
 
+// Proxy-aware fetch for Triad API (bypasses Cloudflare)
+async function triadFetch(url: string, init: RequestInit = {}, timeoutMs = 15000): Promise<Response> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if (!proxyAgent) return await timedFetch(url, init, timeoutMs);
+      const nodeFetch = (await import("node-fetch")).default;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await nodeFetch(url, {
+          ...init,
+          agent: proxyAgent,
+          signal: controller.signal,
+        } as any) as unknown as Response;
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (err) {
+      if (attempt === 0) { await sleep(500); continue; }
+      throw err;
+    }
+  }
+  return await timedFetch(url, init, timeoutMs); // final fallback
+}
+
 async function jupFetch(url: string, init?: RequestInit): Promise<Response> {
   let lastError: unknown = null;
 
