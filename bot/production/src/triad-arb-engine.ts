@@ -79,7 +79,7 @@ const EXECUTION_BUNDLE_COUNT = 1; // Single atomic bundle (Triad + Jupiter + Tip
 const MIN_JUPITER_DEPOSIT_USD = parseFloat(process.env.TRIAD_MIN_JUP_DEPOSIT_USD || "1.0");
 const MIN_SOL_BALANCE = parseFloat(process.env.TRIAD_MIN_SOL_BALANCE || "0.05");
 const MIN_MARKET_SECONDS_REMAINING = parseInt(process.env.TRIAD_MIN_MARKET_SECONDS_REMAINING || "35");
-const PREHEDGE_REQUOTE_ATTEMPTS = parseInt(process.env.TRIAD_PREHEDGE_REQUOTE_ATTEMPTS || "3");
+const PREHEDGE_REQUOTE_ATTEMPTS = parseInt(process.env.TRIAD_PREHEDGE_REQUOTE_ATTEMPTS || "5");
 
 // ── SUM-TO-ONE HARD CEILING ──
 // CRITICAL SAFETY: costA + costB must be STRICTLY below this per contract.
@@ -279,7 +279,7 @@ async function stabilizeExecutableCandidate(
       return null;
     }
 
-    const changed = Math.abs(refreshed.costB - current.costB) >= 0.005 || refreshed.contracts !== current.contracts;
+    const changed = Math.abs(refreshed.costB - current.costB) >= 0.02 || refreshed.contracts !== current.contracts;
     current = refreshed;
 
     if (!changed) return current;
