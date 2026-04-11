@@ -255,7 +255,7 @@ function isSafeCombinedCost(totalCost: number): boolean {
 
 async function stabilizeExecutableCandidate(
   candidate: MergeArbCandidate,
-  options: { fixedContracts?: number; tipLamports?: number; attempts?: number } = {}
+  options: { fixedContracts?: number; tipLamports?: number; attempts?: number; skipMinDeposit?: boolean } = {}
 ): Promise<MergeArbCandidate | null> {
   const attempts = Math.max(1, options.attempts ?? PREHEDGE_REQUOTE_ATTEMPTS);
   let current: MergeArbCandidate | null = candidate;
@@ -265,6 +265,7 @@ async function stabilizeExecutableCandidate(
     const refreshed = await refreshJupCandidate(current, {
       fixedContracts: options.fixedContracts,
       tipLamports: options.tipLamports,
+      skipMinDeposit: options.skipMinDeposit,
     });
     if (!refreshed) return null;
 
