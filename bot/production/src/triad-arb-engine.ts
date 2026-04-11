@@ -321,6 +321,8 @@ const TRIAD_HEADERS: Record<string, string> = {
   "Accept": "application/json",
   "Referer": "https://triadfi.co/",
   "Origin": "https://triadfi.co",
+  "Cache-Control": "no-cache, no-store, max-age=0",
+  "Pragma": "no-cache",
 };
 
 async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
