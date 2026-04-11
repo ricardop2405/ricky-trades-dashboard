@@ -324,7 +324,7 @@ const TRIAD_HEADERS: Record<string, string> = {
 
 async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
   try {
-    const res = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 5000);
+    const res = await triadFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 10000);
     if (!res.ok) {
       console.warn(`[TRIAD] API returned ${res.status}`);
       return [];
@@ -391,7 +391,7 @@ async function fetchAllTriadFastMarkets(): Promise<TriadFastMarket[]> {
 
 async function fetchTriadOrderbook(marketId: string): Promise<TriadOrderbook | null> {
   try {
-    const res = await timedFetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS }, 5000);
+    const res = await triadFetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS }, 10000);
     if (!res.ok) return null;
     const ob = await res.json();
 
@@ -427,7 +427,7 @@ async function fetchTriadAskDepth(
   requiredContracts = Number.POSITIVE_INFINITY,
 ): Promise<{ totalContracts: number; avgPrice: number; worstPrice: number }> {
   try {
-    const res = await timedFetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS }, 5000);
+    const res = await triadFetch(`${TRIAD_API}/market/${marketId}/orderbook`, { headers: TRIAD_HEADERS }, 10000);
     if (!res.ok) {
       console.warn(`[DEPTH] Orderbook fetch failed for ${marketId}/${side}: ${res.status}`);
       return { totalContracts: 0, avgPrice: 0, worstPrice: 0 };
@@ -1901,7 +1901,7 @@ async function main() {
     console.log(`[XARB] USDC balance: $${funding.usdcBalance.toFixed(2)}`);
 
     // Verify Triad API
-    const triadTest = await timedFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 30000);
+    const triadTest = await triadFetch(`${TRIAD_API}/market/fast?lang=en-US`, { headers: TRIAD_HEADERS }, 30000);
     if (triadTest.ok) {
       const pools = await triadTest.json() as any[];
       const cryptoPools = pools.filter((p: any) => FAST_MARKET_COINS.includes((p.coin || "").toLowerCase()));
